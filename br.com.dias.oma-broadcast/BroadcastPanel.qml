@@ -34,6 +34,8 @@ Item {
   readonly property bool available: Model.available(record)
   readonly property var visual: Model.visualFor(Model.visualKey(record))
   readonly property var message: Model.unavailableMessage(record)
+  // The last command failure; a path it ends on is drawn on a line of its own.
+  readonly property var commandErrorParts: Model.commandErrorParts(Daemon.commandError)
   readonly property var statsRows: Model.statsRows(record)
   readonly property var cameras: record.cameras
   readonly property string heroMeta: Model.heroMeta(record)
@@ -289,6 +291,20 @@ Item {
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
           }
+          // A file path the title ends on, on a line of its own. It wraps at
+          // any character, without preferring a "/": the break falls wherever
+          // the line is full, so the path reads as one string that ran on.
+          Text {
+            objectName: "unavailablePath"
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.WrapAnywhere
+            visible: text !== ""
+            text: root.message.path
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
           Text {
             textFormat: Text.PlainText
             width: parent.width
@@ -337,17 +353,37 @@ Item {
           font.pixelSize: Style.font.bodySmall
         }
 
-        // ---- the last control command's failure
-        Text {
-          objectName: "commandError"
-          textFormat: Text.PlainText
+        // ---- the last control command's failure; its text and the path it
+        // may end on read as one message, so they sit close together
+        Column {
+          objectName: "commandErrorBlock"
           width: parent.width
-          wrapMode: Text.Wrap
-          visible: text !== ""
-          text: Daemon.commandError
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
+          spacing: Style.space(6)
+          visible: root.commandErrorParts.text !== ""
+
+          Text {
+            objectName: "commandError"
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            visible: text !== ""
+            text: root.commandErrorParts.text
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+          // The path a CLI-missing failure ends on (same reasoning as above).
+          Text {
+            objectName: "commandErrorPath"
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.WrapAnywhere
+            visible: text !== ""
+            text: root.commandErrorParts.path
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
         }
 
         // ---- status

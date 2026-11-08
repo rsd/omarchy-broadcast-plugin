@@ -666,9 +666,69 @@ TestCase {
     compare(m.commandText, "systemctl --user start oma-broadcastd")
     compare(Model.unavailableMessage(snap()).title, "")
     var c = Model.unavailableMessage(Model.withLink("cli-missing", "oma-broadcast CLI not found: /nope"))
-    compare(c.title, "oma-broadcast CLI not found: /nope")
-    compare(Model.unavailableMessage(Model.emptyRecord("cli-missing")).title, "oma-broadcast CLI not found")
+    compare(c.title, "oma-broadcast CLI not found:")
+    compare(c.path, "/nope")
+    var none = Model.unavailableMessage(Model.emptyRecord("cli-missing"))
+    compare(none.title, "oma-broadcast CLI not found")
+    compare(none.path, "")
     verify(Model.unavailableMessage(Model.emptyRecord("unreachable")).title !== m.title, "unreachable reads differently")
+  }
+
+  // A path is never left inside a wrapping title: it is split off to a line of
+  // its own, drawn with wrapping at any character. Every message that can carry
+  // one is covered: the configured cliPath, the resolver's miss, the command failure.
+  function test_paths_leave_the_title() {
+    var cases = [
+      Model.CLI_MISSING_TEXT + ": /nonexistent/oma-broadcast",
+      Model.CLI_MISSING_TEXT + ": /home/a b/with space/oma-broadcast",
+      Model.resolverMissText("/p/br.com.dias.oma-broadcast")
+    ]
+    var paths = ["/nonexistent/oma-broadcast", "/home/a b/with space/oma-broadcast",
+                 "/p/br.com.dias.oma-broadcast/../../../target/release/oma-broadcast"]
+    for (var i = 0; i < cases.length; i++) {
+      var m = Model.unavailableMessage(Model.withLink("cli-missing", cases[i]))
+      compare(m.path, paths[i], cases[i])
+      verify(m.title.indexOf("/") === -1, "no slash left in the title: " + m.title)
+      compare(m.title + " " + m.path, cases[i], "nothing lost")
+      compare(m.detail, "")
+      verify(m.hint.indexOf("\n") !== -1 && m.hint.split("\n").every(function(l) { return l.length <= 32 }),
+             "short hint lines")
+    }
+    // No path in the text: the title is the whole text, the path empty.
+    for (var reason of ["cliPath must be an absolute path", "HOME is not set",
+                        "the cliPath setting is not text", Model.resolverMissText("")]) {
+      var r = Model.unavailableMessage(Model.withLink("cli-missing", reason))
+      compare(r.path, "", reason)
+      compare(r.title, reason)
+    }
+    // The other links carry no path of their own: path is always present and empty.
+    var links = ["connecting", "ok", "not-running", "unreachable", "cli-failed", "unsupported"]
+    for (var k = 0; k < links.length; k++)
+      compare(Model.unavailableMessage(Model.withLink(links[k], "text")).path, "", links[k])
+    compare(Model.unavailableMessage(snap({ state: "dancing" })).path, "")
+    // The command failure: only the CLI-missing text is split.
+    var f = Model.commandErrorParts(Model.commandFailureText(-1, "", "/nope/oma-broadcast"))
+    compare(f.text, "oma-broadcast CLI not found:")
+    compare(f.path, "/nope/oma-broadcast")
+    var g = Model.commandErrorParts(Model.commandFailureText(1, "oma-broadcast: no camera matches /dev/video3 now", cli))
+    compare(g.path, "", "the CLI's own words are shown whole")
+    compare(g.text, "The daemon refused the request: no camera matches /dev/video3 now")
+    // A path that itself holds " /": everything after the first one is the path.
+    var sp = Model.commandErrorParts(Model.CLI_MISSING_TEXT + ": /a /b/c")
+    compare(sp.text, Model.CLI_MISSING_TEXT + ":")
+    compare(sp.path, "/a /b/c")
+    var sm = Model.unavailableMessage(Model.withLink("cli-missing", Model.CLI_MISSING_TEXT + ": /a /b/c"))
+    compare(sm.path, "/a /b/c")
+    // No cliPath: the whole text, an empty path.
+    var np = Model.commandErrorParts(Model.commandFailureText(-1, "", ""))
+    compare(np.text, Model.CLI_MISSING_TEXT + ":", "the text is trimmed, nothing to split")
+    compare(np.path, "")
+    compare(Model.commandErrorParts("").text, "")
+    compare(Model.commandErrorParts("").path, "")
+    compare(Model.commandErrorParts(undefined).text, "")
+    // Hostile text stays plain: the split never adds markup, the sanitising is the record's.
+    var h = Model.unavailableMessage(Model.withLink("cli-missing", "x <img src=\"http://a/b\"> /p/<b>q&r"))
+    verify(!/[<>&]/.test(h.title + h.path), h.title + "|" + h.path)
   }
 
   function test_command_failure_text() {
