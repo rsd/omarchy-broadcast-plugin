@@ -49,6 +49,9 @@ var STDERR_CAP = 512
 var DETAIL_CAP = 200
 var TOOLTIP_CAP = 200
 var PATH_CAP = 4096
+
+// The CLI-missing message; where it names a path, the path follows ": ".
+var CLI_MISSING_TEXT = "oma-broadcast CLI not found"
 // Sane upper bounds for figures: anything above reads as unknown.
 var COUNT_MAX = 1000000
 var STAT_MAX = 1000000
@@ -484,7 +487,7 @@ function linkLabel(record) {
   case "ok": return ""
   case "not-running": return "daemon not running"
   case "unreachable": return "daemon unreachable"
-  case "cli-missing": return "oma-broadcast CLI not found"
+  case "cli-missing": return CLI_MISSING_TEXT
   case "cli-failed": return "oma-broadcast watch stopped"
   case "unsupported": return "unsupported oma-broadcast version"
   default: return "connecting\u2026"
@@ -521,39 +524,64 @@ function tooltipText(record) {
   return sanitize(text, TOOLTIP_CAP)
 }
 
+// Where a message about a missing program ends on a path, the path is split
+// off to draw on a line of its own: `text` is what comes before it, `path` the
+// rest (the path may hold spaces, so everything after the first " /" is the
+// path). A text with no " /" after a non-empty start comes back whole, with an
+// empty path. The panel draws the path on its own line, wrapping at any
+// character (it does not prefer a "/"), so a long path reads as one string.
+// Only for strings this plugin builds with the path last (the CLI-missing
+// messages): it is not a general parser for daemon text.
+function splitTrailingPath(text) {
+  var m = typeof text === "string" ? /^(\S[\s\S]*?) (\/[\s\S]*)$/.exec(text) : null
+  return m ? { text: m[1], path: m[2] } : { text: typeof text === "string" ? text : "", path: "" }
+}
+
+// The text of the last control command's failure for the panel, split the same
+// way when it is the CLI-missing one (its text is built here, path last); any
+// other failure carries the CLI's own words and is shown whole.
+function commandErrorParts(text) {
+  if (typeof text === "string" && text.indexOf(CLI_MISSING_TEXT + ": ") === 0) return splitTrailingPath(text)
+  return { text: typeof text === "string" ? text : "", path: "" }
+}
+
 // The panel's message when the daemon cannot be used:
-// { title, detail, hint, commandText }. `commandText` is plain text the user can copy
-// (drawn on a line of its own); the plugin never runs it.
+// { title, path, detail, hint, commandText }. `path` is a file path the title
+// ends on (see splitTrailingPath), drawn on a line of its own; `commandText` is
+// plain text the user can copy (drawn on a line of its own); the plugin never
+// runs it.
 function unavailableMessage(record) {
   var link = record ? record.link : "connecting"
   var detail = record ? record.linkText : ""
   if (unknownState(record)) {
     return { title: "oma-broadcastd reports a state this plugin does not know"
                + (record.rawState !== "" ? ": " + record.rawState : ""),
-             detail: "", hint: "Update the plugin.", commandText: "" }
+             path: "", detail: "", hint: "Update the plugin.", commandText: "" }
   }
   switch (link) {
   case "ok":
-    return { title: "", detail: "", hint: "", commandText: "" }
+    return { title: "", path: "", detail: "", hint: "", commandText: "" }
   case "not-running":
-    return { title: "oma-broadcastd is not running", detail: "",
+    return { title: "oma-broadcastd is not running", path: "", detail: "",
              hint: "Start it with:", commandText: "systemctl --user start oma-broadcastd" }
   case "unreachable":
-    return { title: "oma-broadcastd is not answering", detail: detail,
+    return { title: "oma-broadcastd is not answering", path: "", detail: detail,
              hint: "Retrying every 2 s. Its log:", commandText: "journalctl --user -u oma-broadcastd" }
   case "cli-missing":
-    return { title: detail !== "" ? detail : "oma-broadcast CLI not found", detail: "",
+    // The text ends on the path it searched or was given, when it names one.
+    var parts = splitTrailingPath(detail !== "" ? detail : CLI_MISSING_TEXT)
+    return { title: parts.text, path: parts.path, detail: "",
              hint: "Install it:\n"
                + "Arch package: /usr/bin\n"
                + "install-user.sh: ~/.local/bin\n"
                + "Or set the cliPath setting.",
              commandText: "" }
   case "cli-failed":
-    return { title: "oma-broadcast watch stopped", detail: detail, hint: "", commandText: "" }
+    return { title: "oma-broadcast watch stopped", path: "", detail: detail, hint: "", commandText: "" }
   case "unsupported":
-    return { title: "Unsupported oma-broadcast version", detail: detail, hint: "", commandText: "" }
+    return { title: "Unsupported oma-broadcast version", path: "", detail: detail, hint: "", commandText: "" }
   default:
-    return { title: "Connecting to oma-broadcastd\u2026", detail: "", hint: "", commandText: "" }
+    return { title: "Connecting to oma-broadcastd\u2026", path: "", detail: "", hint: "", commandText: "" }
   }
 }
 
@@ -718,7 +746,7 @@ function commandFailureText(code, stderrLine, cliPath) {
   detail = sanitize(detail, DETAIL_CAP)
   var text
   switch (code) {
-  case -1: text = "oma-broadcast CLI not found: " + (typeof cliPath === "string" ? cliPath : ""); break
+  case -1: text = CLI_MISSING_TEXT + ": " + (typeof cliPath === "string" ? cliPath : ""); break
   case 1: text = "The daemon refused the request" + (detail !== "" ? ": " + detail : ""); break
   case 2: text = "Invalid command line (a plugin bug)" + (detail !== "" ? ": " + detail : ""); break
   case 3: text = "oma-broadcastd is not running"; break

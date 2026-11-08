@@ -233,7 +233,7 @@ Singleton {
         + " characters, which no schema v1 producer does; restarting in " + Math.round(delay / 1000) + " s")
     } else if (!started) {
       watchStartFailures++
-      record = Model.withLink("cli-missing", "oma-broadcast CLI not found: " + cliPath)
+      record = Model.withLink("cli-missing", Model.CLI_MISSING_TEXT + ": " + cliPath)
       // A searched binary may have moved (cargo clean, an uninstall): look
       // again, once for this failure. A configured path is the user's.
       if (cliSource !== "setting") scheduleResolve()

@@ -1126,6 +1126,17 @@ ShellRoot {
       h.eq("left click opens the panel", A().opened, true)
     })
     h.countStep(0, "with a missing CLI")
+    h.step("the path is on a line of its own, never wrapped at a slash", function() {
+      var title = h.find(A(), "unavailableTitle")
+      var path = h.find(A(), "unavailablePath")
+      h.eq("title", title.text, "oma-broadcast CLI not found:")
+      h.eq("path", path.text, "/nonexistent/oma-broadcast")
+      h.eq("path visible", path.visible, true)
+      h.eq("path wraps anywhere", path.wrapMode, Text.WrapAnywhere)
+      h.check("title holds no slash to wrap at", title.text.indexOf("/") === -1, title.text)
+      h.eq("title on one line", title.lineCount, 1)
+      h.eq("path on one line", path.lineCount, 1)
+    })
     h.grabStep(function() { return A().popup }, "panel-cli-missing.png")
     h.step("3.5 s of a missing binary", function() {}, function() { return Date.now() - h.mark >= 3500 }, 5000)
     h.step("start attempts bounded by the backoff", function() {
@@ -1134,6 +1145,38 @@ ShellRoot {
       h.check("2 or 3 attempts in 3.5 s (0, 1, 3 s)", n >= 2 && n <= 3, n)
       h.eq("a configured path is not re-resolved", S().resolverRuns - h.notes.resolves, 0)
     })
+
+    // a path longer than the panel is wide wraps inside the name, never at a slash
+    h.step("cliPath -> a long path", function() {
+      h.notes.longPath = "/nonexistent/a-rather-long-directory-name/another-long-directory/oma-broadcast-build/release/oma-broadcast"
+      A().settings = { cliPath: h.notes.longPath }
+    }, function() { return S().record.linkText === h.model.CLI_MISSING_TEXT + ": " + h.notes.longPath })
+    h.step("long path on its own wrapping line", function() {
+      var path = h.find(A(), "unavailablePath")
+      h.eq("title", h.find(A(), "unavailableTitle").text, "oma-broadcast CLI not found:")
+      h.eq("path kept whole", path.text, h.notes.longPath)
+      h.check("it needs more than one line", path.lineCount > 1, path.lineCount)
+    })
+    h.grabStep(function() { return A().popup }, "panel-cli-missing-long.png")
+
+    // the same path in a failed control command (the CLI would not start)
+    h.step("command error with a long path", function() {
+      S().commandError = h.model.commandFailureText(-1, "", h.notes.longPath)
+    }, function() { return h.find(A(), "commandErrorPath").visible })
+    h.step("command error path on its own line, close to its text", function() {
+      var block = h.find(A(), "commandErrorBlock")
+      var text = h.find(A(), "commandError")
+      var path = h.find(A(), "commandErrorPath")
+      h.eq("text", text.text, "oma-broadcast CLI not found:")
+      h.eq("path kept whole", path.text, h.notes.longPath)
+      h.eq("block visible", block.visible, true)
+      h.eq("path wraps anywhere", path.wrapMode, Text.WrapAnywhere)
+      h.check("path needs more than one line", path.lineCount > 1, path.lineCount)
+      h.check("path sits below the text, closer than the panel's row spacing",
+              path.y > text.y && path.y - (text.y + text.height) < 12, path.y - (text.y + text.height))
+    })
+    h.grabStep(function() { return A().popup }, "panel-command-error-long.png")
+    h.step("command error cleared", function() { S().commandError = "" })
 
     // a relative cliPath runs nothing
     h.step("cliPath -> bare name", function() {
@@ -1148,6 +1191,7 @@ ShellRoot {
       h.eq("no start attempt", S().watchStartFailures - h.notes.failures, 0)
       h.eq("no CLI in force", S().cliPath, "")
       h.eq("panel says so", h.find(A(), "unavailableTitle").text, "cliPath must be an absolute path")
+      h.eq("no path line", h.find(A(), "unavailablePath").visible, false)
       h.check("controls refuse", !S().setEnabled(true) && !S().nextCamera())
     })
     h.grabStep(function() { return A().popup }, "panel-cli-relative.png")
