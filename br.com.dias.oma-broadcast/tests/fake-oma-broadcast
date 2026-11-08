@@ -1,0 +1,61 @@
+#!/bin/sh
+# A stand-in for the oma-broadcast CLI, for tests/harness/shell.qml. Never
+# talks to D-Bus or to a real daemon.
+#
+# Every invocation appends one line to $FAKE_OB_DIR/log:
+#   <pid> [arg1] [arg2] ...
+#
+# `watch --json`: prints every line of $FAKE_OB_DIR/snapshot (the harness puts
+# the "current" snapshot there, plus any hostile lines it wants delivered at
+# connection), then follows $FAKE_OB_DIR/feed from its end at start-up,
+# printing each line appended to it. The start offset is taken before the
+# snapshot is printed, so a line appended once the snapshot has been seen is
+# never missed. Exits 0 on SIGTERM/SIGINT, as the real CLI does.
+#   - if $FAKE_OB_DIR/snapshot.1 exists, it is written first, then after a
+#     pause $FAKE_OB_DIR/snapshot.2: two separate writes, so the reader gets
+#     two reads (a line, or a character, cut across a read boundary);
+#   - if $FAKE_OB_DIR/watch-exit exists, the watch exits with that status
+#     right after the snapshot (a watch that dies after connecting).
+#
+# Any other command: sleeps $FAKE_OB_DIR/delay seconds if that file exists,
+# prints $FAKE_OB_DIR/stderr to stderr if it exists, and exits with the status
+# in $FAKE_OB_DIR/exit (default 0). It changes no state: the harness writes the
+# daemon's reaction to the feed itself.
+set -u
+
+dir=${FAKE_OB_DIR:?FAKE_OB_DIR is not set}
+log=$dir/log
+
+{
+  printf '%s' "$$"
+  for arg in "$@"; do printf ' [%s]' "$arg"; done
+  printf '\n'
+} >> "$log"
+
+if [ "${1:-}" = "watch" ] && [ "${2:-}" = "--json" ]; then
+  trap 'exit 0' TERM INT
+  feed=$dir/feed
+  touch "$feed"
+  n=$(wc -l < "$feed")
+  if [ -f "$dir/snapshot.1" ]; then
+    cat "$dir/snapshot.1"
+    sleep 0.3
+    cat "$dir/snapshot.2" 2>/dev/null
+  fi
+  [ -f "$dir/snapshot" ] && cat "$dir/snapshot"
+  [ -f "$dir/watch-exit" ] && exit "$(cat "$dir/watch-exit")"
+  while :; do
+    total=$(wc -l < "$feed")
+    while [ "$n" -lt "$total" ]; do
+      n=$((n + 1))
+      sed -n "${n}p" "$feed"
+    done
+    sleep 0.05
+  done
+fi
+
+[ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
+[ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
+status=0
+[ -f "$dir/exit" ] && status=$(cat "$dir/exit")
+exit "$status"
