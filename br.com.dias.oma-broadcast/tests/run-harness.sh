@@ -150,7 +150,7 @@ result=""
 while [ "$elapsed" -lt "$limit" ]; do
   # Quickshell colours its log lines; strip the escapes before matching.
   if sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null | grep -Eq 'qml: (ALL OK|[0-9]+ FAILED)'; then
-    result=done
+    result="done"
     break
   fi
   kill -0 "$qs_pid" 2>/dev/null || break
@@ -178,6 +178,6 @@ done
 sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'qml: ' | sed 's/^.*qml: //'
 echo "log: $log"
 echo "screens: $screens"
-[ "$result" = done ] || { echo "harness: no result within ${limit}s" >&2; exit 1; }
+[ "$result" = "done" ] || { echo "harness: no result within ${limit}s" >&2; exit 1; }
 [ "$leftovers" -eq 0 ] || { echo "harness: $leftovers process(es) left running" >&2; exit 1; }
 sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -q 'qml: ALL OK'

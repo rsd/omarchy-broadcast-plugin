@@ -543,7 +543,8 @@ function unavailableMessage(record) {
              hint: "Retrying every 2 s. Its log:", commandText: "journalctl --user -u oma-broadcastd" }
   case "cli-missing":
     return { title: detail !== "" ? detail : "oma-broadcast CLI not found", detail: "",
-             hint: "Install it into ~/.cargo/bin, or set the widget's cliPath setting to its absolute path.",
+             hint: "Install it (the Arch package puts it in /usr/bin, scripts/install-user.sh in ~/.local/bin), "
+               + "or set the widget's cliPath setting to its absolute path.",
              commandText: "" }
   case "cli-failed":
     return { title: "oma-broadcast watch stopped", detail: detail, hint: "", commandText: "" }
