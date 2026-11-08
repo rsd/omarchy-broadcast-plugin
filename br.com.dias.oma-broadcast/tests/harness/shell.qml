@@ -405,7 +405,7 @@ ShellRoot {
   function scalars(o) {
     var m = { state: "idle", enabled: true, error: "", active_camera: brioId,
               active_camera_name: "Logitech MX Brio", consumers: 0, output_mode: "NV12 1920x1080@30",
-              effect: "none", interface_revision: 1 }
+              effect: "none", blur_strength: 0.5, background_image: "", interface_revision: 2 }
     for (var k in o) m[k] = o[k]
     return m
   }
@@ -548,9 +548,55 @@ ShellRoot {
       var c = h.content(A())
       h.eq("stop", c.currentStop.kind, "switch")
       h.eq("switch has the cursor", h.find(A(), "enableSwitch").hasCursor, true)
-      h.eq("stops = switch + rendered rows + next", c.stops.length, h.find(A(), "cameraRepeater").count + 2)
+      h.eq("stops = switch + effect + rendered rows + next", c.stops.length, h.find(A(), "cameraRepeater").count + 3)
       h.key(Qt.Key_Down)
     })
+    // the effect row: one stop; Left/Right walk its choices
+    h.step("Down: the effect row, on the current effect", function() {
+      var c = h.content(A())
+      h.eq("stop", c.currentStop.kind, "effect")
+      h.eq("cursor on None (the current effect)", c.effectCursor, 0)
+      h.eq("None has the cursor", h.find(A(), "effectChoice-none").hasCursor, true)
+      h.eq("None is selected", h.find(A(), "effectChoice-none").selected, true)
+      h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
+      h.check("Replace faded without a background image", h.find(A(), "effectChoice-replace").opacity < 1)
+      h.eq("hint command", h.find(A(), "effectHintCommand").text, "oma-broadcast effect replace --image PATH")
+      h.key(Qt.Key_Right)
+      h.key("l")
+      h.key(Qt.Key_Right)
+      h.markLog()
+      h.key(Qt.Key_Return)
+    })
+    h.step("Enter on Replace without an image runs nothing", function() {
+      h.eq("cursor on Replace, and no further", h.content(A()).effectCursor, 2)
+      h.eq("Replace has the cursor", h.find(A(), "effectChoice-replace").hasCursor, true)
+      h.eq("nothing armed", S().commandBusy, false)
+      h.eq("nothing ran", h.newLogArgs().length, 0)
+    })
+    h.grabStep(function() { return A().popup }, "panel-cursor-effect.png")
+    h.step("Left, Enter: Blur", function() {
+      h.key(Qt.Key_Left)
+      h.markLog()
+      h.key(Qt.Key_Return)
+    }, function() { return h.newLogArgs().length >= 1 })
+    h.step("effect argv", function() {
+      h.eq("argv", lastArgs(), JSON.stringify(["effect", "blur"]))
+      h.eq("no optimistic change", S().record.effectKey, "none")
+      h.feed([stateLine({ effect: "blur", blur_strength: 0.5, active_camera: fhdId, active_camera_name: "FHD Camera" })])
+    }, function() { return S().record.effectKey === "blur" && !S().commandBusy })
+    h.step("Blur arrives on the stream", function() {
+      h.eq("Blur selected", h.find(A(), "effectChoice-blur").selected, true)
+      h.eq("None no longer selected", h.find(A(), "effectChoice-none").selected, false)
+      h.check("tooltip names the effect", A().iconButton.tooltipText.indexOf("background blurred") !== -1, A().iconButton.tooltipText)
+      h.markLog()
+      h.key(Qt.Key_Return)
+    })
+    h.step("Enter on the current effect runs nothing", function() {
+      h.eq("nothing armed", S().commandBusy, false)
+      h.eq("nothing ran", h.newLogArgs().length, 0)
+      h.feed([stateLine({ effect: "none", active_camera: fhdId, active_camera_name: "FHD Camera" })])
+    }, function() { return S().record.effectKey === "none" })
+    h.step("Down from the effect row", function() { h.key(Qt.Key_Down) })
     h.step("Down: first camera row", function() {
       h.eq("row 0 has the cursor", h.row(A(), 0).hasCursor, true)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
@@ -580,8 +626,8 @@ ShellRoot {
     h.step("Space runs Next camera", function() {
       h.eq("argv", lastArgs(), JSON.stringify(["camera", "next"]))
     }, function() { return !S().commandBusy })
-    h.step("k x4 back to the switch, Enter turns off", function() {
-      for (var i = 0; i < 4; i++) h.key("k")
+    h.step("k x5 back to the switch, Enter turns off", function() {
+      for (var i = 0; i < 5; i++) h.key("k")
       h.eq("on the switch", h.content(A()).currentStop.kind, "switch")
       h.markLog()
       h.key(Qt.Key_Enter)
@@ -820,12 +866,57 @@ ShellRoot {
     h.step("new snapshot recovers", function() { h.feed([snapshotLine({})]) },
            function() { return S().record.link === "ok" && S().record.state === "idle" })
 
+    // a CLI that predates effects: no blur_strength on its lines (JSON drops
+    // undefined), and no `effect` command; the row offers nothing
+    h.step("snapshot from a CLI without effects", function() {
+      h.feed([snapshotLine({ blur_strength: undefined, background_image: undefined })])
+    }, function() { return S().record.link === "ok" && S().record.cliEffects === false })
+    h.step("the effect row is faded and names the CLI", function() {
+      ["none", "blur", "replace"].forEach(function(e) {
+        h.check(e + " faded", h.find(A(), "effectChoice-" + e).opacity < 1)
+      })
+      h.eq("hint", h.find(A(), "effectHint").text, "The oma-broadcast CLI needs updating for effects.")
+      h.eq("no command", h.find(A(), "effectHintCommand").visible, false)
+      h.eq("no effect stop", h.content(A()).stops.filter(function(st) { return st.kind === "effect" }).length, 0)
+      h.markLog()
+      h.check("Blur refused", !h.content(A()).chooseEffect(1))
+      h.eq("nothing ran", h.newLogArgs().length, 0)
+    })
+    // a new CLI still talking to a daemon started before the upgrade
+    // (interface revision 1): the row offers nothing and names the daemon
+    h.step("snapshot from a daemon without effects", function() {
+      h.feed([snapshotLine({ interface_revision: 1 })])
+    }, function() { return S().record.cliEffects === true && S().record.interfaceRevision === 1 })
+    h.step("the effect row is faded and names the daemon", function() {
+      ["none", "blur", "replace"].forEach(function(e) {
+        h.check(e + " faded", h.find(A(), "effectChoice-" + e).opacity < 1)
+      })
+      h.eq("hint", h.find(A(), "effectHint").text, "The daemon needs updating for effects.")
+      h.eq("no command", h.find(A(), "effectHintCommand").visible, false)
+      h.eq("no effect stop", h.content(A()).stops.filter(function(st) { return st.kind === "effect" }).length, 0)
+      h.markLog()
+      h.check("Blur refused", !h.content(A()).chooseEffect(1))
+      h.eq("nothing ran", h.newLogArgs().length, 0)
+    })
+    // a background image with bidi and zero-width characters, while replacing
+    h.step("replacing with a hostile image path", function() {
+      h.feed([snapshotLine({ effect: "replace", background_image: "/h/\u202egnp.exe\u061c\u200b\ufeff<b>.png" })])
+    }, function() { return S().record.effectKey === "replace" })
+    h.step("the image row is sanitised and isolated", function() {
+      var rows = h.content(A()).effectRows
+      h.eq("one row", rows.length, 1)
+      h.eq("value", rows[0].value, "\u2066/h/gnp.exeb.png\u2069")
+      h.eq("no hint", h.find(A(), "effectHintBlock").visible, false)
+      h.feed([snapshotLine({})])
+    }, null)
+    h.step("effects back", function() {}, function() { return S().record.cliEffects === true && S().record.effectKey === "none" })
+
     // the watch is killed by a signal; the respawned one reads a snapshot
     // whose multi-byte characters straddle a read boundary
     h.step("split snapshot for the respawn", function() {
       var line = JSON.stringify({ v: 1, type: "snapshot", state: "idle", enabled: true, error: "",
         active_camera: utfId, active_camera_name: utfName, consumers: 0, output_mode: "NV12 1920x1080@30",
-        effect: "none", interface_revision: 1,
+        effect: "none", blur_strength: 0.5, background_image: "", interface_revision: 2,
         cameras: [{ id: utfId, name: utfName, usb: "1234:abcd", active: true },
                   { id: brioId, name: "Logitech MX Brio", usb: "046d:0944", active: false }],
         cameras_truncated: false }) + "\n"
@@ -1080,12 +1171,12 @@ ShellRoot {
       h.check("content taller than the card", flick.contentHeight > flick.height, flick.contentHeight + " vs " + flick.height)
       h.eq("scrolls", flick.interactive, true)
       h.eq("truncation row", h.find(A(), "camerasTruncated").text, "More cameras are connected; they are not shown")
-      h.eq("stops", h.content(A()).stops.length, 14)
+      h.eq("stops", h.content(A()).stops.length, 15)
     })
     h.grabStep(function() { return A().popup }, "panel-12-cameras.png")
     h.step("cursor to the last camera row", function() {
       h.key(Qt.Key_Down)
-      for (var i = 0; i < 12; i++) h.key(Qt.Key_Down)
+      for (var i = 0; i < 13; i++) h.key(Qt.Key_Down)
     })
     h.wait(400)
     h.step("cursor row kept in view", function() {

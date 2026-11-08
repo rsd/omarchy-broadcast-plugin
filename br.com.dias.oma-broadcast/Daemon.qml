@@ -271,7 +271,7 @@ Singleton {
 
   // ---- commands --------------------------------------------------------------
 
-  // An intent ({ verb, on, id }) becomes an argv only when it runs: see
+  // An intent ({ verb, on, id, effect }) becomes an argv only when it runs: see
   // Model.intentArgv. Only the latest queued ask is kept.
   function request(intent) {
     if (!Model.intentArgv(intent, cliPath, record)) return false
@@ -335,6 +335,11 @@ Singleton {
 
   function nextCamera() {
     return request({ verb: "next" })
+  }
+
+  // `effect` is checked against Model.EFFECTS when the command is armed.
+  function setEffect(effect) {
+    return request({ verb: "effect", effect: effect })
   }
 
   // ---- children ------------------------------------------------------------
