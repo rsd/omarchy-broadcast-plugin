@@ -16,7 +16,13 @@ widget would hide.
     multi-byte character cut by a read boundary), a command's stderr in
     chunks (it is unbounded; only its capped first line is kept);
   - panel visuals never read `containsMouse` for colour (the shell's
-    CursorSurface contract: one highlight, from the panel cursor).
+    CursorSurface contract: one highlight, from the panel cursor);
+  - an effect reaches the command line only as a word of Model.EFFECTS,
+    through an intent (Daemon.setEffect -> Model.effectArgv);
+  - the effect chips carry the shell ButtonGroup's fill and fade from
+    Model's `faded`; the hint and its command share one Column at the
+    unavailable block's spacing; the Replace gate reads the raw image field,
+    and the shown path sits in a left-to-right Unicode isolate.
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -162,6 +168,10 @@ check("command stderr is chunked (splitMarker: \"\")", re.search(r'stderr:\s*Spl
       command_block[:200])
 check("command stderr goes through Model.firstLineFeed", "Model.firstLineFeed(" in command_block)
 check("an over-cap watch line stops the watch", re.search(r"line\.length > Model\.LINE_CAP\)\s*\{[^}]*stopWatch\(\)", daemon) is not None)
+check("an effect is requested as an intent, never a raw argv",
+      re.search(r'function setEffect\(effect\)\s*\{\s*return request\(\{ verb: "effect", effect: effect \}\)\s*\}', daemon) is not None)
+check("effectArgv only passes a word of Model.EFFECTS",
+      re.search(r'function effectArgv\(cli, effect\)\s*\{\s*if \(!cliUsable\(cli\) \|\| effectKey\(effect\) === ""\) return null', model) is not None)
 check("queued commands are intents re-checked when armed",
       "pendingIntent" in daemon and "pendingArgv" not in daemon and "Model.intentArgv(intent, cliPath, record)" in block(daemon, "function armCommand"))
 
@@ -169,6 +179,26 @@ panel = sources[PLUGIN / "BroadcastPanel.qml"]
 for name, src in ((p.name, sources[p]) for p in plugin_qml):
     check(f"{name}: no containsMouse-driven colour",
           re.search(r"(color|border\.color|fill)\s*:[^\n]*containsMouse", src) is None)
+check("the panel sets an effect only from its whitelisted choices",
+      re.findall(r"Daemon\.setEffect\(([^)]*)\)", panel) == ["option.value"],
+      str(re.findall(r"Daemon\.setEffect\(([^)]*)\)", panel)))
+effect_chips = block(panel, "id: effectRepeater")
+check("effect chips have the ButtonGroup fill (Commons.Color.background)",
+      re.search(r"^\s*background:\s*Commons\.Color\.background\s*$", effect_chips, re.M) is not None, effect_chips[:200])
+check("effect chips fade from Model's `faded`, not a local rule",
+      re.search(r"opacity:\s*modelData\.faded \? 0\.45 : 1\.0", effect_chips) is not None)
+hint_at = panel.find('objectName: "effectHintBlock"')
+hint_column = panel.rfind("Column {", 0, hint_at) if hint_at >= 0 else -1
+hint_block = block(panel[hint_column:], "Column {") if hint_column >= 0 else ""
+check("effect hint and its command share one Column at Style.space(6)",
+      re.match(r'\{\s*objectName:\s*"effectHintBlock"', hint_block) is not None
+      and re.search(r"^ {12}spacing: Style\.space\(6\)$", hint_block, re.M) is not None
+      and 'objectName: "effectHint"' in hint_block and 'objectName: "effectHintCommand"' in hint_block,
+      hint_block[:200])
+check("the image path is isolated (LRI U+2066 ... PDI U+2069) after sanitising",
+      'return "\\u2066" + record.backgroundImage + "\\u2069"' in model)
+check("the Replace gate reads the raw field, not the display copy",
+      re.search(r"function hasBackgroundImage\(record\)\s*\{\s*return !!record && record\.backgroundImageSet === true\s*\}", model) is not None)
 check("camera rows are CursorSurfaces", re.search(r"delegate:\s*CursorSurface\s*\{", panel) is not None)
 check("the panel scrolls (Flickable)", "Flickable {" in panel)
 check("the panel height is capped at Style.space(560)",

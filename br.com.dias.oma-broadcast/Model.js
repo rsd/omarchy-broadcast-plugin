@@ -36,6 +36,12 @@ var USB_CAP = 16
 var ERROR_CAP = 512
 var MODE_CAP = 64
 var EFFECT_CAP = 32
+// The background image path, display only; it is never sent back as an
+// argument. The producer clips it to 256 bytes and keeps the end of the path
+// (the file name) behind a leading ellipsis (crates/oma-broadcast/src/json.rs,
+// MAX_PATH_BYTES), so this looser bound does not cut a v1 producer's path; it
+// bounds the work for an off-contract one.
+var IMAGE_PATH_CAP = 512
 // A failed command's stderr: the first line, at most this many characters
 // are ever kept (the CLI does not bound its stderr).
 var STDERR_CAP = 512
@@ -57,6 +63,23 @@ var BACKOFF_RESET_UPTIME_MS = 30000
 
 var STATES = ["off", "idle", "starting", "active", "error"]
 
+// The video effects the daemon accepts (docs/adr/0012), in panel order. The
+// only words ever passed to `oma-broadcast effect`.
+var EFFECTS = ["none", "blur", "replace"]
+var EFFECT_LABELS = { none: "None", blur: "Blur", replace: "Replace" }
+// Said instead of offering effects when the CLI predates them (it prints no
+// blur_strength and has no `effect` command).
+var CLI_NO_EFFECTS = "The oma-broadcast CLI needs updating for effects"
+// Said instead when the CLI knows effects but the running daemon does not (an
+// interface revision below EFFECTS_REVISION, or none readable): the CLI would
+// refuse every `effect` request.
+var DAEMON_NO_EFFECTS = "The daemon needs updating for effects"
+// The daemon interface revision that added effects (obc-ipc INTERFACE_REVISION
+// 2; the CLI's bus::require_effects checks the same).
+var EFFECTS_REVISION = 2
+// The largest interface revision the producer can print (a u32).
+var REVISION_MAX = 4294967295
+
 // Material Design glyphs from the bar's Nerd Font (checked by rendering them).
 var GLYPH_WEBCAM = String.fromCodePoint(0xF05A0)
 var GLYPH_WEBCAM_OFF = String.fromCodePoint(0xF1737)
@@ -77,23 +100,35 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
-// Display copy of an untrusted string: not a string -> "". Markup characters
-// (< > &) and bidi overrides are removed, control characters (newlines
-// included) become spaces, runs of spaces collapse, and the result is cut to
-// `cap` characters with an ellipsis. The input is pre-cut so a huge string
-// costs a bounded amount of work.
+// Display copy of an untrusted string: not a string -> "". Removed: markup
+// characters (< > &), bidi marks, embeddings, overrides and isolates (U+061C,
+// U+200E, U+200F, U+202A..U+202E, U+2066..U+2069), the zero-width space and
+// the byte order mark (U+200B, U+FEFF), and the invisible formatting block
+// U+2060..U+206F (word joiner, invisible operators, deprecated format
+// controls). Control characters (newlines included) become spaces, runs of
+// spaces collapse, and the result is cut to `cap` characters with an
+// ellipsis. Kept on purpose: the zero-width joiner and non-joiner (U+200D,
+// U+200C), which emoji sequences and Persian or Arabic words need, and the
+// variation selectors and tag characters of emoji; none of them reorders
+// text. Other invisible characters (soft hyphen, Hangul fillers, ...) are not
+// removed either. The input is pre-cut so a huge string costs a bounded
+// amount of work; a string that lost its tail there still ends in the
+// ellipsis, however little of it is left.
 function sanitize(value, cap) {
   if (typeof value !== "string") return ""
   var limit = Math.max(1, Math.floor(Number(cap) || 1))
-  var s = value.length > limit * 4 ? value.slice(0, limit * 4) : value
-  s = s.replace(/[<>&\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+  var precut = value.length > limit * 4
+  var s = precut ? value.slice(0, limit * 4) : value
+  s = s.replace(/[<>&\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
   s = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
   s = s.replace(/ {2,}/g, " ").trim()
-  if (s.length > limit) {
+  if (s.length > limit || (precut && s.length >= limit)) {
     s = s.slice(0, limit - 1)
     // Never leave half a surrogate pair at the cut.
     var last = s.charCodeAt(s.length - 1)
     if (last >= 0xd800 && last <= 0xdbff) s = s.slice(0, -1)
+    s = s + "\u2026"
+  } else if (precut) {
     s = s + "\u2026"
   }
   return s
@@ -123,6 +158,13 @@ function rawId(value) {
   return typeof value === "string" && value.length <= ID_CAP * 2 ? value : ""
 }
 
+// The daemon's interface revision: an integer in 0..REVISION_MAX, else -1
+// (unknown; read as a daemon without effects).
+function interfaceRevision(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= 0 && value <= REVISION_MAX ? value : -1
+}
+
 // A count: an integer in 0..COUNT_MAX, else -1 (unknown).
 function count(value) {
   return typeof value === "number" && isFinite(value) && Math.floor(value) === value
@@ -133,6 +175,17 @@ function count(value) {
 // the wire).
 function statNumber(value) {
   return typeof value === "number" && isFinite(value) && value >= 0 && value <= STAT_MAX ? value : null
+}
+
+// An effect name from the daemon: one of EFFECTS exactly, else "" (unknown;
+// never selected in the panel and never sent back).
+function effectKey(value) {
+  return typeof value === "string" && EFFECTS.indexOf(value) >= 0 ? value : ""
+}
+
+// The blur strength: a finite number in 0..1, else null (unknown).
+function blurStrength(value) {
+  return typeof value === "number" && isFinite(value) && value >= 0 && value <= 1 ? value : null
 }
 
 // ---------------------------------------------------------------- the record
@@ -161,6 +214,12 @@ function emptyRecord(link, linkText) {
     consumers: -1,
     outputMode: "",
     effect: "",
+    effectKey: "",
+    blurStrength: null,
+    backgroundImage: "",
+    backgroundImageSet: false,
+    cliEffects: false,
+    interfaceRevision: -1,
     cameras: [],
     camerasTotal: 0,
     camerasTruncated: false,
@@ -203,6 +262,19 @@ function applyScalars(r, m) {
   r.consumers = count(m.consumers)
   r.outputMode = sanitize(m.output_mode, MODE_CAP)
   r.effect = sanitize(m.effect, EFFECT_CAP)
+  r.effectKey = effectKey(m.effect)
+  r.blurStrength = blurStrength(m.blur_strength)
+  r.backgroundImage = sanitize(m.background_image, IMAGE_PATH_CAP)
+  // Whether the daemon holds an image, from the raw field: the display copy
+  // above may sanitise to "" and must not decide what can be chosen.
+  r.backgroundImageSet = typeof m.background_image === "string" && m.background_image !== ""
+  // A CLI that knows video effects prints blur_strength as a number on every
+  // snapshot and state line. One that predates them prints no such field (and
+  // "effect":"none"), and has no `effect` command to run.
+  r.cliEffects = typeof m.blur_strength === "number"
+  // The running daemon's interface revision, on the same lines: a new CLI may
+  // still be talking to a daemon started before the upgrade.
+  r.interfaceRevision = interfaceRevision(m.interface_revision)
   // No stats line arrives outside `active`; clear the figures as it is left.
   if (r.state !== "active") r.stats = null
 }
@@ -441,6 +513,8 @@ function tooltipText(record) {
     var parts = [prefix + record.state]
     parts.push(camera !== "" ? camera : "no camera")
     if (record.consumers >= 0) parts.push(consumersText(record.consumers))
+    var effect = effectSummary(record)
+    if (effect !== "") parts.push(effect)
     if (record.error !== "") parts.push("error: " + sanitize(record.error, 60))
     text = parts.join(" \u00b7 ")
   }
@@ -506,6 +580,132 @@ function statsRows(record) {
     { label: "CPU", value: formatStat(s.cpuPercent, 1, " %") },
     { label: "GPU", value: formatStat(s.gpuPercent, 1, " %") }
   ]
+}
+
+// ---------------------------------------------------------------- effects
+
+// The tooltip's effect phrase: "" for none or an unknown effect.
+function effectSummary(record) {
+  if (!record) return ""
+  if (record.effectKey === "blur") return "background blurred"
+  if (record.effectKey === "replace") return "background replaced"
+  return ""
+}
+
+// Whether the daemon holds a background image. Read from the raw field
+// (backgroundImageSet), never from the sanitised display copy, so what can be
+// chosen and what the panel says about it always agree.
+function hasBackgroundImage(record) {
+  return !!record && record.backgroundImageSet === true
+}
+
+// Whether the running daemon knows effects: its interface revision is at
+// least EFFECTS_REVISION. An unknown revision counts as no.
+function daemonEffects(record) {
+  return !!record && typeof record.interfaceRevision === "number"
+    && record.interfaceRevision >= EFFECTS_REVISION
+}
+
+// Whether effects can be set at all: an available daemon whose interface
+// knows them, through a CLI that knows them. False for a CLI that predates
+// effects, and for a new CLI still talking to an older daemon.
+function effectsSupported(record) {
+  return available(record) && record.cliEffects === true && daemonEffects(record)
+}
+
+// Why effects cannot be set while the daemon is available: the CLI line, or
+// the daemon line once the CLI knows effects. "" when they can be set (or
+// the daemon is unavailable, where the panel shows no effect row).
+function effectsMissingText(record) {
+  if (!available(record) || effectsSupported(record)) return ""
+  return record.cliEffects === true ? DAEMON_NO_EFFECTS : CLI_NO_EFFECTS
+}
+
+// Whether `effect` may be requested now: a known effect, a daemon that can
+// be controlled through a CLI that knows `effect`, and for `replace` a
+// background image the daemon already holds (the daemon refuses `replace`
+// without one; the image is set with `oma-broadcast effect replace --image
+// PATH` or in its configuration).
+function effectSelectable(record, effect) {
+  if (!effectsSupported(record) || effectKey(effect) === "") return false
+  return effect !== "replace" || hasBackgroundImage(record)
+}
+
+// The panel's effect choices, in EFFECTS order: { value, label, selected,
+// selectable, faded, tooltip }. `selectable` is false for the current effect
+// (there is nothing to change) and for an effect that cannot be requested.
+// `faded` marks a choice drawn dimmed: one that cannot be requested and is
+// not the current one, or every choice when the CLI or the daemon predates
+// effects. An
+// unknown effect from the daemon selects no choice.
+function effectOptions(record) {
+  var out = []
+  var supported = effectsSupported(record)
+  for (var i = 0; i < EFFECTS.length; i++) {
+    var value = EFFECTS[i]
+    var selected = !!record && record.effectKey === value
+    var selectable = !selected && effectSelectable(record, value)
+    var missing = effectsMissingText(record)
+    var tooltip = missing !== "" ? missing
+      : (value === "none" ? "The camera image, unchanged"
+        : (value === "blur" ? "Blur the background"
+          : (hasBackgroundImage(record) ? "Replace the background with the background image"
+            : "Needs a background image: background_image under [effect] in the daemon's configuration, or --image")))
+    out.push({
+      value: value,
+      label: EFFECT_LABELS[value],
+      selected: selected,
+      selectable: selectable,
+      faded: !selectable && !(selected && supported),
+      tooltip: tooltip
+    })
+  }
+  return out
+}
+
+function effectIndex(value) {
+  return EFFECTS.indexOf(effectKey(value))
+}
+
+// The background image path as the panel shows it: the sanitised copy inside
+// a left-to-right isolate (U+2066 ... U+2069). A POSIX path is left-to-right
+// by structure, so the segments keep their order even when a file name starts
+// with right-to-left text (a first-strong isolate, U+2068, would take its
+// direction from that name and show the path reversed). sanitize() has
+// already removed every bidi control the daemon sent, these two included.
+function imagePathText(record) {
+  if (!record || typeof record.backgroundImage !== "string" || record.backgroundImage === "") return UNKNOWN
+  return "\u2066" + record.backgroundImage + "\u2069"
+}
+
+// Read-only rows under the choices: the blur strength while blurring, the
+// background image while replacing. Empty when unavailable or when the CLI
+// or the daemon predates effects.
+function effectRows(record) {
+  if (!effectsSupported(record)) return []
+  if (record.effectKey === "blur") {
+    var s = record.blurStrength
+    return [{ label: "Strength", value: s === null ? UNKNOWN : Math.round(s * 100) + " %" }]
+  }
+  if (record.effectKey === "replace")
+    return [{ label: "Image", value: imagePathText(record) }]
+  return []
+}
+
+// The line under the effect choices, { text, commandText }: that the CLI or
+// the daemon predates effects, that the daemon reports an effect this plugin does not
+// know, or, while the daemon has no background image, how to give it one.
+// `commandText` is shown to copy, never run.
+function effectHint(record) {
+  if (!available(record)) return { text: "", commandText: "" }
+  if (!effectsSupported(record)) return { text: effectsMissingText(record) + ".", commandText: "" }
+  if (record.effectKey === "")
+    return { text: "oma-broadcastd reports an effect this plugin does not know"
+               + (record.effect !== "" ? ": " + record.effect : "") + ". Update the plugin.",
+             commandText: "" }
+  if (!hasBackgroundImage(record))
+    return { text: "Replace needs an image:", commandText: "oma-broadcast effect replace --image PATH" }
+  return { text: "", commandText: "" }
 }
 
 // Exit status of a control command -> a short, capped message for the panel.
@@ -602,10 +802,17 @@ function canNext(record) {
   return available(record) && record.cameras.length >= 2
 }
 
-// A control request is kept as an intent, { verb, on, id }, and turned into an
+// Only a word of EFFECTS is ever sent, as its own argv element: nothing from
+// the daemon or the panel reaches the command line otherwise.
+function effectArgv(cli, effect) {
+  if (!cliUsable(cli) || effectKey(effect) === "") return null
+  return [cli, "effect", effect]
+}
+
+// A control request is kept as an intent, { verb, on, id, effect }, and turned into an
 // argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera` would D-Bus-activate it) or with a CLI
+// gone meanwhile (`on`/`off`/`camera`/`effect` would D-Bus-activate it) or with a CLI
 // path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
@@ -613,6 +820,7 @@ function intentArgv(intent, cli, record) {
   case "enable": return available(record) ? enableArgv(cli, intent.on === true) : null
   case "select": return available(record) ? selectArgv(cli, intent.id) : null
   case "next": return canNext(record) ? nextArgv(cli) : null
+  case "effect": return effectSelectable(record, intent.effect) ? effectArgv(cli, intent.effect) : null
   default: return null
   }
 }
@@ -651,13 +859,17 @@ function backoffAfterExit(prevMs, uptimeMs) {
 
 // ---------------------------------------------------------------- keyboard cursor
 
-// The panel's keyboard stops, top to bottom: the on/off switch, one per
-// rendered camera row (`cameraCount` is the count the panel draws, so the
-// cursor and the rows always agree), then Next camera when it is shown.
-// Nothing is a stop while the daemon is unavailable: no control is drawn.
+// The panel's keyboard stops, top to bottom: the on/off switch, the effect
+// choices (one stop for the row; Left/Right walk its choices, as in the
+// shell's button groups), one per rendered camera row (`cameraCount` is the
+// count the panel draws, so the cursor and the rows always agree), then Next
+// camera when it is shown. Nothing is a stop while the daemon is
+// unavailable: no control is drawn. The effect row is no stop either when the
+// CLI or the daemon predates effects: none of its choices can be requested.
 function cursorStops(record, cameraCount) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
+  if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
   var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
   for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
   if (canNext(record)) stops.push({ kind: "next", index: -1 })

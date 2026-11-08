@@ -1,6 +1,6 @@
 # Omarchy bar widget
 
-`br.com.dias.oma-broadcast` is a bar widget for the Omarchy shell (Quickshell/QML). It shows the state of the virtual camera in the bar, turns it on and off, selects the camera and shows live figures while it runs. It is a client of `oma-broadcastd` ([setup/daemon.md](../../docs/setup/daemon.md)): it reads the state from the stream of `oma-broadcast watch --json` and sends commands through the `oma-broadcast` command-line client. It does not speak D-Bus itself. The stream format is specified in [cli-json.md](../../docs/cli-json.md).
+`br.com.dias.oma-broadcast` is a bar widget for the Omarchy shell (Quickshell/QML). It shows the state of the virtual camera in the bar, turns it on and off, selects the camera and the video effect, and shows live figures while it runs. It is a client of `oma-broadcastd` ([setup/daemon.md](../../docs/setup/daemon.md)): it reads the state from the stream of `oma-broadcast watch --json` and sends commands through the `oma-broadcast` command-line client. It does not speak D-Bus itself. The stream format is specified in [cli-json.md](../../docs/cli-json.md).
 
 The plugin lives in [br.com.dias.oma-broadcast/](br.com.dias.oma-broadcast/). Nothing is installed by the build.
 
@@ -19,22 +19,23 @@ The icon follows the daemon state. Colours come from the active theme.
 
 - Left click turns the camera on or off. It does nothing while an earlier command is still running. While the daemon is unavailable it opens the panel instead, so that a persisted `off` is never flipped without being seen and a stopped daemon is never started by a click.
 - Right or middle click opens and closes the panel.
-- The tooltip gives the state, and while running the camera name and the number of consumers. An error text is appended when there is one. When unavailable it names the cause.
+- The tooltip gives the state, and while running the camera name, the number of consumers and the effect when one is on (background blurred or background replaced). An error text is appended when there is one. When unavailable it names the cause.
 
 The panel shows:
 
 - the state, the on/off switch and the daemon's error text, if any;
 - the last failed command, if any;
 - the camera in use, the number of consumers and the output mode;
+- the video effect: None, Blur or Replace, with the current one selected (click a choice to change it). While blurring, the blur strength is shown; while replacing, the background image path. Replace can be chosen only once the daemon has a background image; until then it is faded, the panel shows "Replace needs an image:" with the command `oma-broadcast effect replace --image PATH` to run in a terminal, and the Replace tooltip names the other way, `background_image` under `[effect]` in the daemon's configuration. The strength and the image are shown, not edited, here. If the `oma-broadcast` CLI predates video effects, every choice is faded and the panel says the CLI needs updating; if the CLI knows effects but the running daemon does not (its interface revision is below 2, as when the daemon was not restarted after an upgrade), every choice is faded and the panel says the daemon needs updating;
 - while active, the frame rate, the p50 latency and the CPU and GPU load; a figure the daemon has not reported yet reads as a dash;
 - the list of cameras (click a row to select it) and a Next camera button when there are two or more. The producer lists at most 12 cameras; a row says when more are connected;
 - when the daemon is unavailable, the reason and, where it helps, a command to copy. The plugin shows these commands and never runs them.
 
-Keyboard, once the panel is open: Up/Down or j/k move the cursor over the switch, the cameras and Next camera (the first press only shows the cursor), Enter or Space activates the row, Tab switches to the neighbouring panel, Escape closes.
+Keyboard, once the panel is open: Up/Down or j/k move the cursor over the switch, the effect row (unless the CLI or the daemon predates effects), the cameras and Next camera (the first press only shows the cursor), Left/Right or h/l move between the effect choices (arriving on the row lands on the current effect), Enter or Space activates, Tab switches to the neighbouring panel, Escape closes.
 
 ## Requirements
 
-- `oma-broadcastd` and `oma-broadcast` installed as described in [setup/daemon.md](../../docs/setup/daemon.md). The widget shows "unavailable" until the daemon runs; it works without D-Bus activation, but with it `on`, `off` and camera selection start a stopped daemon (see the unavailable behaviour below).
+- `oma-broadcastd` and `oma-broadcast` installed as described in [setup/daemon.md](../../docs/setup/daemon.md). The widget shows "unavailable" until the daemon runs; it works without D-Bus activation, but with it `on`, `off`, camera selection and effect selection start a stopped daemon (see the unavailable behaviour below).
 - The Omarchy shell (Quickshell) with the plugin system, and `omarchy` on `PATH`.
 - A theme-aware Nerd Font for the icons, as the rest of the bar uses.
 
@@ -81,9 +82,9 @@ A binary found on `PATH` wins over the development build, so a stale installed b
 - One `oma-broadcast watch --json` process serves every bar (every monitor). There is no polling: the daemon pushes each change, and the widget is exactly as fresh as the stream.
 - The process starts when the first widget appears and stops when the last one goes away.
 - When it exits, it is started again after 1 s, doubling up to 30 s. The delay returns to 1 s only after a watch has run for 30 s, so a watch that dies right after its first line does not restart every second.
-- Commands (`on`, `off`, `camera -- <id>`, `camera next`) run as argument lists, never through a shell, and time out after 30 s. A new click is ignored while one runs. The camera id is passed as one argument after `--`.
-- Text from the daemon (camera names, errors) is shown as plain text, stripped of markup and control characters, and shortened. The producer already limits a line to 4096 bytes and the camera list to 12; the plugin drops a line over 8192 characters and restarts the watch.
-- Reads never start the daemon. The commands `on`, `off` and `camera` start it through D-Bus activation if you installed that file ([dbus-api.md](../../docs/dbus-api.md#service-presence-and-activation)); the widget avoids sending them while the daemon is known to be down.
+- Commands (`on`, `off`, `camera -- <id>`, `camera next`, `effect none|blur|replace`) run as argument lists, never through a shell, and time out after 30 s. A new click is ignored while one runs. The camera id is passed as one argument after `--`. The effect is always one of the three fixed words; nothing the daemon reports is passed back on the command line.
+- Text from the daemon (camera names, errors, the background image path) is shown as plain text, stripped of markup, control, bidi and invisible formatting characters (the zero-width joiner and non-joiner stay, so emoji sequences and Persian or Arabic words display correctly), and shortened. The background image path is shown inside a left-to-right Unicode isolate, so right-to-left text in a file name cannot reorder the row or reverse the path. An effect name the plugin does not know selects no choice and is reported as such; a blur strength outside 0 to 1 reads as a dash. The producer already limits a line to 4096 bytes and the camera list to 12; the plugin drops a line over 8192 characters and restarts the watch.
+- Reads never start the daemon. The commands `on`, `off`, `camera` and `effect` start it through D-Bus activation if you installed that file ([dbus-api.md](../../docs/dbus-api.md#service-presence-and-activation)); the widget avoids sending them while the daemon is known to be down.
 
 When the daemon stops or restarts, the stream says so and the icon shows "unavailable" until the daemon is back; no action is needed. If the watch itself ends, the panel names the exit status or signal and the retry delay.
 
@@ -98,7 +99,11 @@ When the daemon stops or restarts, the stream says so and the icon shows "unavai
 | oma-broadcast watch stopped / exited with status N / stopped by signal N; restarting in N s | the watch process ended | the widget restarts it with backoff; if it repeats, run `oma-broadcast watch --json` in a terminal |
 | Unsupported oma-broadcast version | the CLI prints a schema version the plugin does not know, or a line over the limit | update the plugin or the CLI so they match ([cli-json.md](../../docs/cli-json.md)) |
 | oma-broadcastd reports a state this plugin does not know | the daemon is newer than the plugin | update the plugin |
-| The daemon refused the request | the daemon rejected `on`, `off` or the camera | the text after the colon is the daemon's reason; see `oma-broadcast status` |
+| The daemon refused the request | the daemon rejected `on`, `off`, the camera or the effect | the text after the colon is the daemon's reason; see `oma-broadcast status` |
+| The oma-broadcast CLI needs updating for effects (the effect choices are faded) | the `oma-broadcast` CLI predates video effects | update the CLI and the daemon |
+| The daemon needs updating for effects (the effect choices are faded) | the CLI knows effects, but the running oma-broadcastd reports an interface revision below 2 (or none) | update oma-broadcastd, or restart it if it is already updated: `systemctl --user restart oma-broadcastd` |
+| Replace is faded; "Replace needs an image:" | the daemon has no background image | run `oma-broadcast effect replace --image PATH`, or set `background_image` under `[effect]` in the daemon's configuration |
+| oma-broadcastd reports an effect this plugin does not know | the daemon is newer than the plugin | update the plugin |
 | D-Bus failure | the CLI could not reach the session bus | check `DBUS_SESSION_BUS_ADDRESS` in the shell's environment |
 | Command failed with status N | any other exit status | run the same `oma-broadcast` command in a terminal |
 | Showing N of M cameras / More cameras are connected; they are not shown | the camera list is capped | not an error |
@@ -110,11 +115,11 @@ When the daemon stops or restarts, the stream says so and the icon shows "unavai
 Run from the repository root. All commands are read-only with respect to your shell and your configuration; none starts or touches the running shell.
 
 ```sh
-# Unit tests of the logic (Model.js): reducer, caps, tooltips, argument lists, path resolution
+# Unit tests of the logic (Model.js): reducer, caps, tooltips, argument lists, effects, path resolution
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner \
     -input clients/omarchy-bar/br.com.dias.oma-broadcast/tests/tst_model.qml
 
-# Source invariants (plain text everywhere, no shell strings, no polling timer, manifest id)
+# Source invariants (plain text everywhere, no shell strings, no polling timer, manifest id, effect whitelist)
 python3 -I clients/omarchy-bar/br.com.dias.oma-broadcast/tests/check-source.py
 
 # qmllint on every QML file, import errors fatal

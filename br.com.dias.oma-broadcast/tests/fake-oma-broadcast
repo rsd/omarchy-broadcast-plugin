@@ -17,10 +17,13 @@
 #   - if $FAKE_OB_DIR/watch-exit exists, the watch exits with that status
 #     right after the snapshot (a watch that dies after connecting).
 #
-# Any other command: sleeps $FAKE_OB_DIR/delay seconds if that file exists,
-# prints $FAKE_OB_DIR/stderr to stderr if it exists, and exits with the status
-# in $FAKE_OB_DIR/exit (default 0). It changes no state: the harness writes the
-# daemon's reaction to the feed itself.
+# Any other command (`on`, `off`, `camera -- <id>`, `camera next`,
+# `effect none|blur|replace`): sleeps $FAKE_OB_DIR/delay seconds if that file
+# exists, prints $FAKE_OB_DIR/stderr to stderr if it exists, and exits with
+# the status in $FAKE_OB_DIR/exit (default 0). It changes no state: the
+# harness writes the daemon's reaction (a state line with `effect`,
+# `blur_strength` and `background_image`, as the real CLI prints) to the feed
+# itself.
 set -u
 
 dir=${FAKE_OB_DIR:?FAKE_OB_DIR is not set}

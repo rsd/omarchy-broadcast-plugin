@@ -25,8 +25,8 @@ TestCase {
     var m = {
       v: 1, type: "snapshot", state: "idle", enabled: true, error: "",
       active_camera: brioId, active_camera_name: "Logitech MX Brio", consumers: 0,
-      output_mode: "NV12 1920x1080@30", effect: "none", interface_revision: 1,
-      cameras: cameraObjects(), cameras_truncated: false
+      output_mode: "NV12 1920x1080@30", effect: "none", blur_strength: 0.5, background_image: "",
+      interface_revision: 2, cameras: cameraObjects(), cameras_truncated: false
     }
     for (var k in overrides) m[k] = overrides[k]
     return m
@@ -36,7 +36,8 @@ TestCase {
     var m = {
       v: 1, type: "state", changed: ["state"], state: "idle", enabled: true, error: "",
       active_camera: brioId, active_camera_name: "Logitech MX Brio", consumers: 0,
-      output_mode: "NV12 1920x1080@30", effect: "none", interface_revision: 1
+      output_mode: "NV12 1920x1080@30", effect: "none", blur_strength: 0.5, background_image: "",
+      interface_revision: 2
     }
     for (var k in overrides) m[k] = overrides[k]
     return m
@@ -405,16 +406,20 @@ TestCase {
       cameras: cameraObjects().concat([{ id: "third", name: "Third", usb: "", active: false }]), cameras_truncated: false })).record
     var stops = Model.cursorStops(r, r.cameras.length)
     compare(JSON.stringify(stops.map(function(s) { return s.kind + s.index })),
-            JSON.stringify(["switch-1", "camera0", "camera1", "camera2", "next-1"]))
-    compare(Model.cursorStops(r, 2).length, 4, "follows the rendered row count")
+            JSON.stringify(["switch-1", "effect-1", "camera0", "camera1", "camera2", "next-1"]))
+    compare(Model.cursorStops(r, 2).length, 5, "follows the rendered row count")
     var one = snap({ cameras: [cameraObjects()[0]] })
-    compare(JSON.stringify(Model.cursorStops(one, 1).map(function(s) { return s.kind })), JSON.stringify(["switch", "camera"]))
+    compare(JSON.stringify(Model.cursorStops(one, 1).map(function(s) { return s.kind })), JSON.stringify(["switch", "effect", "camera"]))
     compare(Model.cursorStops(Model.emptyRecord("not-running"), 3).length, 0)
+    // a CLI that predates effects: nothing on the effect row can be requested
+    compare(JSON.stringify(Model.cursorStops(snap({ cameras: [cameraObjects()[0]], blur_strength: undefined }), 1)
+                           .map(function(s) { return s.kind })), JSON.stringify(["switch", "camera"]))
     compare(Model.clampCursor(-3, 5), 0)
     compare(Model.clampCursor(9, 5), 4)
     compare(Model.clampCursor(2, 0), 0)
-    compare(Model.stopIndex(stops, "camera", 2), 3)
-    compare(Model.stopIndex(stops, "next", -1), 4)
+    compare(Model.stopIndex(stops, "camera", 2), 4)
+    compare(Model.stopIndex(stops, "effect", -1), 1)
+    compare(Model.stopIndex(stops, "next", -1), 5)
     compare(Model.stopIndex(stops, "camera", 7), -1)
   }
 
@@ -466,6 +471,12 @@ TestCase {
     compare(Model.sanitize("a&b", 64), "ab")
     compare(Model.sanitize("line1\nline2\r\tend", 64), "line1 line2 end")
     compare(Model.sanitize("\u202eevil", 64), "evil")
+    // bidi marks and zero-width characters, mid-string as well as at the ends
+    compare(Model.sanitize("/h/\u202egnp.exe\u2066\u061c\u200b\ufeff", 64), "/h/gnp.exe")
+    compare(Model.sanitize("a\u061cb\u200bc\ufeffd\u200ee\u200ff\u2068g\u2069h", 64), "abcdefgh")
+    verify(!/[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/.test(
+             Model.sanitize("\u061c\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2060\u2061\u2064\u2066\u2067\u2068\u2069\u206a\u206f\ufeffx", 64)))
+    compare(Model.sanitize("\u2060\u2061\u2062\u2063\u2064\u206a\u206fx", 64), "x", "invisible formatting block")
     compare(Model.sanitize(42, 64), "")
     compare(Model.sanitize(null, 64), "")
     var r = snap({ cameras: [{ id: "<b>id</b>", name: "<img src='http://x/y'>", usb: "<u>", active: false }],
@@ -476,6 +487,50 @@ TestCase {
       verify(!/[<>&\n]/.test(texts[i]), "sanitised: " + texts[i])
     }
     compare(r.cameras[0].id, "<b>id</b>", "the raw id is kept for argv")
+  }
+
+  // The joiners are kept: emoji sequences and Persian or Arabic words need them.
+  function test_sanitize_keeps_joiners() {
+    // family: man ZWJ woman ZWJ girl
+    var family = "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67"
+    compare(Model.sanitize(family, 64), family, "emoji ZWJ sequence")
+    compare(Model.sanitize("Cam " + family + " HD", 64), "Cam " + family + " HD")
+    // woman technologist with a variation selector: ZWJ and VS16 survive
+    var tech = "\ud83d\udc69\ud83c\udfff\u200d\ud83d\udcbb\ufe0f"
+    compare(Model.sanitize(tech, 64), tech, "skin tone, ZWJ, variation selector")
+    // Persian "mi-khaham" (I want): ZWNJ between the prefix and the stem
+    var persian = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"
+    compare(Model.sanitize(persian, 64), persian, "Persian name with ZWNJ")
+    compare(Model.sanitize("\u0648\u0628\u200c\u06a9\u0645 USB", 64), "\u0648\u0628\u200c\u06a9\u0645 USB")
+    // in a record: the camera name and the active camera name
+    var r = snap({ cameras: [{ id: "a", name: persian, usb: "1234:abcd", active: true },
+                             { id: "b", name: family, usb: "1234:abce", active: false }],
+                   active_camera: "a", active_camera_name: persian })
+    compare(r.cameras[0].name, persian)
+    compare(r.cameras[1].name, family)
+    compare(r.activeCameraName, persian)
+  }
+
+  function test_sanitize_strips_bidi_overrides_around_joiners() {
+    var persian = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"
+    var family = "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67"
+    // an override and isolates are removed, the joiners next to them stay
+    compare(Model.sanitize("\u202e" + persian, 64), persian, "RLO stripped")
+    compare(Model.sanitize("\u202a" + family + "\u202c\u2066\u2067\u2068\u2069", 64), family)
+    compare(Model.sanitize("Cam \u202egnp.exe", 64), "Cam gnp.exe")
+    compare(Model.sanitize("a\u202eb\u200dc\u2067d\u200ce\u2069f", 64), "ab\u200dcd\u200cef")
+    // markup and control characters still go
+    compare(Model.sanitize("<b>" + persian + "&\n</b>", 64), "b" + persian + " /b")
+  }
+
+  function test_sanitize_marks_a_precut_even_when_little_is_left() {
+    var junk = ""
+    for (var i = 0; i < 2100; i++) junk += "<"
+    var s = Model.sanitize("/" + junk + "tail.png", 512)
+    compare(s, "/\u2026", "the cut shows")
+    compare(Model.sanitize(junk, 64), "\u2026")
+    // a string that fits is not marked
+    compare(Model.sanitize("<<<ok>>>", 64), "ok")
   }
 
   function test_sanitize_long_strings_capped() {
@@ -681,6 +736,293 @@ TestCase {
     compare(JSON.stringify(seen.slice(0, 6)), JSON.stringify([1000, 2000, 4000, 8000, 16000, 30000]))
     compare(ms, Model.BACKOFF_MAX_MS)
     compare(Model.nextBackoff(NaN), 2000)
+  }
+
+  // ---- effects -------------------------------------------------------------
+
+  readonly property string image: "/home/u/Pictures/office.jpg"
+
+  function test_effect_argv_whitelist() {
+    for (var i = 0; i < Model.EFFECTS.length; i++)
+      compare(JSON.stringify(Model.effectArgv(cli, Model.EFFECTS[i])), JSON.stringify([cli, "effect", Model.EFFECTS[i]]))
+    compare(JSON.stringify(Model.EFFECTS), JSON.stringify(["none", "blur", "replace"]))
+    var refused = ["", "blur; rm -rf ~", "--image", "--image=/etc/passwd", "-h", "Blur", " blur", "blur ",
+                   "blur\n", "none\u0000", "$(id)", "`id`", "replace --image /x", "unknown", "constructor",
+                   "toString", "__proto__", "0", "next"]
+    for (var r = 0; r < refused.length; r++)
+      compare(Model.effectArgv(cli, refused[r]), null, JSON.stringify(refused[r]))
+    var odd = [null, undefined, 0, 1, true, ["blur"], { effect: "blur" }, new String("blur")]
+    for (var o = 0; o < odd.length; o++) compare(Model.effectArgv(cli, odd[o]), null, String(odd[o]))
+    compare(Model.effectArgv("", "blur"), null, "no CLI")
+    compare(Model.effectArgv("oma-broadcast", "blur"), null, "a bare name is not a CLI path")
+    compare(Model.effectArgv("/a/b\nc", "blur"), null)
+  }
+
+  function test_effect_fields_parsed() {
+    var r = snap({ effect: "blur", blur_strength: 0.5, background_image: image })
+    compare(r.effect, "blur")
+    compare(r.effectKey, "blur")
+    compare(r.blurStrength, 0.5)
+    compare(r.backgroundImage, image)
+    verify(r.cliEffects)
+    verify(r.backgroundImageSet)
+    // absent fields (an older producer; JSON drops undefined) read unknown / empty
+    var old = snap({ blur_strength: undefined, background_image: undefined })
+    compare(old.effectKey, "none")
+    compare(old.blurStrength, null)
+    compare(old.backgroundImage, "")
+    compare(old.backgroundImageSet, false)
+    compare(old.cliEffects, false)
+    // a state line replaces them, as every scalar
+    var s = Model.reduce(r, line(stateObject({ changed: ["effect", "blur_strength"], effect: "replace",
+                                               blur_strength: 0.25, background_image: image }))).record
+    compare(s.effectKey, "replace")
+    compare(s.blurStrength, 0.25)
+    compare(r.effectKey, "blur", "the old record is not mutated")
+    var cleared = Model.reduce(s, line(stateObject({ changed: ["background_image"], effect: "none", background_image: "",
+                                                     blur_strength: undefined }))).record
+    compare(cleared.backgroundImage, "")
+    compare(cleared.backgroundImageSet, false)
+    compare(cleared.blurStrength, null)
+    compare(cleared.cliEffects, false, "a state line decides the capability as a snapshot does")
+    compare(Model.emptyRecord("not-running").effectKey, "")
+    compare(Model.emptyRecord("not-running").cliEffects, false)
+    compare(Model.emptyRecord("not-running").backgroundImageSet, false)
+  }
+
+  function test_blur_strength_bounds() {
+    var good = [0, 1, 0.5, 0.001]
+    for (var i = 0; i < good.length; i++) compare(snap({ blur_strength: good[i] }).blurStrength, good[i])
+    // JSON cannot carry NaN or Infinity; the reducer sees them only through
+    // Model.blurStrength itself.
+    var bad = [NaN, Infinity, -Infinity, -0.01, -1, 1.0001, 2, 1e300]
+    for (var b = 0; b < bad.length; b++) compare(Model.blurStrength(bad[b]), null, String(bad[b]))
+    var wire = [-0.5, 1.5, 1e300, "0.5", "", null, true, [0.5], { v: 0.5 }]
+    for (var w = 0; w < wire.length; w++)
+      compare(snap({ blur_strength: wire[w] }).blurStrength, null, JSON.stringify(wire[w]))
+    var r = snap({ effect: "blur", blur_strength: 0.456 })
+    compare(JSON.stringify(Model.effectRows(r)), JSON.stringify([{ label: "Strength", value: "46 %" }]))
+    compare(Model.effectRows(snap({ effect: "blur", blur_strength: 1.5 }))[0].value, Model.UNKNOWN)
+    compare(Model.effectRows(snap({ effect: "blur", blur_strength: "0.5" })).length, 0, "a string: a CLI without effects")
+    compare(Model.effectRows(snap({ effect: "none", blur_strength: 0.5 })).length, 0, "only while blurring")
+  }
+
+  function test_background_image_sanitised_and_capped() {
+    var hostile = snap({ effect: "replace", background_image: "/tmp/<img src='http://x/y'>&\n\u202epic.png" })
+    verify(!/[<>&\n\u202e]/.test(hostile.backgroundImage), hostile.backgroundImage)
+    verify(hostile.backgroundImage.indexOf("/tmp/") === 0, hostile.backgroundImage)
+    var long = "/"
+    for (var i = 0; i < 5000; i++) long += "d"
+    var r = snap({ effect: "replace", background_image: long })
+    compare(r.backgroundImage.length, Model.IMAGE_PATH_CAP)
+    compare(r.backgroundImage.charAt(r.backgroundImage.length - 1), "\u2026", "ellipsised")
+    var odd = [42, null, true, ["/a"], { p: "/a" }]
+    for (var o = 0; o < odd.length; o++)
+      compare(snap({ background_image: odd[o] }).backgroundImage, "", JSON.stringify(odd[o]))
+    compare(JSON.stringify(Model.effectRows(snap({ effect: "replace", background_image: image }))),
+            JSON.stringify([{ label: "Image", value: "\u2066" + image + "\u2069" }]), "inside a left-to-right isolate")
+    // a path whose first letter is right-to-left still sits in an LTR isolate
+    var heb = "/\u05d0\u05d1\u05d2/c.png"
+    compare(Model.effectRows(snap({ effect: "replace", background_image: heb }))[0].value,
+            "\u2066" + heb + "\u2069", "LRI, not first-strong")
+    compare(Model.effectRows(snap({ effect: "replace", background_image: "" }))[0].value, Model.UNKNOWN)
+  }
+
+  function test_unknown_effect_is_never_selected() {
+    var r = snap({ effect: "sepia<b>", background_image: image })
+    compare(r.effectKey, "")
+    compare(r.effect, "sepiab", "display copy only, sanitised")
+    var opts = Model.effectOptions(r)
+    compare(opts.filter(function(o) { return o.selected }).length, 0)
+    compare(JSON.stringify(opts.map(function(o) { return o.value })), JSON.stringify(Model.EFFECTS),
+            "the choices are the whitelist, never the daemon's word")
+    var hint = Model.effectHint(r)
+    verify(hint.text.indexOf("does not know: sepiab") !== -1, hint.text)
+    compare(hint.commandText, "")
+    compare(Model.effectSummary(r), "")
+    compare(Model.effectRows(r).length, 0)
+    compare(Model.effectIndex(r.effectKey), -1)
+    // one that differs only in case or spacing is unknown too
+    compare(snap({ effect: "Blur" }).effectKey, "")
+    compare(snap({ effect: " blur" }).effectKey, "")
+    compare(snap({ effect: 7 }).effectKey, "")
+  }
+
+  function test_replace_needs_a_background_image() {
+    var none = snap({ effect: "none", background_image: "" })
+    verify(Model.effectSelectable(none, "none"))
+    verify(Model.effectSelectable(none, "blur"))
+    verify(!Model.effectSelectable(none, "replace"), "no image: Replace is not offered")
+    var opts = Model.effectOptions(none)
+    compare(JSON.stringify(opts.map(function(o) { return o.label })), JSON.stringify(["None", "Blur", "Replace"]))
+    compare(JSON.stringify(opts.map(function(o) { return o.selected })), JSON.stringify([true, false, false]))
+    compare(JSON.stringify(opts.map(function(o) { return o.selectable })), JSON.stringify([false, true, false]),
+            "the current effect and Replace without an image cannot be chosen")
+    compare(JSON.stringify(opts.map(function(o) { return o.faded })), JSON.stringify([false, false, true]),
+            "only Replace is faded; the current effect never is")
+    var hint = Model.effectHint(none)
+    compare(hint.text, "Replace needs an image:")
+    compare(hint.commandText, "oma-broadcast effect replace --image PATH")
+    verify(opts[2].tooltip.indexOf("under [effect]") !== -1, opts[2].tooltip)
+    compare(opts[0].tooltip, "The camera image, unchanged")
+    compare(Model.intentArgv({ verb: "effect", effect: "replace" }, cli, none), null)
+    // an image the daemon holds makes it selectable, and the hint goes
+    var withImage = snap({ effect: "blur", blur_strength: 0.5, background_image: image })
+    verify(Model.effectSelectable(withImage, "replace"))
+    compare(JSON.stringify(Model.effectOptions(withImage).map(function(o) { return o.selectable })),
+            JSON.stringify([true, false, true]))
+    compare(Model.effectHint(withImage).text, "")
+    compare(Model.effectHint(withImage).commandText, "")
+    compare(Model.effectOptions(withImage)[2].tooltip, "Replace the background with the background image")
+    verify(Model.effectOptions(withImage)[2].tooltip.indexOf("configured") === -1)
+    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "replace" }, cli, withImage)),
+            JSON.stringify([cli, "effect", "replace"]))
+    // the gate reads the raw field, not the display copy: a path that sanitises
+    // to nothing is still an image the daemon holds, and the hint agrees
+    var blank = snap({ effect: "replace", background_image: "<>&" })
+    compare(blank.backgroundImage, "")
+    verify(blank.backgroundImageSet)
+    verify(Model.effectSelectable(snap({ background_image: "<>&" }), "replace"))
+    compare(Model.effectHint(blank).text, "", "no 'needs an image' hint while one is set")
+    compare(Model.effectRows(blank)[0].value, Model.UNKNOWN)
+    verify(Model.effectSelectable(snap({ background_image: "\n\n\t" }), "replace"))
+  }
+
+  function test_cli_without_effects_offers_none() {
+    // The committed CLI before effects: "effect":"none", no blur_strength, no
+    // background_image, and no `effect` command (clap exits 2).
+    var old = snap({ blur_strength: undefined, background_image: undefined })
+    verify(Model.available(old))
+    compare(old.cliEffects, false)
+    var opts = Model.effectOptions(old)
+    compare(opts.filter(function(o) { return o.selectable }).length, 0, "no choice is offered")
+    compare(opts.filter(function(o) { return o.faded }).length, 3, "the whole row is faded, None included")
+    for (var i = 0; i < opts.length; i++) {
+      compare(opts[i].tooltip, Model.CLI_NO_EFFECTS)
+      compare(Model.effectSelectable(old, Model.EFFECTS[i]), false)
+      compare(Model.intentArgv({ verb: "effect", effect: Model.EFFECTS[i] }, cli, old), null, Model.EFFECTS[i])
+    }
+    var hint = Model.effectHint(old)
+    compare(hint.text, "The oma-broadcast CLI needs updating for effects.")
+    compare(hint.commandText, "")
+    verify(hint.text.indexOf("plugin") === -1, "never blamed on the plugin")
+    compare(Model.effectRows(old).length, 0)
+    // even with a background image field but no blur_strength
+    compare(Model.effectSelectable(snap({ blur_strength: undefined, background_image: image }), "replace"), false)
+    // a blur_strength that is a number but out of range still means the CLI knows effects
+    var odd = snap({ blur_strength: 7 })
+    verify(odd.cliEffects)
+    compare(odd.blurStrength, null)
+    // a string is not the new producer's number
+    compare(snap({ blur_strength: "0.5" }).cliEffects, false)
+    // the other controls are untouched
+    verify(Model.intentArgv({ verb: "enable", on: false }, cli, old) !== null)
+  }
+
+  function test_daemon_without_effects_offers_none() {
+    // A new CLI (blur_strength a number) still talking to a daemon started
+    // before the upgrade: interface revision 1. The CLI would refuse every
+    // `effect` request ("the daemon does not support effects").
+    var old = snap({ interface_revision: 1 })
+    verify(Model.available(old))
+    verify(old.cliEffects, "the CLI knows effects")
+    compare(old.interfaceRevision, 1)
+    verify(!Model.effectsSupported(old))
+    var opts = Model.effectOptions(old)
+    compare(opts.filter(function(o) { return o.selectable }).length, 0, "no choice is offered")
+    compare(opts.filter(function(o) { return o.faded }).length, 3, "the whole row is faded, None included")
+    for (var i = 0; i < opts.length; i++) {
+      compare(opts[i].tooltip, Model.DAEMON_NO_EFFECTS)
+      compare(Model.effectSelectable(old, Model.EFFECTS[i]), false)
+      compare(Model.intentArgv({ verb: "effect", effect: Model.EFFECTS[i] }, cli, old), null, Model.EFFECTS[i])
+    }
+    var hint = Model.effectHint(old)
+    compare(hint.text, "The daemon needs updating for effects.")
+    compare(hint.commandText, "")
+    verify(hint.text !== Model.CLI_NO_EFFECTS + ".", "distinct from the CLI line")
+    compare(Model.effectRows(snap({ interface_revision: 1, effect: "blur" })).length, 0)
+    compare(Model.effectSelectable(snap({ interface_revision: 1, background_image: image }), "replace"), false)
+    compare(JSON.stringify(Model.cursorStops(snap({ interface_revision: 1, cameras: [cameraObjects()[0]] }), 1)
+                           .map(function(s) { return s.kind })), JSON.stringify(["switch", "camera"]))
+    verify(Model.intentArgv({ verb: "enable", on: false }, cli, old) !== null, "the other controls are untouched")
+    // an old CLI with an old daemon names the CLI first: it is what to update first
+    var both = snap({ interface_revision: 1, blur_strength: undefined })
+    compare(Model.effectHint(both).text, "The oma-broadcast CLI needs updating for effects.")
+    compare(Model.effectOptions(both)[0].tooltip, Model.CLI_NO_EFFECTS)
+    // a state line from the restarted daemon brings effects back
+    var back = Model.reduce(old, line(stateObject({ changed: ["interface_revision"], interface_revision: 2 }))).record
+    compare(back.interfaceRevision, 2)
+    verify(Model.effectsSupported(back))
+    compare(Model.effectHint(back).text, "Replace needs an image:")
+    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, back)), JSON.stringify([cli, "effect", "blur"]))
+    // and one from a daemon downgraded again takes them away
+    var down = Model.reduce(back, line(stateObject({ changed: ["interface_revision"], interface_revision: 1 }))).record
+    verify(!Model.effectsSupported(down))
+    compare(Model.emptyRecord("not-running").interfaceRevision, -1)
+  }
+
+  function test_daemon_revision_bounds() {
+    // revision 2 and anything later (up to the producer's u32) offers effects
+    var good = [2, 3, 1000, 4294967295]
+    for (var i = 0; i < good.length; i++) {
+      var r = snap({ interface_revision: good[i] })
+      compare(r.interfaceRevision, good[i])
+      verify(Model.effectsSupported(r), String(good[i]))
+      verify(Model.effectSelectable(r, "blur"), String(good[i]))
+      compare(Model.effectHint(r).text, "Replace needs an image:", String(good[i]))
+    }
+    // below 2, or unreadable: unknown, read as a daemon without effects
+    var bad = [undefined, null, 0, 1, -1, -2, 1.5, 2.5, NaN, Infinity, -Infinity, 4294967296, 1e300,
+               "2", "", true, [2], { v: 2 }]
+    for (var b = 0; b < bad.length; b++) {
+      var name = typeof bad[b] + " " + String(bad[b])
+      var o = snap({ interface_revision: bad[b] })
+      verify(Model.available(o), name)
+      compare(o.interfaceRevision, bad[b] === 0 || bad[b] === 1 ? bad[b] : -1, name)
+      verify(!Model.effectsSupported(o), name)
+      compare(Model.effectOptions(o).filter(function(x) { return x.selectable }).length, 0, name)
+      compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, o), null, name)
+      compare(Model.effectHint(o).text, "The daemon needs updating for effects.", name)
+      compare(Model.cursorStops(o, 0).filter(function(s) { return s.kind === "effect" }).length, 0, name)
+    }
+    // JSON carries NaN and Infinity as null; the reader itself refuses them too
+    compare(Model.interfaceRevision(NaN), -1)
+    compare(Model.interfaceRevision(Infinity), -1)
+    compare(Model.interfaceRevision(-0.5), -1)
+    // a number too large for a double: Qt's JSON.parse refuses the line (an
+    // engine that reads it as Infinity gets -1); never effects either way
+    var text = line(snapshotObject({})).replace('"interface_revision":2', '"interface_revision":1e999')
+    verify(text.indexOf("1e999") > 0)
+    var huge = Model.reduce(Model.emptyRecord("connecting"), text)
+    if (huge.outcome === "snapshot") compare(huge.record.interfaceRevision, -1)
+    else compare(huge.outcome, "invalid")
+    verify(!Model.effectsSupported(huge.record))
+  }
+
+  function test_effect_intents_are_rechecked_when_they_run() {
+    var r = snap()
+    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, r)), JSON.stringify([cli, "effect", "blur"]))
+    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "none" }, cli, r)), JSON.stringify([cli, "effect", "none"]))
+    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, Model.emptyRecord("not-running")), null,
+            "never D-Bus-activates a stopped daemon")
+    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, snap({ state: "dancing" })), null)
+    compare(Model.intentArgv({ verb: "effect", effect: "blur; rm" }, cli, r), null)
+    compare(Model.intentArgv({ verb: "effect", effect: "--image" }, cli, r), null)
+    compare(Model.intentArgv({ verb: "effect" }, cli, r), null)
+    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, "", r), null)
+    verify(!Model.effectSelectable(null, "blur"))
+    compare(Model.effectOptions(Model.emptyRecord("not-running")).filter(function(o) { return o.selectable }).length, 0)
+    compare(Model.effectHint(Model.emptyRecord("not-running")).text, "")
+    compare(Model.effectRows(Model.emptyRecord("not-running")).length, 0)
+  }
+
+  function test_effect_in_tooltip() {
+    compare(Model.tooltipText(snap({ effect: "blur" })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background blurred")
+    compare(Model.tooltipText(snap({ effect: "replace", background_image: image })),
+            "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background replaced")
+    compare(Model.tooltipText(snap({ effect: "none" })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
+    compare(Model.tooltipText(snap({ effect: "sepia" })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
+    compare(Model.tooltipText(snap({ state: "off", enabled: false, effect: "blur" })), "OMA Broadcast: off")
   }
 
   // ---- CLI resolution ------------------------------------------------------
