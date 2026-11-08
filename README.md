@@ -48,6 +48,15 @@ mkdir -p ~/.config/omarchy/plugins
 ln -s "$PWD/clients/omarchy-bar/br.com.dias.oma-broadcast" ~/.config/omarchy/plugins/br.com.dias.oma-broadcast
 ```
 
+With the Arch package ([setup/daemon.md](../../docs/setup/daemon.md#install)), the plugin is installed under `/usr/share/oma-broadcast/omarchy-bar/`; link that directory instead:
+
+```sh
+mkdir -p ~/.config/omarchy/plugins
+ln -s /usr/share/oma-broadcast/omarchy-bar/br.com.dias.oma-broadcast ~/.config/omarchy/plugins/br.com.dias.oma-broadcast
+```
+
+`scripts/install-user.sh` does not install the plugin; use the link from the repository above.
+
 To copy instead of linking (edits in the repository then no longer apply), use `cp -r clients/omarchy-bar/br.com.dias.oma-broadcast ~/.config/omarchy/plugins/`. The `tests/` directory inside the plugin is not needed at run time and may be left out of a copy.
 
 Enable the plugin, which also places the widget in the right section of the bar:
@@ -72,7 +81,7 @@ One setting, `cliPath`, the absolute path of the `oma-broadcast` binary. A leadi
 The binary is resolved in this order:
 
 1. `cliPath`, if set. If it is set but unusable, the widget says so and does not fall back.
-2. `oma-broadcast` on the shell's `PATH` (Omarchy's shell includes `~/.cargo/bin`, where `cargo install` puts it).
+2. `oma-broadcast` on the shell's `PATH` (normally the case for all three install locations: `/usr/bin` for the Arch package, `~/.local/bin` for `scripts/install-user.sh`, `~/.cargo/bin` for `cargo install`; Omarchy's default shell environment appends `~/.local/bin` to `PATH`). The shell must have the directory on its own `PATH`; if it does not, set `cliPath`.
 3. A development build: `target/release/oma-broadcast` of the repository, found from the real directory of the plugin through the symlink (`<plugin directory>/../../../target/release/oma-broadcast`).
 
 A binary found on `PATH` wins over the development build, so a stale installed binary hides a fresh build; set `cliPath` to choose. Resolution runs when a widget appears, once after each failed start of the CLI, and when the setting changes, never on a timer. If nothing was found and you install the CLI afterwards, reload the shell or change the setting.
@@ -94,7 +103,7 @@ When the daemon stops or restarts, the stream says so and the icon shows "unavai
 |---|---|---|
 | oma-broadcastd is not running | the service is stopped | `systemctl --user start oma-broadcastd`, or enable it ([setup/daemon.md](../../docs/setup/daemon.md)) |
 | oma-broadcastd is not answering | the service runs but does not reply on the bus | `journalctl --user -u oma-broadcastd`; the widget retries every 2 s |
-| oma-broadcast CLI not found, or "not on PATH ... no development build at ..." | no binary at `cliPath`, on `PATH` or in `target/release` | `cargo install --path crates/oma-broadcast`, or set `cliPath`; then reload or change the setting |
+| oma-broadcast CLI not found, or "not on PATH ... no development build at ..." | no binary at `cliPath`, on `PATH` or in `target/release` | install the CLI (Arch package, `scripts/install-user.sh` or `cargo install --path crates/oma-broadcast`) and make sure its directory is on the shell's `PATH`, or set `cliPath`; then reload or change the setting |
 | cliPath must be an absolute path | `cliPath` is a bare name or a relative path | use an absolute path or one starting with `~/` |
 | oma-broadcast watch stopped / exited with status N / stopped by signal N; restarting in N s | the watch process ended | the widget restarts it with backoff; if it repeats, run `oma-broadcast watch --json` in a terminal |
 | Unsupported oma-broadcast version | the CLI prints a schema version the plugin does not know, or a line over the limit | update the plugin or the CLI so they match ([cli-json.md](../../docs/cli-json.md)) |
