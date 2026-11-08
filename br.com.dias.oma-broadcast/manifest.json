@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "br.com.dias.oma-broadcast",
   "name": "OMA Broadcast",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
   "description": "Status and control of the oma-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace) and live stream figures.",
