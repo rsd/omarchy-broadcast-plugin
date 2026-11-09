@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
   "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace), a noise removal switch and live stream figures.",
@@ -19,7 +19,9 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "cliPath": ""
+      "cliPath": "",
+      "previewEnabled": false,
+      "previewFps": 15
     },
     "schema": [
       {
@@ -28,6 +30,23 @@
         "label": "omarchy-broadcast CLI path",
         "defaultValue": "",
         "description": "Optional. Absolute path to the omarchy-broadcast binary (a leading ~/ is your home); a bare name or a relative path is refused. Empty: omarchy-broadcast on PATH, else the repository's target/release build next to the plugin."
+      },
+      {
+        "key": "previewEnabled",
+        "type": "boolean",
+        "label": "Preview in the panel",
+        "defaultValue": false,
+        "description": "On: opening the panel starts the camera and shows what apps receive. Off: the panel shows the preview only while another app already uses the camera. Needs omarchy-broadcast 0.18 or newer."
+      },
+      {
+        "key": "previewFps",
+        "type": "integer",
+        "label": "Preview rate",
+        "min": 15,
+        "max": 30,
+        "step": 15,
+        "defaultValue": 15,
+        "description": "15 or 30 frames per second; any other value reads as 15."
       }
     ]
   }

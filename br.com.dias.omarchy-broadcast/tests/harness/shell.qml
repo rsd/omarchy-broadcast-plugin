@@ -65,6 +65,7 @@ ShellRoot {
     urgent: Commons.Color.urgent
     fontFamily: Commons.Style.font.family
     barSize: Commons.Style.bar.sizeHorizontal
+    shell: fakeShell
   }
   PluginBarApi {
     id: barB
@@ -76,6 +77,31 @@ ShellRoot {
     urgent: Commons.Color.urgent
     fontFamily: Commons.Style.font.family
     barSize: Commons.Style.bar.sizeHorizontal
+    shell: fakeShell
+  }
+
+  // The shell's updateEntryInline, as a bar entry sees it: records each write
+  // and hands the entry back to every widget as the bar does (without its id).
+  // `refuse`: stands for a shell that finds no layout entry to write; the
+  // call is recorded in `refused`, nothing is handed back, and it answers
+  // false, as the real one does.
+  QtObject {
+    id: fakeShell
+    property var calls: []
+    property bool refuse: false
+    property var refused: []
+    function updateEntryInline(id, settings) {
+      if (refuse) {
+        refused = refused.concat([{ id: id, entry: JSON.parse(JSON.stringify(settings)) }])
+        return false
+      }
+      calls = calls.concat([{ id: id, entry: JSON.parse(JSON.stringify(settings)) }])
+      var copy = {}
+      for (var k in settings) if (k !== "id") copy[k] = settings[k]
+      if (h.widgetA) h.widgetA.settings = JSON.parse(JSON.stringify(copy))
+      if (h.widgetB) h.widgetB.settings = JSON.parse(JSON.stringify(copy))
+      return true
+    }
   }
 
   FloatingWindow {
@@ -224,6 +250,39 @@ ShellRoot {
     }
 
     function content(w) { return w && w.popup ? w.popup.loadedContent : null }
+    // A chip of the preview-rate ButtonGroup (its delegates have no name).
+    function fpsChip(w, value) {
+      var group = find(w, "fpsChoices")
+      var kids = group ? group.children : []
+      for (var i = 0; i < kids.length; i++) if (kids[i].text === value + " fps") return kids[i]
+      return null
+    }
+    // A light palette for one screenshot, and back: the theme's foundational
+    // colours, with the per-surface roles dropped so every surface follows.
+    property var savedPalette: null
+    function lightPalette(on) {
+      var C = Commons.Color
+      if (on) {
+        // Strings: a colour read off a property is a live reference in Qt 6,
+        // and would come back as the light value.
+        savedPalette = { foreground: String(C.foreground), background: String(C.background), accent: String(C.accent),
+                         urgent: String(C.urgent), muted: String(C.muted), shellValues: C.shellValues }
+        C.shellValues = ({})
+        C.foreground = "#2b2f33"
+        C.background = "#f4f1ea"
+        C.accent = "#2a6fb0"
+        C.urgent = "#b0302a"
+        C.muted = "#8a8f94"
+      } else if (savedPalette) {
+        C.foreground = savedPalette.foreground
+        C.background = savedPalette.background
+        C.accent = savedPalette.accent
+        C.urgent = savedPalette.urgent
+        C.muted = savedPalette.muted
+        C.shellValues = savedPalette.shellValues
+        savedPalette = null
+      }
+    }
     function find(w, name) { return findByName(content(w), name) }
     function row(w, i) {
       var rep = find(w, "cameraRepeater")
@@ -238,6 +297,21 @@ ShellRoot {
       var prefix = shellRoot.mode === "live" ? "^" : "^/bin/sh "
       pgrepProc.command = ["pgrep", "-cf", prefix + regexEscape(cli || shellRoot.cli) + " watch --json$"]
       pgrepProc.running = true
+    }
+    // Preview children of the fake: `--fps N` when given, else either.
+    function countPreviews(fps) {
+      countFresh = false
+      pgrepProc.command = ["pgrep", "-cf", "^/bin/sh " + regexEscape(shellRoot.cli) + " preview --json --fps "
+                           + (fps ? String(fps) : "(15|30)") + "$"]
+      pgrepProc.running = true
+    }
+    function previewCountStep(want, label, fps) {
+      step("count preview processes (" + label + ")", function() { h.countPreviews(fps) },
+           function() {
+             if (!h.countFresh) return false
+             h.eq("preview processes" + (fps ? " at " + fps + " fps " : " ") + label, h.watchCount, want)
+             return true
+           })
     }
     function countStep(want, label, cli) {
       step("count watch processes (" + label + ")", function() { h.countWatches(cli) },
@@ -1318,6 +1392,8 @@ ShellRoot {
       h.feed([snapshotLine({})])
     }, function() { return S().record.cameras.length === 3 })
 
+    previewScenario()
+
     // the resolver itself: PATH first, then the development build behind a
     // symlink (in the scratch development tree, not the plugin's checkout)
     var resolverCase = function(label, argv, path, wantOut, wantExit) {
@@ -1432,6 +1508,492 @@ ShellRoot {
     h.wait(500)
     h.countStep(0, "with zero widgets at the end")
     h.countStep(0, "of the dev build at the end", devCli)
+  }
+
+  // ---- the live preview (mock): R1, one process, ingestion, settings -------------
+  //
+  // The fake's `preview --json` writes real JPEGs into this shell's scratch
+  // XDG_RUNTIME_DIR (run-harness.sh) and prints the CLI's NDJSON lines.
+  function previewScenario() {
+    var A = function() { return h.widgetA }
+    var B = function() { return h.widgetB }
+    var S = function() { return h.widgetA.service }
+    var P = function() { return h.widgetA.previewService }
+    var rt = Quickshell.env("XDG_RUNTIME_DIR")
+    var framePath = rt + "/omarchy-broadcast/preview.jpg"
+    var rev5 = function(o) {
+      var m = { interface_revision: 5, loopback_consumers: 0, pipewire_consumers: 0 }
+      for (var k in o) m[k] = o[k]
+      return m
+    }
+    // Every source the Image is given, and how many reloads it does.
+    // (Whether the last frame stays painted during a reload is not visible
+    // in any property here — paintedWidth keeps its value either way — so
+    // retainWhileLoading is asserted by check-source.py instead.)
+    var probe = function() {
+      var img = h.find(A(), "previewImage")
+      if (!img || h.notes.probed === img) return
+      h.notes.probed = img
+      h.notes.sources = []
+      h.notes.loads = 0
+      img.sourceChanged.connect(function() { h.notes.sources.push(String(img.source)) })
+      img.statusChanged.connect(function() { if (img.status === Image.Loading) h.notes.loads++ })
+    }
+    var foreignSources = function() {
+      var bad = []
+      var want = "file://" + framePath + "?"
+      for (var i = 0; i < h.notes.sources.length; i++) {
+        var src = h.notes.sources[i]
+        if (src !== "" && !(src.indexOf(want) === 0 && /^\d+$/.test(src.slice(want.length)))) bad.push(src)
+      }
+      return bad
+    }
+
+    h.step("preview: a revision-5 daemon, idle, panel closed, two monitors", function() {
+      // The second monitor's widget, from the same URL as the first (one
+      // singleton); destroyed again at the end of these checks.
+      if (h.widgetB) h.widgetB.destroy()
+      h.widgetB = h.makeWidget(barB, { cliPath: shellRoot.cli })
+      h.removeFile("preview-hostile")
+      h.removeFile("preview-exit")
+      h.removeFile("preview-error")
+      h.feed([snapshotLine(rev5({}))])
+    }, function() { return S().record.interfaceRevision === 5 && S().attachedCount === 2 && h.writerIdle() })
+    h.wait(300)
+    h.step("preview: nothing while no panel is open", function() {
+      h.eq("expected path under the scratch XDG_RUNTIME_DIR", P().expectedPath, framePath)
+      h.check("XDG_RUNTIME_DIR is the harness's", rt === shellRoot.fakeDir.replace(/\/fake$/, "/runtime"), rt)
+      h.eq("both widgets share one preview service", A().previewService === B().previewService, true)
+      h.eq("supported", P().supported, true)
+      h.eq("switch off by default", P().switchOn, false)
+      h.eq("fps 15 by default", P().fps, 15)
+      h.eq("not wanted", P().wanted, false)
+      h.eq("never started", P().starts, 0)
+    })
+    h.previewCountStep(0, "panel closed")
+
+    h.step("preview: open the panel while idle", function() { A().open() }, function() { return h.content(A()) !== null })
+    h.wait(500)
+    h.step("preview: the panel does not start the camera", function() {
+      probe()
+      h.eq("held by the open panel", P().heldCount, 1)
+      h.eq("not wanted", P().wanted, false)
+      h.eq("never started", P().starts, 0)
+      h.eq("note", h.find(A(), "previewNote").text, "Camera idle; turn on Preview to start it")
+      h.eq("note shown, one line instead of the frame area", h.find(A(), "previewNote").visible, true)
+      h.eq("no empty frame area", h.find(A(), "previewFrame").visible, false)
+      h.eq("image hidden", h.find(A(), "previewImage").visible, false)
+      h.eq("note in the dim colour", h.find(A(), "previewNote").color, h.content(A()).dim)
+      h.eq("switch shown, off", h.find(A(), "previewToggle").visible && !h.find(A(), "previewToggle").checked, true)
+      h.eq("rate label", h.find(A(), "fpsRow") !== null, true)
+      h.eq("15 fps selected", h.fpsChip(A(), 15).selected, true)
+      h.eq("nothing written on open", fakeShell.calls.length, 0)
+      h.eq("nothing unsaved", h.find(A(), "previewUnsaved").visible, false)
+      // Column order (hidden items keep no place, so order, not y)
+      var block = h.find(A(), "previewBlock")
+      var kids = block.parent.children
+      var at = function(name) { for (var i = 0; i < kids.length; i++) if (kids[i].objectName === name) return i; return -1 }
+      h.check("the preview section follows the error blocks, before STATUS",
+              at("previewBlock") > at("daemonError") && at("previewBlock") > at("commandErrorBlock")
+              && at("daemonError") > at("hero") && at("previewBlock") < at("effectBlock"),
+              [at("hero"), at("daemonError"), at("commandErrorBlock"), at("previewBlock"), at("effectBlock")].join(","))
+    })
+    h.previewCountStep(0, "panel open, idle, switch off")
+    h.grabStep(function() { return A().popup }, "v1-preview-off.png")
+
+    h.step("preview: active for preview leases only", function() {
+      h.feed([stateLine(rev5({ state: "active", consumers: 1 }))])
+    }, function() { return S().record.state === "active" })
+    h.wait(400)
+    h.step("preview: switch off + active + only a preview consumer: nothing (R1)", function() {
+      h.eq("not wanted", P().wanted, false)
+      h.eq("never started", P().starts, 0)
+      h.eq("note", h.find(A(), "previewNote").text, "Preview off")
+      h.eq("no empty frame area", h.find(A(), "previewFrame").visible, false)
+    })
+    h.previewCountStep(0, "active for preview leases only")
+
+    h.step("preview: an app opens the loopback: shown at once", function() {
+      h.feed([stateLine(rev5({ state: "active", consumers: 2, loopback_consumers: 1 }))])
+    }, function() { return P().frames >= 3 && h.find(A(), "previewImage").status === Image.Ready }, 8000)
+    h.step("preview: frames", function() {
+      var img = h.find(A(), "previewImage")
+      h.eq("started once", P().starts, 1)
+      h.eq("argv", JSON.stringify(P().lastArgv), JSON.stringify([shellRoot.cli, "preview", "--json", "--fps", "15"]))
+      h.eq("the fake, never an installed CLI", P().lastArgv[0], shellRoot.cli)
+      h.eq("lease held", P().leaseActive, true)
+      h.eq("image shown", img.visible, true)
+      h.eq("placeholder hidden", h.find(A(), "previewPlaceholder").visible, false)
+      h.eq("frame size", img.implicitWidth + "x" + img.implicitHeight, "480x270")
+      h.eq("decoded at most at the frame size", img.sourceSize.width + "x" + img.sourceSize.height, "480x270")
+      h.eq("frame area is 16:9", Math.abs(h.find(A(), "previewFrame").height - h.find(A(), "previewFrame").width * 9 / 16) <= 1, true)
+      h.eq("note hidden", h.find(A(), "previewNote").visible, false)
+      h.check("source is the expected path", String(img.source).indexOf("file://" + framePath + "?") === 0, String(img.source))
+      h.eq("no frame dropped", P().droppedFrames, 0)
+      h.notes.seq = P().seq
+      h.notes.source = String(img.source)
+    })
+    h.wait(600)
+    h.step("preview: the image updates", function() {
+      var img = h.find(A(), "previewImage")
+      h.check("seq moved", P().seq > h.notes.seq, P().seq + " vs " + h.notes.seq)
+      h.check("source moved", String(img.source) !== h.notes.source, String(img.source))
+      h.note("preview at 15 fps: " + P().frames + " frames, " + h.notes.loads + " image loads")
+      h.check("one load per frame shown", h.notes.loads >= 3, h.notes.loads)
+    })
+    h.previewCountStep(1, "active with a loopback consumer", 15)
+    h.grabStep(function() { return A().popup }, "v1-preview-active.png")
+
+    h.step("preview: the loopback consumer leaves", function() {
+      h.feed([stateLine(rev5({ state: "active", consumers: 1, loopback_consumers: 0 }))])
+    }, function() { return !P().running })
+    h.step("preview: its own lease does not hold it (R1)", function() {
+      h.eq("note", h.find(A(), "previewNote").text, "Preview off")
+      h.eq("image hidden", h.find(A(), "previewImage").visible, false)
+      h.eq("no error", P().exitError, "")
+    })
+    h.previewCountStep(0, "after the other consumer left")
+
+    // the switch: a user's action, persisted through updateEntryInline
+    h.step("preview: click the Preview switch", function() {
+      h.find(A(), "previewToggle").toggled()
+    }, function() { return P().running && P().frames >= 1 }, 8000)
+    h.step("preview: a frame shown with the switch on", null,
+           function() { return P().frames >= 3 && h.find(A(), "previewImage").status === Image.Ready }, 8000)
+    h.grabStep(function() { return A().popup }, "v1-preview-on.png")
+    h.step("preview: a light palette", function() { h.lightPalette(true) })
+    h.wait(300)
+    h.step("preview: theme colours on a light palette", function() {
+      h.eq("panel foreground follows the theme", h.content(A()).foreground, Commons.Color.bar.text)
+      h.check("the frame area is black only behind a frame", String(h.find(A(), "previewFrame").color) === "#000000",
+              String(h.find(A(), "previewFrame").color))
+    })
+    h.grabStep(function() { return A().popup }, "v1-preview-light.png")
+    h.step("preview: the theme's palette again", function() {
+      h.notes.lightAccent = String(Commons.Color.accent)
+      h.lightPalette(false)
+      h.check("the accent is back", String(Commons.Color.accent) !== h.notes.lightAccent, String(Commons.Color.accent))
+    })
+    h.step("preview: the switch is persisted and starts it", function() {
+      h.eq("one write", fakeShell.calls.length, 1)
+      var call = fakeShell.calls[0]
+      h.eq("entry id", call.id, shellRoot.moduleName)
+      h.eq("entry", JSON.stringify(call.entry), JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: true }))
+      h.eq("switch on", P().switchOn, true)
+      h.eq("switch drawn on", h.find(A(), "previewToggle").checked, true)
+      h.eq("second start", P().starts, 2)
+      // the other monitor's panel
+      B().open()
+    }, function() { return h.content(B()) !== null })
+    h.wait(400)
+    h.step("preview: two panels, one process", function() {
+      h.eq("held twice", P().heldCount, 2)
+      h.eq("still the second start", P().starts, 2)
+      h.eq("B shows the frame too", h.find(B(), "previewImage").visible, true)
+      var bimg = h.find(B(), "previewImage")
+      h.notes.bLoads = 0
+      if (h.notes.bProbed !== bimg) {
+        h.notes.bProbed = bimg
+        bimg.statusChanged.connect(function() { if (bimg.status === Image.Loading) h.notes.bLoads++ })
+      }
+      A().close()
+      h.notes.loadsAtClose = h.notes.loads
+    })
+    h.wait(1000)
+    h.step("preview: A closed, B still holds it", function() {
+      h.eq("held once", P().heldCount, 1)
+      h.eq("running", P().running, true)
+      h.eq("no restart", P().starts, 2)
+      // A's content is kept once built: its Image must not follow the frames.
+      h.eq("the closed panel's Image has no source", String(h.find(A(), "previewImage").source), "")
+      h.eq("the closed panel loads nothing", h.notes.loads - h.notes.loadsAtClose, 0)
+      h.check("while the open one loads frames", h.notes.bLoads >= 5, h.notes.bLoads)
+      h.note("1 s with A closed: A " + (h.notes.loads - h.notes.loadsAtClose) + " loads, B " + h.notes.bLoads)
+    })
+    h.previewCountStep(1, "two panels, then one")
+    h.step("preview: close the last panel", function() { B().close() }, function() { return !P().running })
+    h.previewCountStep(0, "every panel closed")
+    h.step("preview: no stray frame file left by the fake", function() {
+      h.eq("held by nobody", P().heldCount, 0)
+      h.eq("no restart", P().starts, 2)
+    })
+
+    // hostile lines on the stream, delivered by the next start
+    h.step("preview: hostile lines for the next start", function() {
+      h.writeFile("preview-hostile", [
+        JSON.stringify({ v: 1, type: "frame", seq: 999999, path: "/etc/passwd" }),
+        JSON.stringify({ v: 1, type: "frame", seq: 999998, path: framePath + "?x=1" }),
+        JSON.stringify({ v: 1, type: "frame", seq: 999997, path: rt + "/omarchy-broadcast/../../../etc/shadow" }),
+        JSON.stringify({ v: 1, type: "frame", seq: "7", path: framePath }),
+        JSON.stringify({ v: 2, type: "frame", seq: 999996, path: framePath }),
+        JSON.stringify({ v: 1, type: "bogus", path: "/etc/passwd" }),
+        "<img src='http://127.0.0.1:9/beacon'>"
+      ])
+    }, function() { return h.writerIdle() })
+    h.step("preview: reopen the panel (switch on)", function() { A().open() }, function() { return P().running && P().frames >= 1 }, 8000)
+    h.step("preview: reopened, the switch persisted, it restarts", function() {
+      h.eq("third start", P().starts, 3)
+      h.eq("one panel", P().heldCount, 1)
+    })
+    h.wait(300)
+    h.step("preview: hostile lines dropped", function() {
+      h.eq("frame lines dropped (3 paths, 1 seq)", P().droppedFrames, 4)
+      h.check("other lines ignored", P().ignoredLines >= 3, P().ignoredLines)
+      h.check("seq not advanced by a hostile line", P().seq > 0 && P().seq < 1000, P().seq)
+      h.eq("no source but the expected path", JSON.stringify(foreignSources()), "[]")
+      h.removeFile("preview-hostile")
+    }, function() { return h.writerIdle() })
+
+    // the frame rate: a user's action; a restart with the new argv
+    h.step("preview: choose 30 fps", function() {
+      h.fpsChip(A(), 30).clicked()
+    }, function() { return P().running && P().fps === 30 && P().lastArgv && P().lastArgv[4] === "30" && P().frames >= 1 }, 8000)
+    h.step("preview: restarted at 30 fps", function() {
+      h.eq("second write", fakeShell.calls.length, 2)
+      h.eq("entry", JSON.stringify(fakeShell.calls[1].entry),
+           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: true, previewFps: 30 }))
+      h.eq("argv", JSON.stringify(P().lastArgv), JSON.stringify([shellRoot.cli, "preview", "--json", "--fps", "30"]))
+      h.eq("fourth start", P().starts, 4)
+      h.eq("30 fps selected", h.fpsChip(A(), 30).selected, true)
+      h.eq("argv in the fake's log", h.logLines().some(function(l) { return l.indexOf(" [preview] [--json] [--fps] [30]") !== -1 }), true)
+    })
+    h.previewCountStep(1, "after the change", 30)
+    h.previewCountStep(0, "after the change", 15)
+
+    // a monitor plugged in while a 30 fps preview runs: the new widget is
+    // created, then handed the same entry, as the bar does (S2)
+    h.step("preview: a third widget while previewing at 30 fps", function() {
+      h.notes.starts = P().starts
+      h.notes.widgetC = h.makeWidget(barB, JSON.parse(JSON.stringify(A().settings)))
+    })
+    h.wait(600)
+    h.step("preview: the new widget restarts nothing", function() {
+      h.eq("no restart", P().starts, h.notes.starts)
+      h.eq("still 30 fps", P().fps, 30)
+      h.eq("still running", P().running, true)
+      h.eq("argv", P().lastArgv[4], "30")
+      h.notes.widgetC.destroy()
+      h.notes.widgetC = null
+      // settings that blip within one turn (another entry, then this one
+      // again): the restart is looked at on the next turn only
+      var keep = JSON.parse(JSON.stringify(A().settings))
+      A().settings = { cliPath: shellRoot.cli }
+      A().settings = keep
+    })
+    h.wait(600)
+    h.step("preview: a blip within one turn restarts nothing", function() {
+      h.eq("no restart", P().starts, h.notes.starts)
+      h.eq("still 30 fps", P().fps, 30)
+      h.eq("no failure", P().failed, false)
+    })
+    h.previewCountStep(1, "after the new widget", 30)
+
+    // keyboard: the preview switch and the frame-rate row are cursor stops
+    h.step("preview: first Down shows the cursor", function() { h.key(Qt.Key_Down) }, function() { return h.content(A()).cursorActive })
+    h.step("preview: Down to the Preview switch", function() {
+      h.eq("on the on/off switch first", h.content(A()).currentStop.kind, "switch")
+      h.key(Qt.Key_Down)
+    }, function() { return h.content(A()).currentStop.kind === "preview" })
+    h.step("preview: the switch has the cursor; Down to the frame rate", function() {
+      h.eq("preview switch has the cursor", h.find(A(), "previewToggle").hasCursor, true)
+      h.eq("stops = switch + preview + fps + effect + noise removal + rows + next",
+           h.content(A()).stops.length, h.find(A(), "cameraRepeater").count + 6)
+      h.key(Qt.Key_Down)
+    }, function() { return h.content(A()).currentStop.kind === "fps" })
+    h.step("preview: lands on the current rate; Left, Enter: 15 fps", function() {
+      h.eq("cursor on 30 (current)", h.fpsChip(A(), 30).hasCursor, true)
+      h.key(Qt.Key_Left)
+      h.eq("cursor on 15", h.fpsChip(A(), 15).hasCursor, true)
+      h.eq("cursor not on 30", h.fpsChip(A(), 30).hasCursor, false)
+      h.key(Qt.Key_Return)
+    }, function() { return P().running && P().lastArgv[4] === "15" && P().frames >= 1 }, 8000)
+    h.step("preview: 15 fps from the keyboard", function() {
+      h.eq("third write", fakeShell.calls.length, 3)
+      h.eq("fifth start", P().starts, 5)
+      h.key(Qt.Key_Down)
+      h.eq("then the effect row", h.content(A()).currentStop.kind, "effect")
+      h.key(Qt.Key_Up)
+      h.key(Qt.Key_Up)
+      h.eq("back on the Preview switch", h.content(A()).currentStop.kind, "preview")
+      h.key(Qt.Key_Return)
+    }, function() { return !P().running })
+    h.step("preview: Enter turned it off (active for previews only)", function() {
+      h.eq("fourth write", fakeShell.calls.length, 4)
+      h.eq("entry", JSON.stringify(fakeShell.calls[3].entry),
+           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: false, previewFps: 15 }))
+      h.eq("note", h.find(A(), "previewNote").text, "Preview off")
+    })
+    h.previewCountStep(0, "switched off from the keyboard")
+
+    // an unexpected exit: shown, and not respawned until the rule re-arms
+    h.step("preview: PipeWire consumer: shown at once", function() {
+      h.feed([stateLine(rev5({ state: "active", consumers: 2, pipewire_consumers: 1 }))])
+    }, function() { return P().running && P().frames >= 1 }, 8000)
+    h.step("preview: kill the preview child (SIGKILL)", function() {
+      h.notes.starts = P().starts
+      h.killPid(P().pid, "KILL")
+    }, function() { return !P().running })
+    h.wait(1500)
+    h.step("preview: the exit is shown, nothing respawns", function() {
+      h.eq("no restart", P().starts, h.notes.starts)
+      h.eq("failed", P().failed, true)
+      var t = h.find(A(), "previewNote").text
+      h.check("the reason", t.indexOf("stopped by signal 9") !== -1 && t.indexOf("Reopen the panel to retry.") !== -1, t)
+      h.eq("drawn as an error", h.find(A(), "previewNote").color, Commons.Color.urgent)
+      h.eq("a line, no frame area", h.find(A(), "previewFrame").visible, false)
+    })
+    h.previewCountStep(0, "after the crash")
+    h.step("preview: the next start exits on its own", function() { h.writeFile("preview-exit", ["1"]) },
+           function() { return h.writerIdle() })
+    h.step("preview: close and reopen re-arms", function() {
+      A().close()
+      Qt.callLater(function() { A().open() })
+    }, function() { return P().starts === h.notes.starts + 1 && !P().running && P().failed }, 8000)
+    h.step("preview: an exit status is shown too", function() {
+      var t = h.find(A(), "previewNote").text
+      h.check("status 1", t.indexOf("exited with status 1") !== -1, t)
+      h.removeFile("preview-exit")
+    }, function() { return h.writerIdle() })
+
+    // a choice the shell cannot store (S7: an entry over the key cap; S8: no
+    // layout entry): in force for the session, said so, and not undone by a
+    // widget re-injected with the same entry. Here the switch moves nothing
+    // (a PipeWire consumer already wants the preview).
+    h.step("preview: an entry over the key cap", function() {
+      h.notes.calls = fakeShell.calls.length
+      h.notes.saved = JSON.parse(JSON.stringify(A().settings))
+      var huge = JSON.parse(JSON.stringify(A().settings))
+      for (var i = 0; i <= 300; i++) huge["junk" + i] = i
+      A().settings = huge
+      h.notes.switchBefore = P().switchOn
+      h.find(A(), "previewToggle").toggled()
+    })
+    h.wait(200)
+    h.step("preview: not written, in force, and said so", function() {
+      h.eq("no write", fakeShell.calls.length, h.notes.calls)
+      h.eq("switch moved for the session", P().switchOn, !h.notes.switchBefore)
+      h.eq("unsaved", P().unsaved, true)
+      h.eq("message shown", h.find(A(), "previewUnsaved").visible, true)
+      h.eq("message", h.find(A(), "previewUnsaved").text, "Could not save the preview setting")
+      h.find(A(), "previewToggle").toggled()
+    })
+    h.wait(200)
+    h.step("preview: switched back, nothing unsaved", function() {
+      h.eq("no write", fakeShell.calls.length, h.notes.calls)
+      h.eq("switch as stored", P().switchOn, h.notes.switchBefore)
+      h.eq("message hidden", h.find(A(), "previewUnsaved").visible, false)
+      A().settings = h.notes.saved
+      fakeShell.refuse = true
+      h.find(A(), "previewToggle").toggled()
+    })
+    h.wait(200)
+    h.step("preview: the shell finds no entry (answers false)", function() {
+      h.eq("one refused write", fakeShell.refused.length, 1)
+      h.eq("the refused entry", JSON.stringify(fakeShell.refused[0].entry),
+           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: !h.notes.switchBefore, previewFps: 15 }))
+      h.eq("switch moved for the session", P().switchOn, !h.notes.switchBefore)
+      h.eq("message shown", h.find(A(), "previewUnsaved").visible, true)
+      h.eq("the widget's settings stay as the bar gave them", A().settings.previewEnabled, h.notes.switchBefore)
+      // the other monitor's widget handed the same, stale entry again, and a
+      // monitor plugged in with it
+      B().settings = JSON.parse(JSON.stringify(h.notes.saved))
+      A().settings = JSON.parse(JSON.stringify(h.notes.saved))
+      h.notes.widgetC = h.makeWidget(barB, JSON.parse(JSON.stringify(h.notes.saved)))
+    })
+    h.wait(300)
+    h.step("preview: re-injected stale settings do not undo it", function() {
+      h.eq("switch still as chosen", P().switchOn, !h.notes.switchBefore)
+      h.eq("message still shown", h.find(A(), "previewUnsaved").visible, true)
+      h.notes.widgetC.destroy()
+      h.notes.widgetC = null
+      // a value the stored entry itself changes does replace it
+      var changed = JSON.parse(JSON.stringify(h.notes.saved))
+      changed.previewEnabled = !h.notes.switchBefore
+      B().settings = changed
+    })
+    h.wait(200)
+    h.step("preview: a stored change wins", function() {
+      h.eq("switch as stored", P().switchOn, !h.notes.switchBefore)
+      h.eq("nothing unsaved", P().unsaved, false)
+      var back = JSON.parse(JSON.stringify(h.notes.saved))
+      A().settings = back
+      B().settings = JSON.parse(JSON.stringify(back))
+      fakeShell.refuse = false
+    })
+    h.wait(200)
+    h.step("preview: back as stored", function() {
+      h.eq("switch", P().switchOn, h.notes.switchBefore)
+      h.eq("nothing unsaved", P().unsaved, false)
+      h.eq("no write but the refused one", fakeShell.calls.length, h.notes.calls)
+    })
+
+    // an exit that lands once the panel is closed is no failure (S5): the
+    // next open starts it, the first time
+    h.step("preview: reopen after the failure", function() {
+      A().close()
+      Qt.callLater(function() { A().open() })
+    }, function() { return P().running && P().frames >= 1 && !P().failed }, 8000)
+    // A rejected line stops the child (not a deliberate stop); the panel is
+    // closed in that same turn, so the exit lands with the rule already false.
+    h.step("preview: an over-cap line for the next start", function() {
+      var long = ""
+      while (long.length <= 9000) long += "x"
+      h.writeFile("preview-hostile", [long])
+      if (!h.notes.rejectHooked) {
+        h.notes.rejectHooked = true
+        P().rejectedChanged.connect(function() {
+          if (h.notes.closeOnReject && P().rejected) { h.notes.closeOnReject = false; A().close() }
+        })
+      }
+    }, function() { return h.writerIdle() })
+    h.step("preview: the line is rejected as the panel closes", function() {
+      h.notes.starts = P().starts
+      h.notes.droppedLines = P().droppedLines
+      A().close()
+      Qt.callLater(function() { h.notes.closeOnReject = true; A().open() })
+    }, function() { return P().starts === h.notes.starts + 1 && !P().running && P().heldCount === 0 && !h.notes.closeOnReject }, 8000)
+    h.wait(300)
+    h.step("preview: no failure kept for a closed panel", function() {
+      h.eq("the line was rejected", P().droppedLines, h.notes.droppedLines + 1)
+      h.eq("not failed", P().failed, false)
+      h.eq("no error kept", P().exitError, "")
+      h.removeFile("preview-hostile")
+    }, function() { return h.writerIdle() })
+    h.step("preview: reopen", function() {
+      h.notes.starts = P().starts
+      A().open()
+    }, function() { return P().running && P().frames >= 1 }, 8000)
+    h.step("preview: the first reopen starts it", function() {
+      h.eq("one more start", P().starts, h.notes.starts + 1)
+      h.notes.starts = P().starts
+    })
+
+    // a daemon below revision 5: a note, no controls, nothing runs
+    h.step("preview: a revision-4 daemon", function() {
+      h.feed([snapshotLine({ state: "active", consumers: 2, loopback_consumers: 1, pipewire_consumers: 1 })])
+    }, function() { return S().record.interfaceRevision === 4 })
+    h.wait(600)
+    h.step("preview: needs 0.18", function() {
+      h.eq("note", h.find(A(), "previewNote").text, "Preview needs omarchy-broadcast 0.18 or newer")
+      h.eq("note shown", h.find(A(), "previewNote").visible, true)
+      h.eq("frame area hidden", h.find(A(), "previewFrame").visible, false)
+      h.eq("switch hidden", h.find(A(), "previewRow").visible, false)
+      h.eq("rate hidden", h.find(A(), "fpsRow").visible, false)
+      h.eq("not supported", P().supported, false)
+      h.eq("no restart", P().starts, h.notes.starts)
+      h.eq("no preview stops", h.content(A()).stops.map(function(st) { return st.kind }).indexOf("preview"), -1)
+    })
+    h.previewCountStep(0, "revision 4")
+    h.grabStep(function() { return A().popup }, "v1-preview-old-daemon.png")
+    h.step("preview: back to the default fixture", function() {
+      A().close()
+      A().settings = { cliPath: shellRoot.cli }
+      B().destroy()
+      h.widgetB = null
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.interfaceRevision === 4 && !P().running && P().switchOn === false
+                           && S().attachedCount === 1 && h.writerIdle() })
+    h.previewCountStep(0, "at the end of the preview checks")
   }
 
   // ---- live scenario (real daemon, real CLI) --------------------------------------

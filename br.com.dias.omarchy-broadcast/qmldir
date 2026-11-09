@@ -1,2 +1,3 @@
 singleton Daemon 1.0 Daemon.qml
+singleton Preview 1.0 Preview.qml
 BroadcastPanel 1.0 BroadcastPanel.qml

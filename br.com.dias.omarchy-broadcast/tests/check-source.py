@@ -4,12 +4,12 @@ widget would hide.
 
   - every `Text {` sets `textFormat: Text.PlainText` (AutoText renders markup,
     and `<img src=...>` in a camera name would fetch a URL);
-  - the qmldir declares the Daemon singleton (without it, `Daemon` is the
-    component type and every read off it is undefined);
+  - the qmldir declares the Daemon and Preview singletons (without the line,
+    the name is the component type and every read off it is undefined);
   - the manifest id equals the directory name (or the shell does not load it);
-  - Component.onDestruction only hands back registrations: no stop, no
-    `running = false`, no `off`, no `bar.run`, no pkill (it runs on every
-    hot reload);
+  - Component.onDestruction only hands back registrations (Daemon.detach,
+    Preview.release): no stop, no `running = false`, no `off`, no `bar.run`,
+    no pkill (it runs on every hot reload);
   - no shell-string commands (`bash -c`, `bar.run(`, execDetached), no
     pkill/killall, no repeating Timer, no whole-stream StdioCollector;
   - the watch's stdout is read in line mode (a chunked read garbles a
@@ -25,7 +25,14 @@ widget would hide.
   - the effect chips carry the shell ButtonGroup's fill and fade from
     Model's `faded`; the hint and its command share one Column at the
     unavailable block's spacing; the Replace gate reads the raw image field,
-    and the shown path sits in a left-to-right Unicode isolate.
+    and the shown path sits in a left-to-right Unicode isolate;
+  - the preview: one Process, in the Preview singleton, armed with an argv
+    from Model.previewArgv (15 or 30 only), read in line mode with the line
+    cap that stops it, no Timer anywhere in its path, re-armed through
+    Qt.callLater; the Image is never cached and its source comes from
+    Model.previewSource (the validated path); no video device and no D-Bus
+    tool named anywhere; preview preferences written only from the panel's
+    two user actions, through Model.settingsEntry.
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -78,8 +85,13 @@ qmldir = (PLUGIN / "qmldir").read_text(encoding="utf-8").splitlines()
 check("qmldir declares the Daemon singleton",
       any(re.fullmatch(r"\s*singleton\s+Daemon\s+1\.0\s+Daemon\.qml\s*", l) for l in qmldir),
       "missing `singleton Daemon 1.0 Daemon.qml`")
+check("qmldir declares the Preview singleton",
+      any(re.fullmatch(r"\s*singleton\s+Preview\s+1\.0\s+Preview\.qml\s*", l) for l in qmldir),
+      "missing `singleton Preview 1.0 Preview.qml`")
 daemon_src = (PLUGIN / "Daemon.qml").read_text(encoding="utf-8")
 check("Daemon.qml has pragma Singleton", "pragma Singleton" in daemon_src)
+preview_src = (PLUGIN / "Preview.qml").read_text(encoding="utf-8")
+check("Preview.qml has pragma Singleton", "pragma Singleton" in preview_src)
 # With a qmldir present, only listed types resolve from the directory.
 used_types = set(re.findall(r"^\s*([A-Z]\w*)\s*\{", "\n".join(sources[p] for p in plugin_qml), re.M))
 local_types = {p.stem for p in plugin_qml}
@@ -96,8 +108,20 @@ check("manifest id equals directory name", manifest.get("id") == PLUGIN.name,
       f"id {manifest.get('id')!r} vs dir {PLUGIN.name!r}")
 check("entry point is BarWidget.qml", manifest.get("entryPoints", {}).get("barWidget") == "BarWidget.qml")
 check("allowMultiple is false", manifest.get("barWidget", {}).get("allowMultiple") is False)
-schema_keys = [s.get("key") for s in manifest.get("barWidget", {}).get("schema", [])]
-check("one cliPath setting", schema_keys == ["cliPath"], str(schema_keys))
+schema = manifest.get("barWidget", {}).get("schema", [])
+schema_keys = [s.get("key") for s in schema]
+check("settings: cliPath, previewEnabled, previewFps", schema_keys == ["cliPath", "previewEnabled", "previewFps"], str(schema_keys))
+by_key = {s.get("key"): s for s in schema}
+defaults = manifest.get("barWidget", {}).get("defaults", {})
+check("previewEnabled is a boolean, default false",
+      by_key.get("previewEnabled", {}).get("type") == "boolean" and by_key["previewEnabled"].get("defaultValue") is False
+      and defaults.get("previewEnabled") is False, str(by_key.get("previewEnabled")))
+fps_schema = by_key.get("previewFps", {})
+check("previewFps is an integer 15..30 in steps of 15, default 15",
+      fps_schema.get("type") == "integer" and fps_schema.get("min") == 15 and fps_schema.get("max") == 30
+      and fps_schema.get("step") == 15 and fps_schema.get("defaultValue") == 15 and defaults.get("previewFps") == 15,
+      str(fps_schema))
+check("defaults hold exactly the schema keys", sorted(defaults) == sorted(schema_keys), str(sorted(defaults)))
 
 # ---- Component.onDestruction bodies -----------------------------------------
 def destruction_bodies(src):
@@ -123,11 +147,14 @@ for path, src in sources.items():
     for body in destruction_bodies(src):
         all_bodies.append(body)
         statements = [s.strip() for s in re.split(r"[;\n]", body) if s.strip()]
-        only_detach = all(re.fullmatch(r"Daemon\.detach\(\s*root\s*\)", s) for s in statements)
+        only_detach = all(re.fullmatch(r"Daemon\.detach\(\s*root\s*\)|Preview\.release\(\s*root\s*\)", s)
+                          for s in statements)
         check(f"{path.name}: onDestruction only unregisters", only_detach and statements != [], body.strip())
         for bad in ("running", "stop", "\"off\"", "bar.run", "pkill", "kill", "signal("):
             check(f"{path.name}: onDestruction has no {bad}", bad not in body, body.strip())
 check("the widget unregisters on destruction", len(all_bodies) >= 1, "no Component.onDestruction")
+check("the widget releases the preview on destruction",
+      any("Preview.release(root)" in b for b in destruction_bodies(sources[PLUGIN / "BarWidget.qml"])))
 
 # ---- forbidden constructs ---------------------------------------------------
 everything = {**{p: s for p, s in sources.items() if p.parent == PLUGIN}, **js_sources}
@@ -224,10 +251,85 @@ check("the panel height is capped at Style.space(560)",
 check("no stale reference to check-source.sh (comments included)",
       all("check-source.sh" not in p.read_text(encoding="utf-8") for p in list(everything) + [PLUGIN / "manifest.json"]))
 
-# ---- every Process is in the singleton --------------------------------------
+# ---- every Process is in a singleton -----------------------------------------
 for path, src in sources.items():
-    if path.parent == PLUGIN and path.name != "Daemon.qml":
+    if path.parent == PLUGIN and path.name not in ("Daemon.qml", "Preview.qml"):
         check(f"{path.name}: spawns no Process", re.search(r"\bProcess\s*\{", src) is None)
+
+# ---- the preview ------------------------------------------------------------
+preview = sources[PLUGIN / "Preview.qml"]
+check("Preview.qml has exactly one Process", len(re.findall(r"\bProcess\s*\{", preview)) == 1)
+preview_block = block(preview, "property Process previewProc")
+check("preview stdout is line mode (no splitMarker)", preview_block != "" and "splitMarker" not in preview_block)
+check("no Timer in the preview path", all(re.search(r"\bTimer\b", sources[PLUGIN / n]) is None
+                                          for n in ("Preview.qml", "BroadcastPanel.qml")))
+check("the preview command is only an argv from Model.previewArgv",
+      re.findall(r"previewProc\.command\s*=\s*([^\n]*)", preview) == ["argv"]
+      and "var argv = Model.previewArgv(cliPath, fps)" in block(preview, "function armPreview"))
+check("previewArgv passes only 15 or 30, as argv elements",
+      re.search(r'function previewArgv\(cli, fps\)\s*\{\s*if \(!cliUsable\(cli\) \|\| PREVIEW_FPS_CHOICES\.indexOf\(fps\) < 0\) return null\s*'
+                r'return \[cli, "preview", "--json", "--fps", fps === 30 \? "30" : "15"\]', model) is not None
+      and "var PREVIEW_FPS_CHOICES = [15, 30]" in model)
+check("an over-cap preview line stops the preview",
+      re.search(r"line\.length > Model\.LINE_CAP\)\s*\{[^}]*stopPreview\(\)", preview) is not None)
+check("preview lines go through Model.parsePreviewLine with the expected path",
+      "Model.parsePreviewLine(line, expectedPath, seq)" in preview)
+check("preview re-arm deferred with Qt.callLater", "Qt.callLater(root.syncPreview)" in preview)
+check("the expected path comes from XDG_RUNTIME_DIR through Model.previewPath",
+      'Model.previewPath(Quickshell.env("XDG_RUNTIME_DIR"))' in preview)
+check("the frame source is built only by Model.previewSource",
+      "readonly property string frameSource: Model.previewSource(expectedPath, seq)" in preview
+      and re.search(r'return "file://" \+ expectedPath \+ "\?" \+ n', model) is not None
+      and [p.name for p, s in everything.items() if '"file://"' in s] == ["Model.js"])
+image_at = panel.find("id: previewImage")
+image_block = block(panel[panel.rfind("Image {", 0, image_at):], "Image {") if image_at >= 0 else ""
+check("the preview Image is never cached and reads Preview.frameSource",
+      re.search(r"^\s*cache:\s*false\s*$", image_block, re.M) is not None
+      and "Preview.frameSource" in image_block and "retainWhileLoading: true" in image_block, image_block[:200])
+check("only one Image in the plugin", sum(len(re.findall(r"(?<![\w.])Image\s*\{", s)) for p, s in sources.items()
+                                          if p.parent == PLUGIN) == 1)
+for path, src in everything.items():
+    raw = path.read_text(encoding="utf-8")
+    check(f"{path.name}: no video device", "/dev/video" not in raw)
+    check(f"{path.name}: no D-Bus tool", re.search(r"\b(busctl|gdbus|dbus-send|qdbus)\b", raw) is None)
+check("preview holders are registered only by the widget, on open/close",
+      re.findall(r"Preview\.(hold|release)\(([^)]*)\)", "\n".join(s for p, s in sources.items() if p.parent == PLUGIN))
+      == [("hold", "root"), ("release", "root"), ("release", "root")])
+check("preview preferences are requested only by togglePreview and chooseFps",
+      re.findall(r"root\.settingsRequested\(([^)]*\))", panel)
+      == ["{ previewEnabled: !Preview.switchOn })", "{ previewFps: option.value })"]
+      and "root.settingsRequested(" not in panel.replace(block(panel, "function togglePreview"), "").replace(block(panel, "function chooseFps"), ""),
+      str(re.findall(r"root\.settingsRequested\(([^)]*\))", panel)))
+bar_src = sources[PLUGIN / "BarWidget.qml"]
+check("settings are written only through Model.settingsEntry, by persistSettings",
+      bar_src.count("updateEntryInline(") == 1 and "var entry = Model.settingsEntry(root.moduleName, root.settings, values)"
+      in block(bar_src, "function persistSettings") and "updateEntryInline" in block(bar_src, "function persistSettings"))
+check("a widget configures the preview only from onSettingsChanged (never with the base's empty default)",
+      re.findall(r"Preview\.configure\(([^)]*)\)", bar_src) == ["root, root.settings"]
+      and re.search(r"onSettingsChanged:\s*Preview\.configure\(root, root\.settings\)", bar_src) is not None
+      and "Preview.configure" not in block(bar_src, "Component.onCompleted"),
+      str(re.findall(r"Preview\.configure\(([^)]*)\)", bar_src)))
+check("persistSettings checks what updateEntryInline answered",
+      "updateEntryInline(root.moduleName, entry) === true" in block(bar_src, "function persistSettings"))
+check("a frame-rate or CLI change restarts only on the next turn, when the argv differs",
+      "onFpsChanged: Qt.callLater(root.restartIfStale)" in preview
+      and "onCliPathChanged: Qt.callLater(root.restartIfStale)" in preview
+      and "JSON.stringify(Model.previewArgv(cliPath, fps)) !== JSON.stringify(lastArgv)" in block(preview, "function restartIfStale"))
+check("a preview exit is a failure only while the preview is wanted",
+      re.search(r"if \(!wanted\) \{[^}]*return\s*\}\s*failed = true", block(preview, "function previewEnded")) is not None)
+check("the preview Image loads only while its own panel is open",
+      re.search(r"^\s*source:\s*root\.opened && root\.preview\.mode === \"image\" \? Preview\.frameSource : \"\"\s*$", image_block, re.M) is not None,
+      image_block[:300])
+check("the preview Image decodes at most 480x270",
+      re.search(r"^\s*sourceSize\.width:\s*480\s*$", image_block, re.M) is not None
+      and re.search(r"^\s*sourceSize\.height:\s*270\s*$", image_block, re.M) is not None)
+colour_literals = re.findall(r'(?:color|fill)\s*:[^\n]*"(#[0-9a-fA-F]{3,8}|[A-Za-z]+)"', panel)
+check("the only hard-coded colour is black behind a frame",
+      colour_literals == ["black"] and 'color: root.preview.mode === "image" ? "black" : root.hoverFill' in panel,
+      str(colour_literals))
+check("the preview rate uses the shell's ButtonGroup, driven by the panel cursor",
+      re.search(r'ButtonGroup \{\s*id: fpsChoices[^}]*focusable: false[^}]*cursorIndex: root\.hasCursor\("fps", -1\) \? root\.fpsCursor : -1',
+                panel) is not None)
 
 # ---- pending re-arm through Qt.callLater (rule 8) ---------------------------
 check("command retry deferred with Qt.callLater", "Qt.callLater(root.flushPending)" in daemon_src)

@@ -231,6 +231,11 @@ function emptyRecord(link, linkText) {
     activeCamera: "",
     activeCameraName: "",
     consumers: -1,
+    // The split of `consumers` (docs/cli-json.md): processes holding the
+    // loopback and links to the PipeWire node; -1 when unknown. A preview
+    // lease (interface revision 5) is in `consumers` but in neither of these.
+    loopbackConsumers: -1,
+    pipewireConsumers: -1,
     outputMode: "",
     effect: "",
     effectKey: "",
@@ -282,6 +287,8 @@ function applyScalars(r, m) {
   r.activeCamera = rawId(m.active_camera)
   r.activeCameraName = sanitize(m.active_camera_name, NAME_CAP)
   r.consumers = count(m.consumers)
+  r.loopbackConsumers = count(m.loopback_consumers)
+  r.pipewireConsumers = count(m.pipewire_consumers)
   r.outputMode = sanitize(m.output_mode, MODE_CAP)
   r.effect = sanitize(m.effect, EFFECT_CAP)
   r.effectKey = effectKey(m.effect)
@@ -946,9 +953,313 @@ function backoffAfterExit(prevMs, uptimeMs) {
   return up >= BACKOFF_RESET_UPTIME_MS ? BACKOFF_MIN_MS : prev
 }
 
+// ---------------------------------------------------------------- preview
+
+// The live preview (docs/cli-json.md, `omarchy-broadcast preview --json`):
+// the daemon writes a 480x270 JPEG of what apps receive to one fixed file and
+// the CLI prints a `frame` line after each atomic replace. The plugin reads
+// that file through an Image, never the camera device and never D-Bus.
+
+// The daemon interface revision that added the preview lease (obc-ipc
+// INTERFACE_REVISION 5; the CLI prints it as interface_revision).
+var PREVIEW_REVISION = 5
+// The frame rates `preview --fps` accepts; the first is the default.
+var PREVIEW_FPS_CHOICES = [15, 30]
+var PREVIEW_FPS_DEFAULT = 15
+// Where the daemon writes the frame, under $XDG_RUNTIME_DIR.
+var PREVIEW_SUBPATH = "/omarchy-broadcast/preview.jpg"
+// An error line's code, display only.
+var PREVIEW_CODE_CAP = 64
+// Settings: an entry with more keys than this is not rewritten (a write
+// replaces the whole entry, so dropping keys to stay bounded would lose them).
+var SETTINGS_KEY_CAP = 256
+var PREVIEW_OLD_DAEMON = "Preview needs omarchy-broadcast 0.18 or newer"
+var PREVIEW_IDLE_TEXT = "Camera idle; turn on Preview to start it"
+var PREVIEW_OFF_TEXT = "Preview off"
+var PREVIEW_CAMERA_OFF_TEXT = "Camera off"
+var PREVIEW_STARTING_TEXT = "Starting preview…"
+var PREVIEW_RETRY_HINT = "Reopen the panel to retry."
+// A preview preference the shell did not store (no layout entry to write, or
+// an entry over SETTINGS_KEY_CAP): it holds for this session only.
+var PREVIEW_UNSAVED_TEXT = "Could not save the preview setting"
+var PREVIEW_FPS_TOOLTIPS = { 15: "Lighter; uses less CPU", 30: "Smoother, closer to what apps see; uses more CPU" }
+
+// $XDG_RUNTIME_DIR -> { path, reason }: the frame file the daemon writes,
+// or "" and why the preview cannot be used. The directory must be absolute
+// and hold no "..", no control characters and none of "?#%" (the path ends
+// up in a file:// URL, where those would change what is read), and must not
+// start with "//" (file:////host/... reads "host" as a URL host). Trailing
+// slashes are dropped, as the daemon's path join drops them. The result is
+// the only path frame lines are compared with, and the only one ever loaded.
+function previewPath(runtimeDir) {
+  if (typeof runtimeDir !== "string" || runtimeDir === "")
+    return { path: "", reason: "XDG_RUNTIME_DIR is not set" }
+  if (runtimeDir.length > PATH_CAP || runtimeDir.charAt(0) !== "/")
+    return { path: "", reason: "XDG_RUNTIME_DIR is not an absolute path" }
+  if (runtimeDir.charAt(1) === "/")
+    return { path: "", reason: "XDG_RUNTIME_DIR starts with //" }
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029?#%]/.test(runtimeDir) || runtimeDir.indexOf("..") !== -1)
+    return { path: "", reason: "XDG_RUNTIME_DIR holds characters the preview cannot use" }
+  var dir = runtimeDir.replace(/\/+$/, "")
+  if (dir === "") return { path: "", reason: "XDG_RUNTIME_DIR is the root directory" }
+  return { path: dir + PREVIEW_SUBPATH, reason: "" }
+}
+
+// The running daemon has the preview lease: available, revision 5 or more.
+// An unknown revision counts as no.
+function previewSupported(record) {
+  return available(record) && typeof record.interfaceRevision === "number"
+    && record.interfaceRevision >= PREVIEW_REVISION
+}
+
+// The consumers other than preview leases: loopback + PipeWire; -1 unknown.
+function otherConsumers(record) {
+  if (!record || record.loopbackConsumers < 0 || record.pipewireConsumers < 0
+      || typeof record.loopbackConsumers !== "number" || typeof record.pipewireConsumers !== "number")
+    return -1
+  return record.loopbackConsumers + record.pipewireConsumers
+}
+
+// Whether the one preview process runs. A panel is open (`held` registered
+// holders), the preview can work (`supported`: daemon revision, frame path,
+// CLI), and either the user's Preview switch is on, or the stream is already
+// active for SOMEONE ELSE: loopback or PipeWire consumers, never preview
+// leases. The lease is itself a consumer, so counting it would let a preview
+// keep the camera on that only it holds, with the switch off (R1).
+function shouldPreview(held, supported, switchOn, record) {
+  if (!(typeof held === "number" && held > 0) || supported !== true) return false
+  if (switchOn === true) return true
+  return available(record) && record.state === "active" && otherConsumers(record) > 0
+}
+
+// Only 15 or 30 is ever passed, as its own argv element.
+function previewArgv(cli, fps) {
+  if (!cliUsable(cli) || PREVIEW_FPS_CHOICES.indexOf(fps) < 0) return null
+  return [cli, "preview", "--json", "--fps", fps === 30 ? "30" : "15"]
+}
+
+// The persisted preferences, read back: `previewEnabled` is on only for a
+// real true; `previewFps` is 30 only for the number 30, else the default.
+// Nothing is ever written back from here.
+function previewFpsValue(value) {
+  return value === 30 ? 30 : PREVIEW_FPS_DEFAULT
+}
+
+function previewSettings(settings) {
+  var s = isPlainObject(settings) ? settings : {}
+  return { enabled: s.previewEnabled === true, fps: previewFpsValue(s.previewFps) }
+}
+
+// The preferences in force once the bar hands a widget its settings again.
+// `current`: the ones in force; `last`: the settings (previewSettings form)
+// handed over before, null for none yet; `next`: the ones handed over now.
+// Only a value that changed since the last hand-over replaces the one in
+// force, so a widget re-injected with the same entry (a monitor plugged in,
+// a bar rebuilt) never undoes a choice the shell could not store this
+// session, and a value that did change (a write that came back, an edited
+// shell.json) always wins. The first hand-over is taken as it is.
+function previewPrefsAfter(current, last, next) {
+  var n = { enabled: !!next && next.enabled === true, fps: previewFpsValue(next ? next.fps : undefined) }
+  if (!isPlainObject(last) || !isPlainObject(current)) return n
+  return {
+    enabled: n.enabled !== (last.enabled === true) ? n.enabled : current.enabled === true,
+    fps: n.fps !== previewFpsValue(last.fps) ? n.fps : previewFpsValue(current.fps)
+  }
+}
+
+// A user's preference values applied to the preferences in force, as
+// settingsEntry would write them: only a boolean previewEnabled and a
+// previewFps of 15 or 30 take effect.
+function previewPrefsChosen(current, values) {
+  var c = isPlainObject(current) ? current : {}
+  var out = { enabled: c.enabled === true, fps: previewFpsValue(c.fps) }
+  if (!isPlainObject(values)) return out
+  if (typeof values.previewEnabled === "boolean") out.enabled = values.previewEnabled
+  if (PREVIEW_FPS_CHOICES.indexOf(values.previewFps) >= 0) out.fps = values.previewFps
+  return out
+}
+
+// Whether the settings the bar gave already hold every one of `values`: a
+// write of them changes nothing (the shell answers false for an unchanged
+// entry as for one it did not find).
+function settingsHold(settings, values) {
+  if (!isPlainObject(settings) || !isPlainObject(values)) return false
+  var keys = Object.keys(values)
+  if (keys.length === 0) return false
+  for (var i = 0; i < keys.length; i++) if (settings[keys[i]] !== values[keys[i]]) return false
+  return true
+}
+
+// The preferences in force differ from the ones the settings hold: a choice
+// of this session that is not stored. `stored` null: no settings handed over.
+function previewUnsaved(current, stored) {
+  if (!isPlainObject(current) || !isPlainObject(stored)) return false
+  return (current.enabled === true) !== (stored.enabled === true)
+    || previewFpsValue(current.fps) !== previewFpsValue(stored.fps)
+}
+
+// The layout entry to write for a user's change: { id, ...the settings as the
+// bar gave them, ...values }. Only previewEnabled (a boolean) and previewFps
+// (15 or 30) may be written; anything else, or nothing to write, is null.
+// The settings given are not modified.
+function settingsEntry(moduleName, settings, values) {
+  if (typeof moduleName !== "string" || moduleName === "" || !isPlainObject(values)) return null
+  var entry = { id: moduleName }
+  if (settings !== null && settings !== undefined) {
+    if (!isPlainObject(settings)) return null
+    var keys = Object.keys(settings)
+    if (keys.length > SETTINGS_KEY_CAP) return null
+    for (var i = 0; i < keys.length; i++) if (keys[i] !== "id") entry[keys[i]] = settings[keys[i]]
+  }
+  var wrote = false
+  if (values.previewEnabled !== undefined) {
+    if (typeof values.previewEnabled !== "boolean") return null
+    entry.previewEnabled = values.previewEnabled
+    wrote = true
+  }
+  if (values.previewFps !== undefined) {
+    if (PREVIEW_FPS_CHOICES.indexOf(values.previewFps) < 0) return null
+    entry.previewFps = values.previewFps
+    wrote = true
+  }
+  return wrote ? entry : null
+}
+
+// An entry as the bar hands settings to a widget: without its id.
+function settingsFromEntry(entry) {
+  var out = {}
+  if (!isPlainObject(entry)) return out
+  for (var key in entry) if (key !== "id") out[key] = entry[key]
+  return out
+}
+
+// A frame sequence number: a positive integer the double can hold exactly.
+function previewSeq(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= 1 && value <= 9007199254740991 ? value : 0
+}
+
+// The Image source for a frame: the validated path, never one from a line,
+// and the sequence number so that every frame is a new URL.
+function previewSource(expectedPath, seq) {
+  var n = previewSeq(seq)
+  if (typeof expectedPath !== "string" || expectedPath === "" || n === 0) return ""
+  return "file://" + expectedPath + "?" + n
+}
+
+// What an error line's code means for the preview.
+function previewErrorText(code) {
+  switch (code) {
+  case "unsupported-daemon": return PREVIEW_OLD_DAEMON
+  case "daemon-not-running": return "omarchy-broadcastd is not running"
+  default: return "Preview stream error: " + (code !== "" ? code : "unknown")
+  }
+}
+
+// One stdout line of `preview --json` -> { kind, ... }:
+//   frame    { seq }: a v1 frame line for exactly `expectedPath`, whose seq is
+//            a positive integer above `lastSeq`
+//   preview  { active, fps, pathMismatch }: the lease was taken or lost
+//   error    { code, text }: an outage; the code is sanitised and capped
+//   dropped  { reason }: too long (never parsed), or a frame line with a bad
+//            seq (seq), another path (path) or an old seq (stale)
+//   invalid  not JSON, not an object, not v 1, no type
+//   ignored  blank, or a type this plugin does not read
+function parsePreviewLine(text, expectedPath, lastSeq) {
+  var p = parseLine(text)
+  if (p.kind === "dropped") return { kind: "dropped", reason: p.reason }
+  if (p.kind === "ignored") return { kind: "ignored", reason: p.reason }
+  if (p.kind !== "message") return { kind: "invalid", reason: p.reason }
+  var m = p.message
+  switch (m.type) {
+  case "frame":
+    var seq = previewSeq(m.seq)
+    if (seq === 0) return { kind: "dropped", reason: "seq" }
+    if (typeof expectedPath !== "string" || expectedPath === "" || m.path !== expectedPath)
+      return { kind: "dropped", reason: "path" }
+    if (seq <= previewSeq(lastSeq)) return { kind: "dropped", reason: "stale" }
+    return { kind: "frame", seq: seq }
+  case "preview":
+    if (m.active === false) return { kind: "preview", active: false, fps: 0, pathMismatch: false }
+    if (m.active !== true) return { kind: "invalid", reason: "active" }
+    return {
+      kind: "preview",
+      active: true,
+      fps: PREVIEW_FPS_CHOICES.indexOf(m.fps) >= 0 ? m.fps : 0,
+      // The daemon writes elsewhere than this shell expects (its
+      // XDG_RUNTIME_DIR differs): every frame line would be dropped.
+      pathMismatch: typeof m.path === "string" && m.path !== expectedPath
+    }
+  case "error":
+    var code = sanitize(m.code, PREVIEW_CODE_CAP)
+    return { kind: "error", code: code, text: previewErrorText(code) }
+  default:
+    return { kind: "ignored", reason: "type" }
+  }
+}
+
+// The preview process ended on its own. `started` false: it never ran.
+// Exit status 2 is clap's usage error: a CLI without the `preview` command.
+function previewExitText(code, crashed, started, rejected) {
+  var what
+  if (rejected) what = "omarchy-broadcast preview printed a line longer than " + LINE_CAP + " characters"
+  else if (!started) what = "omarchy-broadcast preview could not be started"
+  else if (crashed) what = "omarchy-broadcast preview stopped by signal " + code
+  else if (code === 2) what = "This omarchy-broadcast has no preview command (it needs 0.18 or newer)"
+  else what = "omarchy-broadcast preview exited with status " + code
+  return what + ". " + PREVIEW_RETRY_HINT
+}
+
+// The panel's preview area, from a plain state object:
+//   { record, pathReason, switchOn, wanted, running, leaseActive, hasFrame,
+//     exitError, streamError, pathMismatch }
+// -> { mode, text, error }. mode: "hidden" (the daemon is unavailable; the
+// panel says so elsewhere), "note" (one line, no frame area: the preview
+// cannot work here, ended with an error, or nothing is shown or starting),
+// "box" (the 16:9 frame area while the preview starts) or "image" (frames).
+// `error`: the text is a failure (drawn in the urgent colour).
+function previewPlaceholder(state) {
+  var s = isPlainObject(state) ? state : {}
+  var record = s.record
+  if (!available(record)) return { mode: "hidden", text: "", error: false }
+  if (!previewSupported(record)) return { mode: "note", text: PREVIEW_OLD_DAEMON, error: false }
+  if (typeof s.pathReason === "string" && s.pathReason !== "")
+    return { mode: "note", text: "Preview unavailable: " + s.pathReason, error: false }
+  if (typeof s.exitError === "string" && s.exitError !== "") return { mode: "note", text: s.exitError, error: true }
+  if (typeof s.streamError === "string" && s.streamError !== "") return { mode: "note", text: s.streamError, error: true }
+  if (s.pathMismatch === true)
+    return { mode: "note", text: "omarchy-broadcastd writes its preview elsewhere than this shell expects (XDG_RUNTIME_DIR differs)", error: true }
+  if (s.running === true && s.leaseActive === true && s.hasFrame === true) return { mode: "image", text: "", error: false }
+  if (s.running === true || s.wanted === true || s.switchOn === true)
+    return { mode: "box", text: PREVIEW_STARTING_TEXT, error: false }
+  var text = record.enabled === false || record.state === "off" ? PREVIEW_CAMERA_OFF_TEXT
+    : (record.state === "idle" ? PREVIEW_IDLE_TEXT : PREVIEW_OFF_TEXT)
+  return { mode: "note", text: text, error: false }
+}
+
+// The Preview switch and the frame-rate choices are drawn (and are cursor
+// stops) only where the preview can work.
+function previewControlsShown(record, pathReason) {
+  return previewSupported(record) && (typeof pathReason !== "string" || pathReason === "")
+}
+
+// The frame-rate choices: { value, label, tooltip, selected } (constants
+// only: the shell's Button draws them without PlainText).
+function fpsOptions(fps) {
+  var current = previewFpsValue(fps)
+  var out = []
+  for (var i = 0; i < PREVIEW_FPS_CHOICES.length; i++) {
+    var v = PREVIEW_FPS_CHOICES[i]
+    out.push({ value: v, label: v + " fps", tooltip: PREVIEW_FPS_TOOLTIPS[v], selected: v === current })
+  }
+  return out
+}
+
 // ---------------------------------------------------------------- keyboard cursor
 
-// The panel's keyboard stops, top to bottom: the on/off switch, the effect
+// The panel's keyboard stops, top to bottom: the on/off switch, the Preview
+// switch and the frame-rate choices (one stop for the row, as the effect row;
+// only when `previewControls`, see previewControlsShown), the effect
 // choices (one stop for the row; Left/Right walk its choices, as in the
 // shell's button groups), the noise removal switch, one per rendered camera
 // row (`cameraCount` is the count the panel draws, so the cursor and the rows
@@ -957,9 +1268,13 @@ function backoffAfterExit(prevMs, uptimeMs) {
 // either when the CLI or the daemon predates effects (none of its choices can
 // be requested), nor the noise removal switch when the daemon does not
 // report it (it is not drawn).
-function cursorStops(record, cameraCount) {
+function cursorStops(record, cameraCount, previewControls) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
+  if (previewControls === true) {
+    stops.push({ kind: "preview", index: -1 })
+    stops.push({ kind: "fps", index: -1 })
+  }
   if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
   if (denoiseSupported(record)) stops.push({ kind: "denoise", index: -1 })
   var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
