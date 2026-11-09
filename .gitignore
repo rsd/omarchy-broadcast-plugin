@@ -1,0 +1,24 @@
+# The tests write nothing into the checkout: lint.sh and run-harness.sh build
+# their scratch directories under $TMPDIR (or under --work DIR).
+
+# Python bytecode (tests/check-source.py)
+__pycache__/
+*.py[cod]
+
+# Editors and language servers
+*~
+*.swp
+*.swo
+.*.sw?
+\#*\#
+.#*
+.idea/
+.vscode/
+.qmlls.ini
+
+# Operating system
+.DS_Store
+Thumbs.db
+
+# The CI harness work directory (tests/run-harness.sh --work harness-work)
+/harness-work/

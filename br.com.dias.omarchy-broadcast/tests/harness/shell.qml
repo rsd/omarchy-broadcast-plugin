@@ -13,17 +13,32 @@ import qs.Ui
 //   OBH_MODE     mock | live
 //   OBH_PLUGIN   absolute path of the plugin directory (loaded by file URL,
 //                as the shell loads a plugin)
-//   OBH_CLI      CLI for the widgets' cliPath (the fake, or the real build)
+//   OBH_CLI      CLI for the widgets' cliPath (the fake's copy, or live a
+//                symlink to the real CLI of OMARCHY_BROADCAST_CLI; either
+//                path is unique to the run, the marker watches are counted by)
 //   OBH_FAKE     the fake's state directory (mock)
 //   OBH_SCREENS  where PNG grabs go
 //   OBH_LINKED   a symlink to the plugin dir, for the resolver checks (mock)
 //   OBH_NOREPO   a plugin-named dir outside any repository (mock)
-//   OBH_REPO_CLI the repository's target/release/omarchy-broadcast (mock)
-//   OBH_DAEMON   omarchy-broadcastd binary; OBH_LIVE the live scratch dir (live)
-//   OBH_DEVLINK  a symlink to a plugin copy inside a scratch repository whose
-//                target/release/omarchy-broadcast is OBH_DEVCLI (mock)
+//   OBH_DAEMON   omarchy-broadcastd binary (OMARCHY_BROADCASTD); OBH_LIVE
+//                the live scratch dir (live)
+//   OBH_DEVLINK  a symlink to a plugin copy inside a scratch development tree
+//                whose target/release/omarchy-broadcast is the fake,
+//                OBH_DEVCLI, three levels above the plugin dir (mock)
 //   OBH_NLPLUGIN a plugin dir whose path holds a newline; OBH_NLBIN a PATH
 //                entry whose name holds one, with a CLI in it (mock)
+//   OBH_RESOLVER_PATH the PATH every resolver case runs with (plus a CLI dir
+//                where a case wants one): a dir holding only links to the
+//                tools the resolver script needs, never an omarchy-broadcast,
+//                so one installed in /usr/bin cannot answer (mock)
+//   OBH_REALLINK a symlink to a plugin copy in the same layout whose
+//                target/release/omarchy-broadcast links to the real CLI of
+//                OMARCHY_BROADCAST_CLI; OBH_REALCLI that CLI's resolved path.
+//                Empty when the variable is unset: the case prints SKIP. The
+//                resolver only prints the path; nothing runs it (mock)
+//
+// Nothing here depends on where the plugin's own checkout lives: every
+// resolver case runs against the scratch trees run-harness.sh builds.
 //
 // Two widgets stand for two monitors. Steps run in order; each may wait for a
 // condition. Prints "ok"/"FAIL" per check and "ALL OK" or "N FAILED" at the
@@ -1303,7 +1318,8 @@ ShellRoot {
       h.feed([snapshotLine({})])
     }, function() { return S().record.cameras.length === 3 })
 
-    // the resolver itself: PATH first, then the repo build behind a symlink
+    // the resolver itself: PATH first, then the development build behind a
+    // symlink (in the scratch development tree, not the plugin's checkout)
     var resolverCase = function(label, argv, path, wantOut, wantExit) {
       h.step("resolver: " + label, function() {
         h.resolverDone = false
@@ -1316,19 +1332,34 @@ ShellRoot {
         h.eq("resolver " + label + " status", h.resolverExit, wantExit)
       })
     }
+    // no system dir: an installed omarchy-broadcast would win over the case
+    var rpath = Quickshell.env("OBH_RESOLVER_PATH") || ""
     var fakeBin = shellRoot.cli.replace(/\/omarchy-broadcast$/, "")
     var direct = function(dir) { return ["sh", "-c", h.model.RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir] }
     var nlPlugin = Quickshell.env("OBH_NLPLUGIN")
     var nlBin = Quickshell.env("OBH_NLBIN")
-    resolverCase("PATH wins", h.model.resolverArgv(Quickshell.env("OBH_LINKED")), fakeBin + ":/usr/bin:/bin", shellRoot.cli, 0)
-    resolverCase("repo build through the symlink", h.model.resolverArgv(Quickshell.env("OBH_LINKED")), "/usr/bin:/bin", Quickshell.env("OBH_REPO_CLI"), 0)
-    resolverCase("nothing found", h.model.resolverArgv(Quickshell.env("OBH_NOREPO")), "/usr/bin:/bin", "", 1)
-    resolverCase("empty plugin dir still searches PATH", h.model.resolverArgv(""), fakeBin + ":/usr/bin:/bin", shellRoot.cli, 0)
-    resolverCase("empty plugin dir, nothing on PATH", h.model.resolverArgv(""), "/usr/bin:/bin", "", 1)
-    resolverCase("plugin dir with a newline (argv refuses it)", h.model.resolverArgv(nlPlugin), "/usr/bin:/bin", "", 1)
-    resolverCase("plugin dir with a newline (script refuses it)", direct(nlPlugin), "/usr/bin:/bin", "", 1)
-    resolverCase("PATH entry with a newline is skipped", h.model.resolverArgv(Quickshell.env("OBH_LINKED")), nlBin + ":/usr/bin:/bin", Quickshell.env("OBH_REPO_CLI"), 0)
+    resolverCase("PATH wins", h.model.resolverArgv(Quickshell.env("OBH_LINKED")), fakeBin + ":" + rpath, shellRoot.cli, 0)
+    var devLink = Quickshell.env("OBH_DEVLINK")
+    var devBuild = Quickshell.env("OBH_DEVCLI")
+    resolverCase("development build through the symlink", h.model.resolverArgv(devLink), rpath, devBuild, 0)
+    resolverCase("nothing found", h.model.resolverArgv(Quickshell.env("OBH_NOREPO")), rpath, "", 1)
+    resolverCase("empty plugin dir still searches PATH", h.model.resolverArgv(""), fakeBin + ":" + rpath, shellRoot.cli, 0)
+    resolverCase("empty plugin dir, nothing on PATH", h.model.resolverArgv(""), rpath, "", 1)
+    resolverCase("plugin dir with a newline (argv refuses it)", h.model.resolverArgv(nlPlugin), rpath, "", 1)
+    resolverCase("plugin dir with a newline (script refuses it)", direct(nlPlugin), rpath, "", 1)
+    resolverCase("PATH entry with a newline is skipped", h.model.resolverArgv(devLink), nlBin + ":" + rpath, devBuild, 0)
+    // a real omarchy-broadcast binary, found (not run) through a symlinked
+    // plugin dir; optional, as the plugin's checkout carries no CLI
+    var realLink = Quickshell.env("OBH_REALLINK") || ""
+    var realCli = Quickshell.env("OBH_REALCLI") || ""
+    if (realLink !== "" && realCli !== "")
+      resolverCase("real CLI through the symlink (OMARCHY_BROADCAST_CLI)", h.model.resolverArgv(realLink), rpath, realCli, 0)
+    else
+      h.step("resolver: real CLI through the symlink", function() {
+        console.log("  SKIP resolver real CLI through the symlink: OMARCHY_BROADCAST_CLI is not set")
+      })
     h.step("newline fixtures exist", function() {
+      h.check("resolver PATH set", rpath !== "" && rpath.charAt(0) === "/", rpath)
       h.check("plugin dir has a newline", nlPlugin.indexOf("\n") !== -1)
       h.check("PATH entry has a newline", nlBin.indexOf("\n") !== -1)
     })
