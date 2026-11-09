@@ -26,7 +26,7 @@ TestCase {
       v: 1, type: "snapshot", state: "idle", enabled: true, error: "",
       active_camera: brioId, active_camera_name: "Logitech MX Brio", consumers: 0,
       output_mode: "NV12 1920x1080@30", effect: "none", blur_strength: 0.5, background_image: "",
-      interface_revision: 2, cameras: cameraObjects(), cameras_truncated: false
+      interface_revision: 4, cameras: cameraObjects(), cameras_truncated: false
     }
     for (var k in overrides) m[k] = overrides[k]
     return m
@@ -37,7 +37,7 @@ TestCase {
       v: 1, type: "state", changed: ["state"], state: "idle", enabled: true, error: "",
       active_camera: brioId, active_camera_name: "Logitech MX Brio", consumers: 0,
       output_mode: "NV12 1920x1080@30", effect: "none", blur_strength: 0.5, background_image: "",
-      interface_revision: 2
+      interface_revision: 4
     }
     for (var k in overrides) m[k] = overrides[k]
     return m
@@ -1051,7 +1051,7 @@ TestCase {
     compare(Model.interfaceRevision(-0.5), -1)
     // a number too large for a double: Qt's JSON.parse refuses the line (an
     // engine that reads it as Infinity gets -1); never effects either way
-    var text = line(snapshotObject({})).replace('"interface_revision":2', '"interface_revision":1e999')
+    var text = line(snapshotObject({})).replace('"interface_revision":4', '"interface_revision":1e999')
     verify(text.indexOf("1e999") > 0)
     var huge = Model.reduce(Model.emptyRecord("connecting"), text)
     if (huge.outcome === "snapshot") compare(huge.record.interfaceRevision, -1)
@@ -1083,6 +1083,138 @@ TestCase {
     compare(Model.tooltipText(snap({ effect: "none" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
     compare(Model.tooltipText(snap({ effect: "sepia" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
     compare(Model.tooltipText(snap({ state: "off", enabled: false, effect: "blur" })), "Omarchy Broadcast: off")
+  }
+
+  // ---- noise removal ---------------------------------------------------------
+
+  function test_denoise_parsed() {
+    compare(snap({ denoise: true }).denoise, true)
+    compare(snap({ denoise: false }).denoise, false)
+    // missing: a CLI or a daemon that predates noise removal
+    compare(snap().denoise, null)
+    compare(snap({ denoise: undefined }).denoise, null)
+    // anything but a boolean is unknown, never coerced
+    var odd = [null, 0, 1, "true", "false", "on", "", [true], { on: true }, NaN]
+    for (var i = 0; i < odd.length; i++) {
+      var r = snap({ denoise: odd[i] })
+      compare(r.denoise, null, typeof odd[i] + " " + String(odd[i]))
+      verify(!Model.denoiseSupported(r), typeof odd[i] + " " + String(odd[i]))
+      verify(Model.available(r), "the rest of the record still applies")
+    }
+    compare(Model.emptyRecord("connecting").denoise, null)
+    compare(Model.emptyRecord("not-running").denoise, null)
+    // a state line carries it too, and the old record is not mutated
+    var on = snap({ denoise: true })
+    var off = Model.reduce(on, line(stateObject({ changed: ["denoise"], denoise: false }))).record
+    compare(off.denoise, false)
+    compare(on.denoise, true, "the old record is not mutated")
+    // a state line without it (an old producer) makes it unknown again
+    var gone = Model.reduce(on, line(stateObject({ changed: ["state"] }))).record
+    compare(gone.denoise, null)
+    // an error line forgets it with everything else
+    compare(Model.reduce(on, line({ v: 1, type: "error", code: "daemon-not-running", error: "gone" })).record.denoise, null)
+  }
+
+  function test_denoise_row() {
+    var on = Model.denoiseRow(snap({ denoise: true }))
+    compare(on.visible, true)
+    compare(on.checked, true)
+    compare(on.label, "Noise removal")
+    compare(on.tooltip, "Turn noise removal off")
+    var off = Model.denoiseRow(snap({ denoise: false }))
+    compare(off.visible, true)
+    compare(off.checked, false)
+    compare(off.tooltip, "Turn noise removal on")
+    // unknown: no switch at all, rather than an off one
+    var unknown = Model.denoiseRow(snap())
+    compare(unknown.visible, false)
+    compare(unknown.checked, false)
+    compare(Model.denoiseRow(Model.emptyRecord("not-running")).visible, false)
+    compare(Model.denoiseRow(snap({ state: "dancing", denoise: true })).visible, false, "an unknown state is unavailable")
+    compare(Model.denoiseRow(null).visible, false)
+    // offered in every known state, as the effect choices are
+    var states = ["off", "idle", "starting", "error"]
+    for (var i = 0; i < states.length; i++)
+      compare(Model.denoiseRow(snap({ state: states[i], denoise: false })).visible, true, states[i])
+    compare(Model.denoiseRow(Model.reduce(active(), line(stateObject({ state: "active", denoise: true }))).record).checked, true)
+    // gated on the daemon's interface revision, as effects are: a revision-3
+    // line that carries `denoise` still shows no switch, and none can be armed
+    var rev3 = snap({ interface_revision: 3, denoise: false })
+    compare(Model.denoiseRow(rev3).visible, false)
+    verify(!Model.denoiseSupported(rev3))
+    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, rev3), null)
+    compare(Model.intentArgv({ verb: "denoise", on: false }, cli, rev3), null)
+    compare(Model.denoiseRow(snap({ interface_revision: 4, denoise: false })).visible, true)
+    compare(Model.denoiseRow(snap({ interface_revision: 5, denoise: true })).visible, true)
+    compare(Model.denoiseRow(snap({ interface_revision: 3, denoise: true })).visible, false)
+    compare(Model.denoiseRow(snap({ interface_revision: undefined, denoise: false })).visible, false, "unknown revision")
+    // independent of effects: effects without noise removal leave the switch hidden
+    verify(Model.effectsSupported(rev3))
+  }
+
+  function test_denoise_argv() {
+    compare(JSON.stringify(Model.denoiseArgv(cli, true)), JSON.stringify([cli, "denoise", "on"]))
+    compare(JSON.stringify(Model.denoiseArgv(cli, false)), JSON.stringify([cli, "denoise", "off"]))
+    // a strict boolean only: nothing else becomes a word on the command line
+    var odd = [null, undefined, 0, 1, "on", "off", "true", "", [true], { on: true }, new Boolean(true)]
+    for (var i = 0; i < odd.length; i++) compare(Model.denoiseArgv(cli, odd[i]), null, typeof odd[i] + " " + String(odd[i]))
+    compare(Model.denoiseArgv("", true), null, "no CLI")
+    compare(Model.denoiseArgv("omarchy-broadcast", true), null, "a bare name is not a CLI path")
+    compare(Model.denoiseArgv("/a/b\nc", true), null)
+  }
+
+  function test_denoise_intents_are_rechecked_when_they_run() {
+    var r = snap({ denoise: false })
+    compare(JSON.stringify(Model.intentArgv({ verb: "denoise", on: true }, cli, r)), JSON.stringify([cli, "denoise", "on"]))
+    compare(JSON.stringify(Model.intentArgv({ verb: "denoise", on: false }, cli, snap({ denoise: true }))),
+            JSON.stringify([cli, "denoise", "off"]))
+    compare(JSON.stringify(Model.intentArgv({ verb: "denoise", on: true }, "/new/omarchy-broadcast", r)),
+            JSON.stringify(["/new/omarchy-broadcast", "denoise", "on"]), "the CLI path of the moment")
+    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, Model.emptyRecord("not-running")), null,
+            "never D-Bus-activates a stopped daemon")
+    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, snap({ state: "dancing", denoise: false })), null)
+    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, snap()), null,
+            "a CLI or daemon that does not report it has no `denoise` to run")
+    compare(Model.intentArgv({ verb: "denoise", on: "on" }, cli, r), null)
+    compare(Model.intentArgv({ verb: "denoise" }, cli, r), null)
+    compare(Model.intentArgv({ verb: "denoise", on: true }, "", r), null)
+    // a daemon that loses it meanwhile (a downgrade) drops a queued ask
+    var lost = Model.reduce(r, line(stateObject({ changed: ["state"] }))).record
+    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, lost), null)
+  }
+
+  function test_denoise_cursor_stop() {
+    var one = [cameraObjects()[0]]
+    compare(JSON.stringify(Model.cursorStops(snap({ cameras: one, denoise: false }), 1).map(function(s) { return s.kind })),
+            JSON.stringify(["switch", "effect", "denoise", "camera"]))
+    compare(JSON.stringify(Model.cursorStops(snap({ cameras: one, denoise: true }), 1).map(function(s) { return s.kind })),
+            JSON.stringify(["switch", "effect", "denoise", "camera"]))
+    compare(JSON.stringify(Model.cursorStops(snap({ cameras: one }), 1).map(function(s) { return s.kind })),
+            JSON.stringify(["switch", "effect", "camera"]), "unknown: no stop")
+    // a daemon below the noise removal revision: no stop, whatever the line carries
+    compare(JSON.stringify(Model.cursorStops(snap({ cameras: one, interface_revision: 3, denoise: false }), 1)
+                           .map(function(s) { return s.kind })), JSON.stringify(["switch", "effect", "camera"]))
+    compare(Model.stopIndex(Model.cursorStops(snap({ denoise: false }), 2), "denoise", -1), 2)
+    compare(Model.cursorStops(Model.emptyRecord("not-running"), 2).length, 0)
+  }
+
+  function test_denoise_in_tooltip() {
+    var base = "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers"
+    compare(Model.tooltipText(snap({ effect: "blur", denoise: true })), base + " \u00b7 background blurred, noise removal on")
+    compare(Model.tooltipText(snap({ effect: "replace", background_image: image, denoise: true })),
+            base + " \u00b7 background replaced, noise removal on")
+    compare(Model.tooltipText(snap({ effect: "none", denoise: true })), base + " \u00b7 noise removal on")
+    compare(Model.tooltipText(snap({ effect: "sepia", denoise: true })), base + " \u00b7 noise removal on")
+    compare(Model.tooltipText(snap({ effect: "blur", denoise: false })), base + " \u00b7 background blurred")
+    compare(Model.tooltipText(snap({ effect: "none", denoise: false })), base)
+    compare(Model.tooltipText(snap({ effect: "none" })), base, "unknown says nothing")
+    compare(Model.tooltipText(snap({ effect: "none", denoise: "true" })), base)
+    compare(Model.tooltipText(snap({ state: "off", enabled: false, denoise: true })), "Omarchy Broadcast: off")
+    compare(Model.effectSummary(snap({ effect: "blur", denoise: true })), "background blurred, noise removal on")
+    compare(Model.effectSummary(null), "")
+    // a daemon error about noise removal (it could not run) still shows
+    verify(Model.tooltipText(snap({ denoise: true, error: "noise removal unavailable" }))
+             .indexOf("noise removal on \u00b7 error: noise removal unavailable") !== -1)
   }
 
   // ---- CLI resolution ------------------------------------------------------

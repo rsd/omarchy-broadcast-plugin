@@ -77,9 +77,20 @@ var CLI_NO_EFFECTS = "The omarchy-broadcast CLI needs updating for effects"
 // interface revision below EFFECTS_REVISION, or none readable): the CLI would
 // refuse every `effect` request.
 var DAEMON_NO_EFFECTS = "The daemon needs updating for effects"
+// Video noise removal: a stage that runs before the effect, or alone with
+// `none`, switched by `omarchy-broadcast denoise on|off`. It is not an effect
+// and hides nothing, so it is a separate switch, not a choice of EFFECTS. When
+// it cannot run the stream goes on without it and the daemon's error text
+// says why. The only words ever passed to `omarchy-broadcast denoise`.
+var DENOISE_WORDS = { on: "on", off: "off" }
+var DENOISE_LABEL = "Noise removal"
 // The daemon interface revision that added effects (obc-ipc INTERFACE_REVISION
 // 2; the CLI's bus::require_effects checks the same).
 var EFFECTS_REVISION = 2
+// The daemon interface revision that added noise removal (obc-ipc
+// INTERFACE_REVISION 4; the CLI prints `denoise` only from a daemon at or
+// above it, and null below).
+var DENOISE_REVISION = 4
 // The largest interface revision the producer can print (a u32).
 var REVISION_MAX = 4294967295
 
@@ -186,6 +197,11 @@ function effectKey(value) {
   return typeof value === "string" && EFFECTS.indexOf(value) >= 0 ? value : ""
 }
 
+// Whether noise removal is on: a boolean exactly, else null (unknown).
+function denoiseFlag(value) {
+  return typeof value === "boolean" ? value : null
+}
+
 // The blur strength: a finite number in 0..1, else null (unknown).
 function blurStrength(value) {
   return typeof value === "number" && isFinite(value) && value >= 0 && value <= 1 ? value : null
@@ -221,6 +237,9 @@ function emptyRecord(link, linkText) {
     blurStrength: null,
     backgroundImage: "",
     backgroundImageSet: false,
+    // true or false as the daemon reports it; null when the line has no
+    // boolean `denoise` (a CLI or a daemon that predates noise removal).
+    denoise: null,
     cliEffects: false,
     interfaceRevision: -1,
     cameras: [],
@@ -271,6 +290,9 @@ function applyScalars(r, m) {
   // Whether the daemon holds an image, from the raw field: the display copy
   // above may sanitise to "" and must not decide what can be chosen.
   r.backgroundImageSet = typeof m.background_image === "string" && m.background_image !== ""
+  // A CLI and daemon that know noise removal print `denoise` on every
+  // snapshot and state line; one that predates it prints no such field.
+  r.denoise = denoiseFlag(m.denoise)
   // A CLI that knows video effects prints blur_strength as a number on every
   // snapshot and state line. One that predates them prints no such field (and
   // "effect":"none"), and has no `effect` command to run.
@@ -615,12 +637,15 @@ function statsRows(record) {
 
 // ---------------------------------------------------------------- effects
 
-// The tooltip's effect phrase: "" for none or an unknown effect.
+// The tooltip's effect phrase: the effect ("" for none or an unknown one),
+// then noise removal when it is on, joined by a comma.
 function effectSummary(record) {
   if (!record) return ""
-  if (record.effectKey === "blur") return "background blurred"
-  if (record.effectKey === "replace") return "background replaced"
-  return ""
+  var parts = []
+  if (record.effectKey === "blur") parts.push("background blurred")
+  else if (record.effectKey === "replace") parts.push("background replaced")
+  if (record.denoise === true) parts.push("noise removal on")
+  return parts.join(", ")
 }
 
 // Whether the daemon holds a background image. Read from the raw field
@@ -763,6 +788,32 @@ function watchExitText(code, crashed, delayMs) {
   return "omarchy-broadcast watch " + how + "; restarting in " + Math.round(delayMs / 1000) + " s"
 }
 
+// ---------------------------------------------------------------- noise removal
+
+// Whether noise removal can be switched: an available daemon whose interface
+// revision is at least DENOISE_REVISION and whose line reports `denoise` as a
+// boolean. A CLI or a daemon that predates it omits the field (or reports an
+// older revision), and the panel then shows no switch (an off switch would
+// claim a state nobody reported). An unknown revision counts as no.
+function denoiseSupported(record) {
+  return available(record) && typeof record.denoise === "boolean"
+    && typeof record.interfaceRevision === "number"
+    && record.interfaceRevision >= DENOISE_REVISION
+}
+
+// The panel's noise removal row: { visible, checked, label, tooltip }, the
+// tooltip worded as the on/off switch's is.
+function denoiseRow(record) {
+  var shown = denoiseSupported(record)
+  var checked = shown && record.denoise === true
+  return {
+    visible: shown,
+    label: DENOISE_LABEL,
+    checked: checked,
+    tooltip: checked ? "Turn noise removal off" : "Turn noise removal on"
+  }
+}
+
 // ---------------------------------------------------------------- stderr framing
 
 // A command's stderr arrives in chunks (SplitParser with an empty marker), so
@@ -840,11 +891,17 @@ function effectArgv(cli, effect) {
   return [cli, "effect", effect]
 }
 
+// Only `on` or `off` is ever sent, from a strict boolean.
+function denoiseArgv(cli, on) {
+  if (!cliUsable(cli) || typeof on !== "boolean") return null
+  return [cli, "denoise", on ? DENOISE_WORDS.on : DENOISE_WORDS.off]
+}
+
 // A control request is kept as an intent, { verb, on, id, effect }, and turned into an
 // argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera`/`effect` would D-Bus-activate it) or with a CLI
-// path that has changed. null = do not run.
+// gone meanwhile (`on`/`off`/`camera`/`effect`/`denoise` would D-Bus-activate it) or
+// with a CLI path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
   switch (intent.verb) {
@@ -852,6 +909,7 @@ function intentArgv(intent, cli, record) {
   case "select": return available(record) ? selectArgv(cli, intent.id) : null
   case "next": return canNext(record) ? nextArgv(cli) : null
   case "effect": return effectSelectable(record, intent.effect) ? effectArgv(cli, intent.effect) : null
+  case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null
   default: return null
   }
 }
@@ -892,15 +950,18 @@ function backoffAfterExit(prevMs, uptimeMs) {
 
 // The panel's keyboard stops, top to bottom: the on/off switch, the effect
 // choices (one stop for the row; Left/Right walk its choices, as in the
-// shell's button groups), one per rendered camera row (`cameraCount` is the
-// count the panel draws, so the cursor and the rows always agree), then Next
-// camera when it is shown. Nothing is a stop while the daemon is
-// unavailable: no control is drawn. The effect row is no stop either when the
-// CLI or the daemon predates effects: none of its choices can be requested.
+// shell's button groups), the noise removal switch, one per rendered camera
+// row (`cameraCount` is the count the panel draws, so the cursor and the rows
+// always agree), then Next camera when it is shown. Nothing is a stop while
+// the daemon is unavailable: no control is drawn. The effect row is no stop
+// either when the CLI or the daemon predates effects (none of its choices can
+// be requested), nor the noise removal switch when the daemon does not
+// report it (it is not drawn).
 function cursorStops(record, cameraCount) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
+  if (denoiseSupported(record)) stops.push({ kind: "denoise", index: -1 })
   var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
   for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
   if (canNext(record)) stops.push({ kind: "next", index: -1 })

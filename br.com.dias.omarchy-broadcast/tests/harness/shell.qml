@@ -405,7 +405,7 @@ ShellRoot {
   function scalars(o) {
     var m = { state: "idle", enabled: true, error: "", active_camera: brioId,
               active_camera_name: "Logitech MX Brio", consumers: 0, output_mode: "NV12 1920x1080@30",
-              effect: "none", blur_strength: 0.5, background_image: "", interface_revision: 2 }
+              effect: "none", blur_strength: 0.5, background_image: "", denoise: false, interface_revision: 4 }
     for (var k in o) m[k] = o[k]
     return m
   }
@@ -501,6 +501,9 @@ ShellRoot {
       h.eq("stats hidden while idle", h.find(A(), "statsBlock").visible, false)
       h.eq("next camera shown", h.find(A(), "nextCameraButton").visible, true)
       h.eq("switch shown", h.find(A(), "enableSwitch").visible, true)
+      h.eq("noise removal row shown", h.find(A(), "denoiseRow").visible, true)
+      h.eq("noise removal off", h.find(A(), "denoiseToggle").checked, false)
+      h.eq("noise removal label", h.find(A(), "denoiseLabel").text, "Noise removal")
       h.eq("hero status line", h.content(A()).heroMeta, "idle")
       h.check("active row marked", h.row(A(), 0).isActive && !h.row(A(), 1).isActive)
       h.check("active row painted as current", h.row(A(), 0).current && !h.row(A(), 1).current)
@@ -548,7 +551,7 @@ ShellRoot {
       var c = h.content(A())
       h.eq("stop", c.currentStop.kind, "switch")
       h.eq("switch has the cursor", h.find(A(), "enableSwitch").hasCursor, true)
-      h.eq("stops = switch + effect + rendered rows + next", c.stops.length, h.find(A(), "cameraRepeater").count + 3)
+      h.eq("stops = switch + effect + noise removal + rendered rows + next", c.stops.length, h.find(A(), "cameraRepeater").count + 4)
       h.key(Qt.Key_Down)
     })
     // the effect row: one stop; Left/Right walk its choices
@@ -596,7 +599,63 @@ ShellRoot {
       h.eq("nothing ran", h.newLogArgs().length, 0)
       h.feed([stateLine({ effect: "none", active_camera: fhdId, active_camera_name: "FHD Camera" })])
     }, function() { return S().record.effectKey === "none" })
-    h.step("Down from the effect row", function() { h.key(Qt.Key_Down) })
+    // noise removal: a switch of its own below the effect row; Enter flips it
+    h.step("Down from the effect row: the noise removal switch", function() {
+      h.key(Qt.Key_Down)
+      var c = h.content(A())
+      h.eq("stop", c.currentStop.kind, "denoise")
+      h.eq("noise removal has the cursor", h.find(A(), "denoiseToggle").hasCursor, true)
+      h.eq("no effect chip has it", ["none", "blur", "replace"].filter(function(e) {
+        return h.find(A(), "effectChoice-" + e).hasCursor }).length, 0)
+      h.markLog()
+      h.key(Qt.Key_Return)
+    }, function() { return h.newLogArgs().length >= 1 })
+    h.step("denoise on argv", function() {
+      h.eq("argv", lastArgs(), JSON.stringify(["denoise", "on"]))
+      h.eq("no optimistic change", S().record.denoise, false)
+      h.eq("switch still off", h.find(A(), "denoiseToggle").checked, false)
+      h.feed([stateLine({ denoise: true, active_camera: fhdId, active_camera_name: "FHD Camera" })])
+    }, function() { return S().record.denoise === true && !S().commandBusy })
+    h.step("noise removal arrives on the stream", function() {
+      h.eq("switch on", h.find(A(), "denoiseToggle").checked, true)
+      h.eq("None still selected (it stacks with any effect)", h.find(A(), "effectChoice-none").selected, true)
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers · noise removal on")
+    })
+    h.step("with Blur too", function() {
+      h.feed([stateLine({ effect: "blur", denoise: true, active_camera: fhdId, active_camera_name: "FHD Camera" })])
+    }, function() { return S().record.effectKey === "blur" })
+    h.step("tooltip names both", function() {
+      h.eq("tooltip", B().iconButton.tooltipText,
+           "Omarchy Broadcast: idle · FHD Camera · 0 consumers · background blurred, noise removal on")
+      h.eq("switch still on", h.find(A(), "denoiseToggle").checked, true)
+    })
+    h.grabStep(function() { return A().popup }, "panel-denoise-on.png")
+    // busy: a second flip while the first runs is refused, as the effect
+    // choices refuse one
+    h.step("slow commands for the denoise double click", function() { h.writeFile("delay", ["0.6"]) },
+           function() { return h.writerIdle() })
+    h.step("click the switch twice", function() {
+      h.markLog()
+      h.find(A(), "denoiseToggle").toggled()
+      h.check("busy after the first click", S().commandBusy)
+      h.eq("the switch shows busy", h.find(A(), "denoiseToggle").busy, true)
+      h.check("second flip refused", !h.content(A()).toggleDenoise())
+      h.check("an effect refused meanwhile", !h.content(A()).chooseEffect(0))
+    }, function() { return h.newLogArgs().length >= 1 })
+    h.wait(900)
+    h.step("denoise off argv, once", function() {
+      var got = h.newLogArgs()
+      h.eq("runs", JSON.stringify(got), JSON.stringify([["denoise", "off"]]))
+      h.eq("no optimistic change", S().record.denoise, true)
+      h.removeFile("delay")
+      h.feed([stateLine({ effect: "none", denoise: false, active_camera: fhdId, active_camera_name: "FHD Camera" })])
+    }, function() { return S().record.denoise === false && S().record.effectKey === "none" && !S().commandBusy })
+    h.step("noise removal off again", function() {
+      h.eq("switch off", h.find(A(), "denoiseToggle").checked, false)
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers")
+      h.content(A()).setCursor("denoise", -1)
+    })
+    h.step("Down from the noise removal switch", function() { h.key(Qt.Key_Down) })
     h.step("Down: first camera row", function() {
       h.eq("row 0 has the cursor", h.row(A(), 0).hasCursor, true)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
@@ -626,8 +685,8 @@ ShellRoot {
     h.step("Space runs Next camera", function() {
       h.eq("argv", lastArgs(), JSON.stringify(["camera", "next"]))
     }, function() { return !S().commandBusy })
-    h.step("k x5 back to the switch, Enter turns off", function() {
-      for (var i = 0; i < 5; i++) h.key("k")
+    h.step("k x6 back to the switch, Enter turns off", function() {
+      for (var i = 0; i < 6; i++) h.key("k")
       h.eq("on the switch", h.content(A()).currentStop.kind, "switch")
       h.markLog()
       h.key(Qt.Key_Enter)
@@ -869,7 +928,7 @@ ShellRoot {
     // a CLI that predates effects: no blur_strength on its lines (JSON drops
     // undefined), and no `effect` command; the row offers nothing
     h.step("snapshot from a CLI without effects", function() {
-      h.feed([snapshotLine({ blur_strength: undefined, background_image: undefined })])
+      h.feed([snapshotLine({ blur_strength: undefined, background_image: undefined, denoise: undefined })])
     }, function() { return S().record.link === "ok" && S().record.cliEffects === false })
     h.step("the effect row is faded and names the CLI", function() {
       ["none", "blur", "replace"].forEach(function(e) {
@@ -878,10 +937,17 @@ ShellRoot {
       h.eq("hint", h.find(A(), "effectHint").text, "The omarchy-broadcast CLI needs updating for effects.")
       h.eq("no command", h.find(A(), "effectHintCommand").visible, false)
       h.eq("no effect stop", h.content(A()).stops.filter(function(st) { return st.kind === "effect" }).length, 0)
+      // nor does it report noise removal: no switch, rather than an off one
+      h.eq("unknown noise removal", S().record.denoise, null)
+      h.eq("no noise removal row", h.find(A(), "denoiseRow").visible, false)
+      h.eq("no noise removal stop", h.content(A()).stops.filter(function(st) { return st.kind === "denoise" }).length, 0)
       h.markLog()
       h.check("Blur refused", !h.content(A()).chooseEffect(1))
+      h.check("noise removal refused", !h.content(A()).toggleDenoise())
+      h.check("setDenoise refused", !S().setDenoise(true))
       h.eq("nothing ran", h.newLogArgs().length, 0)
     })
+    h.grabStep(function() { return A().popup }, "panel-denoise-unknown.png")
     // a new CLI still talking to a daemon started before the upgrade
     // (interface revision 1): the row offers nothing and names the daemon
     h.step("snapshot from a daemon without effects", function() {
@@ -1215,12 +1281,12 @@ ShellRoot {
       h.check("content taller than the card", flick.contentHeight > flick.height, flick.contentHeight + " vs " + flick.height)
       h.eq("scrolls", flick.interactive, true)
       h.eq("truncation row", h.find(A(), "camerasTruncated").text, "More cameras are connected; they are not shown")
-      h.eq("stops", h.content(A()).stops.length, 15)
+      h.eq("stops", h.content(A()).stops.length, 16)
     })
     h.grabStep(function() { return A().popup }, "panel-12-cameras.png")
     h.step("cursor to the last camera row", function() {
       h.key(Qt.Key_Down)
-      for (var i = 0; i < 13; i++) h.key(Qt.Key_Down)
+      for (var i = 0; i < 14; i++) h.key(Qt.Key_Down)
     })
     h.wait(400)
     h.step("cursor row kept in view", function() {
