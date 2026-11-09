@@ -25,7 +25,7 @@ The panel shows:
 
 - the state, the on/off switch and the daemon's error text, if any;
 - the last failed command, if any;
-- the camera in use, the number of consumers and the output mode;
+- the camera in use, the number of consumers (the total of applications holding the virtual camera device and applications linked to the optional PipeWire camera node) and the output mode;
 - the video effect: None, Blur or Replace, with the current one selected (click a choice to change it). While blurring, the blur strength is shown; while replacing, the background image path. Replace can be chosen only once the daemon has a background image; until then it is faded, the panel shows "Replace needs an image:" with the command `oma-broadcast effect replace --image PATH` to run in a terminal, and the Replace tooltip names the other way, `background_image` under `[effect]` in the daemon's configuration. The strength and the image are shown, not edited, here. If the `oma-broadcast` CLI predates video effects, every choice is faded and the panel says the CLI needs updating; if the CLI knows effects but the running daemon does not (its interface revision is below 2, as when the daemon was not restarted after an upgrade), every choice is faded and the panel says the daemon needs updating;
 - while active, the frame rate, the p50 latency and the CPU and GPU load; a figure the daemon has not reported yet reads as a dash;
 - the list of cameras (click a row to select it) and a Next camera button when there are two or more. The producer lists at most 12 cameras; a row says when more are connected;
