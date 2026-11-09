@@ -7,8 +7,8 @@ import qs.Ui
 import "Model.js" as Model
 
 // The popup's content: state and switch, the daemon's error, the active
-// camera, consumers, output mode, the video effect, live figures while
-// active, and the camera list. Everything shown comes out of Model.js already sanitised, and every
+// camera, consumers, output mode, the video effect and the noise removal
+// switch, live figures while active, and the camera list. Everything shown comes out of Model.js already sanitised, and every
 // Text here is PlainText as well (tests/check-source.py counts them).
 //
 // Nothing here changes state directly: a control runs a CLI command through
@@ -16,7 +16,8 @@ import "Model.js" as Model
 //
 // Keyboard, as in the shell's own panels (PanelKeyCatcher, CursorSurface):
 // the first arrow key shows the cursor on the on/off switch; Up/Down (or k/j)
-// then walk the switch, the effect row, each camera row and Next camera;
+// then walk the switch, the effect row, the noise removal switch, each camera
+// row and Next camera;
 // Left/Right (or h/l) walk the effect choices; Enter or Space activates; Escape closes; Tab moves to the neighbouring panel. The mouse
 // moves the same cursor, so only one highlight is ever drawn.
 Item {
@@ -43,6 +44,7 @@ Item {
   readonly property var effectOptions: Model.effectOptions(record)
   readonly property var effectRows: Model.effectRows(record)
   readonly property var effectHint: Model.effectHint(record)
+  readonly property var denoiseRow: Model.denoiseRow(record)
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
@@ -118,6 +120,14 @@ Item {
     return Daemon.setEffect(option.value)
   }
 
+  // Same rule as the effect choices: nothing while a command's result is
+  // still to come, nothing while the daemon does not report noise removal.
+  // The value sent is the flip of the reported state, as a boolean.
+  function toggleDenoise() {
+    if (!root.available || !root.denoiseRow.visible || Daemon.commandBusy) return false
+    return Daemon.setDenoise(root.record.denoise !== true)
+  }
+
   // Same rule as the bar's left click: no toggle while a command's result is
   // still to come (ToggleSwitch's `busy` swallows the click the same way).
   function toggleSwitch() {
@@ -130,6 +140,7 @@ Item {
     if (!stop) return
     if (stop.kind === "switch") toggleSwitch()
     else if (stop.kind === "effect") chooseEffect(effectCursor)
+    else if (stop.kind === "denoise") toggleDenoise()
     else if (stop.kind === "camera") {
       var row = cameraRepeater.itemAt(stop.index)
       if (row) row.choose()
@@ -155,6 +166,7 @@ Item {
     if (!stop) return
     if (stop.kind === "switch") flick.contentY = 0
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
+    else if (stop.kind === "denoise") scrollItemIntoView(denoiseLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
   }
@@ -498,6 +510,53 @@ Item {
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          // Noise removal: a stage that runs with any effect, so a switch of
+          // its own, not a choice above; laid out as the rows around it, with
+          // the hero switch's control. Not drawn while the daemon does not
+          // report it (an old CLI or daemon): an off switch would claim a
+          // state nobody reported.
+          Item {
+            id: denoiseLine
+            objectName: "denoiseRow"
+            width: parent.width
+            visible: root.denoiseRow.visible
+            implicitHeight: Math.max(denoiseLabel.implicitHeight, denoiseSwitch.implicitHeight)
+
+            Text {
+              id: denoiseLabel
+              objectName: "denoiseLabel"
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.right: denoiseSwitch.left
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+              text: root.denoiseRow.label
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            ToggleSwitch {
+              id: denoiseSwitch
+              objectName: "denoiseToggle"
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.denoiseRow.checked
+              busy: Daemon.commandBusy
+              hasCursor: root.hasCursor("denoise", -1)
+              foreground: root.foreground
+              accent: root.accent
+              onHovered: function(on) { if (on) root.setCursor("denoise", -1) }
+              onToggled: root.toggleDenoise()
+
+              PanelToolTip {
+                visible: denoiseSwitch.containsMouse
+                text: root.denoiseRow.tooltip
+                fontFamily: root.fontFamily
+              }
             }
           }
         }

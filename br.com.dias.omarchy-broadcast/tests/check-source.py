@@ -19,6 +19,9 @@ widget would hide.
     CursorSurface contract: one highlight, from the panel cursor);
   - an effect reaches the command line only as a word of Model.EFFECTS,
     through an intent (Daemon.setEffect -> Model.effectArgv);
+  - noise removal reaches it only as `on` or `off` from a strict boolean,
+    through an intent (Daemon.setDenoise -> Model.denoiseArgv), and only
+    while the daemon reports it;
   - the effect chips carry the shell ButtonGroup's fill and fade from
     Model's `faded`; the hint and its command share one Column at the
     unavailable block's spacing; the Replace gate reads the raw image field,
@@ -172,6 +175,14 @@ check("an effect is requested as an intent, never a raw argv",
       re.search(r'function setEffect\(effect\)\s*\{\s*return request\(\{ verb: "effect", effect: effect \}\)\s*\}', daemon) is not None)
 check("effectArgv only passes a word of Model.EFFECTS",
       re.search(r'function effectArgv\(cli, effect\)\s*\{\s*if \(!cliUsable\(cli\) \|\| effectKey\(effect\) === ""\) return null', model) is not None)
+check("noise removal is requested as an intent, never a raw argv",
+      re.search(r'function setDenoise\(on\)\s*\{\s*return request\(\{ verb: "denoise", on: on === true \}\)\s*\}', daemon) is not None)
+check("denoiseArgv only passes on/off from a strict boolean",
+      re.search(r'function denoiseArgv\(cli, on\)\s*\{\s*if \(!cliUsable\(cli\) \|\| typeof on !== "boolean"\) return null\s*'
+                r'return \[cli, "denoise", on \? DENOISE_WORDS\.on : DENOISE_WORDS\.off\]', model) is not None
+      and 'var DENOISE_WORDS = { on: "on", off: "off" }' in model)
+check("a denoise intent runs only while the daemon reports it",
+      'case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null' in model)
 check("queued commands are intents re-checked when armed",
       "pendingIntent" in daemon and "pendingArgv" not in daemon and "Model.intentArgv(intent, cliPath, record)" in block(daemon, "function armCommand"))
 
@@ -183,6 +194,13 @@ check("the panel sets an effect only from its whitelisted choices",
       re.findall(r"Daemon\.setEffect\(([^)]*)\)", panel) == ["option.value"],
       str(re.findall(r"Daemon\.setEffect\(([^)]*)\)", panel)))
 effect_chips = block(panel, "id: effectRepeater")
+check("the panel flips noise removal only from the reported state",
+      re.findall(r"Daemon\.setDenoise\(([^)]*)\)", panel) == ["root.record.denoise !== true"],
+      str(re.findall(r"Daemon\.setDenoise\(([^)]*)\)", panel)))
+check("the noise removal switch is drawn only from Model.denoiseRow",
+      re.search(r'objectName: "denoiseRow"[^}]*visible: root\.denoiseRow\.visible', panel) is not None)
+check("the noise removal switch swallows clicks while a command runs",
+      re.search(r'objectName: "denoiseToggle"[^}]*busy: Daemon\.commandBusy', panel) is not None)
 check("effect chips have the ButtonGroup fill (Commons.Color.background)",
       re.search(r"^\s*background:\s*Commons\.Color\.background\s*$", effect_chips, re.M) is not None, effect_chips[:200])
 check("effect chips fade from Model's `faded`, not a local rule",

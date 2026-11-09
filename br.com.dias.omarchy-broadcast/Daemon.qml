@@ -342,6 +342,12 @@ Singleton {
     return request({ verb: "effect", effect: effect })
   }
 
+  // `on` must be a boolean; Model.denoiseArgv turns it into `on` or `off`
+  // when the command is armed.
+  function setDenoise(on) {
+    return request({ verb: "denoise", on: on === true })
+  }
+
   // ---- children ------------------------------------------------------------
 
   property Timer backoffTimer: Timer {

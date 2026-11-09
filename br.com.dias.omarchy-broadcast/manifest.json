@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
-  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace) and live stream figures.",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace), a noise removal switch and live stream figures.",
   "kinds": [
     "bar-widget"
   ],
