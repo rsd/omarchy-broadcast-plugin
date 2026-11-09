@@ -9,7 +9,12 @@
 #              popup (no compositor offscreen)
 #   bin/       omarchy-broadcast = a copy of tests/fake-omarchy-broadcast; its path is
 #              the unique marker the harness counts watch processes by
-#   fake/      the fake's snapshot, feed, log and exit/stderr/delay files
+#   fake/      the fake's snapshot, feed, log and exit/stderr/delay files, and
+#              frames/0..3.jpg: four real 480x270 JPEGs (gst-launch-1.0
+#              videotestsrc ! jpegenc, else ImageMagick) the fake's `preview`
+#              mode copies into runtime/
+#   runtime/   XDG_RUNTIME_DIR of the harness shell and the fake (0700): the
+#              fake's preview.jpg goes here, never the user's runtime dir
 #   plugins/   a symlink to the plugin dir, as an install would make one
 #   devrepo/   a scratch development tree in the layout the plugin's
 #              development-build fallback searches (<plugin>/../../../target/
@@ -136,6 +141,21 @@ ln -s "$plugin" "$work/plugins/br.com.dias.omarchy-broadcast"
 mkdir -p "$work/reload/br.com.dias.omarchy-broadcast"
 cp "$plugin"/*.qml "$plugin"/*.js "$plugin"/qmldir "$plugin"/manifest.json "$work/reload/br.com.dias.omarchy-broadcast/"
 mkdir -m 700 "$work/runtime"
+# Real JPEG frames for the fake's preview stream, made before the shell starts.
+mkdir -p "$work/fake/frames"
+i=0
+for pattern in smpte smpte75 pinwheel ball; do
+  frame=$work/fake/frames/$i.jpg
+  if command -v gst-launch-1.0 >/dev/null 2>&1; then
+    gst-launch-1.0 -q videotestsrc num-buffers=1 pattern="$pattern" \
+      ! video/x-raw,width=480,height=270 ! jpegenc quality=70 ! filesink location="$frame" >/dev/null 2>&1 || true
+  elif command -v magick >/dev/null 2>&1; then
+    magick -seed "$((i + 1))" -size 480x270 "plasma:fractal" -quality 70 "$frame" >/dev/null 2>&1 || true
+  fi
+  [ "$(head -c 2 -- "$frame" 2>/dev/null | od -An -tx1 | tr -d ' ')" = "ffd8" ] || {
+    echo "harness: could not make the JPEG frame $frame (needs gst-launch-1.0 with jpegenc, or ImageMagick)" >&2; exit 1; }
+  i=$((i + 1))
+done
 # A scratch repository for the development-build resolution, reached through a
 # symlinked plugin dir as an install makes one.
 devplugin=$work/devrepo/clients/omarchy-bar/br.com.dias.omarchy-broadcast

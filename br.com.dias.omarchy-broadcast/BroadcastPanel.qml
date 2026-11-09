@@ -6,20 +6,27 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// The popup's content: state and switch, the daemon's error, the active
-// camera, consumers, output mode, the video effect and the noise removal
-// switch, live figures while active, and the camera list. Everything shown comes out of Model.js already sanitised, and every
-// Text here is PlainText as well (tests/check-source.py counts them).
+// The popup's content: state and switch, the daemon's error, the live preview
+// with its switch and rate, the active camera, consumers, output mode,
+// the video effect and the noise removal switch, live figures while active,
+// and the camera list. Everything shown comes out of Model.js already
+// sanitised, and every Text here is PlainText as well (tests/check-source.py
+// counts them).
 //
 // Nothing here changes state directly: a control runs a CLI command through
-// the Daemon singleton, and the result arrives on the watch stream.
+// the Daemon singleton, and the result arrives on the watch stream. The
+// preview's two controls are preferences: they ask the widget to write its
+// layout entry (settingsRequested), and the Preview singleton follows it.
+// The preview shows what apps receive: black while the camera is idle or an
+// effect loads. Opening the panel never starts the camera.
 //
 // Keyboard, as in the shell's own panels (PanelKeyCatcher, CursorSurface):
 // the first arrow key shows the cursor on the on/off switch; Up/Down (or k/j)
-// then walk the switch, the effect row, the noise removal switch, each camera
-// row and Next camera;
-// Left/Right (or h/l) walk the effect choices; Enter or Space activates; Escape closes; Tab moves to the neighbouring panel. The mouse
-// moves the same cursor, so only one highlight is ever drawn.
+// then walk the switch, the Preview switch, the preview-rate row, the effect
+// row, the noise removal switch, each camera row and Next camera; Left/Right
+// (or h/l) walk the preview-rate and effect choices; Enter or Space activates;
+// Escape closes; Tab moves to the neighbouring panel. The mouse moves the
+// same cursor, so only one highlight is ever drawn.
 Item {
   id: root
 
@@ -29,6 +36,9 @@ Item {
 
   signal closeRequested()
   signal switchRequested(int direction)
+  // A user's change of a preview preference: { previewEnabled } or
+  // { previewFps }. Only togglePreview and chooseFps emit it.
+  signal settingsRequested(var values)
 
   readonly property Item keyCatcher: catcher
   readonly property var record: Daemon.record
@@ -45,16 +55,21 @@ Item {
   readonly property var effectRows: Model.effectRows(record)
   readonly property var effectHint: Model.effectHint(record)
   readonly property var denoiseRow: Model.denoiseRow(record)
+  readonly property var preview: Preview.placeholder
+  readonly property bool previewControls: Model.previewControlsShown(record, Preview.pathReason)
+  readonly property var fpsOptions: Model.fpsOptions(Preview.fps)
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count)
+  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
     ? stops[Model.clampCursor(cursorIndex, stops.length)] : null
   // The effect choice under the cursor while the effect row holds it.
   property int effectCursor: 0
+  // The frame-rate choice under the cursor while the frame-rate row holds it.
+  property int fpsCursor: 0
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -93,21 +108,47 @@ Item {
     setCursor("effect", -1)
   }
 
+  function setFpsCursor(index) {
+    fpsCursor = Model.clampCursor(index, Model.PREVIEW_FPS_CHOICES.length)
+    setCursor("fps", -1)
+  }
+
   function moveCursor(dy) {
     if (stops.length === 0 || dy === 0) return
     cursorActive = true
     cursorIndex = Model.clampCursor(Model.clampCursor(cursorIndex, stops.length) + (dy > 0 ? 1 : -1), stops.length)
-    // Arriving on the effect row lands on the current effect, as the
-    // shell's button groups do.
+    // Arriving on the effect or frame-rate row lands on the current choice,
+    // as the shell's button groups do.
     if (currentStop && currentStop.kind === "effect")
       effectCursor = Math.max(0, Model.effectIndex(record.effectKey))
+    if (currentStop && currentStop.kind === "fps")
+      fpsCursor = Math.max(0, Model.PREVIEW_FPS_CHOICES.indexOf(Preview.fps))
     scrollCursorIntoView()
   }
 
-  // Left/Right: only the effect row lays out horizontally.
+  // Left/Right: only the effect and frame-rate rows lay out horizontally.
   function moveCursorH(dx) {
-    if (dx === 0 || !currentStop || currentStop.kind !== "effect") return
-    effectCursor = Model.clampCursor(effectCursor + (dx > 0 ? 1 : -1), Model.EFFECTS.length)
+    if (dx === 0 || !currentStop) return
+    if (currentStop.kind === "effect")
+      effectCursor = Model.clampCursor(effectCursor + (dx > 0 ? 1 : -1), Model.EFFECTS.length)
+    else if (currentStop.kind === "fps")
+      fpsCursor = Model.clampCursor(fpsCursor + (dx > 0 ? 1 : -1), Model.PREVIEW_FPS_CHOICES.length)
+  }
+
+  // The preview's preferences, written only here, on a user's action. The
+  // value sent is the flip of the switch in force, or a word of
+  // Model.PREVIEW_FPS_CHOICES; Model.settingsEntry checks both again.
+  function togglePreview() {
+    if (!root.previewControls) return false
+    root.settingsRequested({ previewEnabled: !Preview.switchOn })
+    return true
+  }
+
+  function chooseFps(index) {
+    var option = root.fpsOptions[index]
+    if (!option || option.selected || !root.previewControls) return false
+    root.settingsRequested({ previewFps: option.value })
+    return true
   }
 
   // Same rule as the switch: nothing while a command's result is still to
@@ -139,6 +180,8 @@ Item {
     var stop = currentStop
     if (!stop) return
     if (stop.kind === "switch") toggleSwitch()
+    else if (stop.kind === "preview") togglePreview()
+    else if (stop.kind === "fps") chooseFps(fpsCursor)
     else if (stop.kind === "effect") chooseEffect(effectCursor)
     else if (stop.kind === "denoise") toggleDenoise()
     else if (stop.kind === "camera") {
@@ -165,6 +208,8 @@ Item {
     var stop = currentStop
     if (!stop) return
     if (stop.kind === "switch") flick.contentY = 0
+    else if (stop.kind === "preview") scrollItemIntoView(previewLine)
+    else if (stop.kind === "fps") scrollItemIntoView(fpsLine)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "denoise") scrollItemIntoView(denoiseLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
@@ -392,6 +437,189 @@ Item {
             wrapMode: Text.WrapAnywhere
             visible: text !== ""
             text: root.commandErrorParts.path
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+
+        // ---- live preview: what apps receive. The first section, under the
+        // header and any error (an error stays right under the on/off switch).
+        Column {
+          id: previewBlock
+          objectName: "previewBlock"
+          width: parent.width
+          spacing: Style.space(10)
+          visible: root.preview.mode !== "hidden"
+
+          PanelSeparator { foreground: root.foreground }
+          PanelSectionHeader {
+            text: "PREVIEW"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          // One line instead of the frame area wherever no frame is shown and
+          // none is starting: the preview cannot work here (a daemon before
+          // revision 5, an unusable XDG_RUNTIME_DIR), it ended with an error,
+          // or the camera is off or idle, or the preview is off.
+          Text {
+            objectName: "previewNote"
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            visible: root.preview.mode === "note"
+            text: root.preview.mode === "note" ? root.preview.text : ""
+            color: root.preview.error ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          // 16:9, as the frames are (480x270): only for frames and while the
+          // preview starts. The theme's fill while it starts; black only
+          // behind a frame.
+          Rectangle {
+            id: previewFrame
+            objectName: "previewFrame"
+            width: parent.width
+            height: Math.round(width * 9 / 16)
+            visible: root.preview.mode === "box" || root.preview.mode === "image"
+            color: root.preview.mode === "image" ? "black" : root.hoverFill
+            border.width: 1
+            border.color: root.faint
+            clip: true
+
+            // The source is built from the validated path only (see
+            // Model.previewSource); a new frame is a new URL, never cached.
+            // Loaded off the UI thread, and the last frame stays up while the
+            // next one loads, so a reload does not flash the black fill. Bound
+            // only while this panel is open: a closed panel (its content is
+            // kept once built) loads nothing while another one previews.
+            // Decoded at most at the frame size, whatever the file holds.
+            Image {
+              id: previewImage
+              objectName: "previewImage"
+              anchors.fill: parent
+              anchors.margins: 1
+              fillMode: Image.PreserveAspectFit
+              cache: false
+              asynchronous: true
+              retainWhileLoading: true
+              sourceSize.width: 480
+              sourceSize.height: 270
+              visible: root.opened && root.preview.mode === "image"
+              source: root.opened && root.preview.mode === "image" ? Preview.frameSource : ""
+            }
+            Text {
+              objectName: "previewPlaceholder"
+              textFormat: Text.PlainText
+              anchors.centerIn: parent
+              width: parent.width - Style.space(24)
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.Wrap
+              visible: root.preview.mode === "box"
+              text: root.preview.mode === "box" ? root.preview.text : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          // The Preview switch: laid out as the noise removal row.
+          Item {
+            id: previewLine
+            objectName: "previewRow"
+            width: parent.width
+            visible: root.previewControls
+            implicitHeight: Math.max(previewLabel.implicitHeight, previewSwitch.implicitHeight)
+
+            Text {
+              id: previewLabel
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.right: previewSwitch.left
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+              text: "Preview"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            ToggleSwitch {
+              id: previewSwitch
+              objectName: "previewToggle"
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              checked: Preview.switchOn
+              hasCursor: root.hasCursor("preview", -1)
+              foreground: root.foreground
+              accent: root.accent
+              onHovered: function(on) { if (on) root.setCursor("preview", -1) }
+              onToggled: root.togglePreview()
+
+              // What the switch decides (R1): whether opening the panel
+              // starts the camera. Frames of a camera another app uses show
+              // either way.
+              PanelToolTip {
+                visible: previewSwitch.containsMouse
+                text: Preview.switchOn ? "Preview only while another app uses the camera"
+                  : "Start the camera for the preview whenever the panel opens"
+                fontFamily: root.fontFamily
+              }
+            }
+          }
+
+          // The rate the preview asks for: one stop, Left/Right walk it. The
+          // shell's ButtonGroup, driven by the panel cursor (cursorIndex and
+          // hovered), never by Tab focus.
+          Item {
+            id: fpsLine
+            objectName: "fpsRow"
+            width: parent.width
+            visible: root.previewControls
+            implicitHeight: Math.max(fpsLabel.implicitHeight, fpsChoices.implicitHeight)
+
+            Text {
+              id: fpsLabel
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.right: fpsChoices.left
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+              text: "Preview rate"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            ButtonGroup {
+              id: fpsChoices
+              objectName: "fpsChoices"
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              options: root.fpsOptions
+              value: String(Preview.fps)
+              focusable: false
+              cursorIndex: root.hasCursor("fps", -1) ? root.fpsCursor : -1
+              foreground: root.foreground
+              background: Commons.Color.background
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onHovered: function(index, isHovered) { if (isHovered) root.setFpsCursor(index) }
+              onChanged: function(value) { root.chooseFps(Model.PREVIEW_FPS_CHOICES.indexOf(Number(value))) }
+            }
+          }
+
+          // A choice the shell did not store: it holds until the shell is
+          // restarted, and nothing else says so.
+          Text {
+            objectName: "previewUnsaved"
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            visible: root.previewControls && Preview.unsaved
+            text: Model.PREVIEW_UNSAVED_TEXT
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall

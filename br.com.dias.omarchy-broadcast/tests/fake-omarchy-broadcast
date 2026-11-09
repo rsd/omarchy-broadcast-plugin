@@ -17,6 +17,20 @@
 #   - if $FAKE_OB_DIR/watch-exit exists, the watch exits with that status
 #     right after the snapshot (a watch that dies after connecting).
 #
+# `preview --json [--fps 15|30]`: as the real CLI's preview stream, without a
+# daemon. Any other fps (or argument) is a usage error, exit 2. It writes into
+# $XDG_RUNTIME_DIR/omarchy-broadcast/preview.jpg, and refuses (exit 3) any
+# XDG_RUNTIME_DIR but the harness's scratch one, $FAKE_OB_DIR/../runtime, so
+# the user's real runtime directory is never written. It prints:
+#   - the lines of $FAKE_OB_DIR/preview-error, if it exists (an outage);
+#   - `{"v":1,"type":"preview","active":true,"fps":N,"path":P}`;
+#   - the lines of $FAKE_OB_DIR/preview-hostile, if it exists;
+#   - if $FAKE_OB_DIR/preview-exit exists, exits with that status here;
+#   - then forever, at the fps: copies the next of $FAKE_OB_DIR/frames/0..3.jpg
+#     (real JPEGs, made by run-harness.sh) to P.tmp, renames it onto P, and
+#     prints `{"v":1,"type":"frame","seq":N,"path":P}`, seq from 1.
+# On SIGTERM/SIGINT/SIGHUP it removes the frame files and exits 0.
+#
 # Any other command (`on`, `off`, `camera -- <id>`, `camera next`,
 # `effect none|blur|replace`, `denoise on|off`): sleeps $FAKE_OB_DIR/delay
 # seconds if that file exists, prints $FAKE_OB_DIR/stderr to stderr if it
@@ -55,6 +69,37 @@ if [ "${1:-}" = "watch" ] && [ "${2:-}" = "--json" ]; then
       sed -n "${n}p" "$feed"
     done
     sleep 0.05
+  done
+fi
+
+if [ "${1:-}" = "preview" ]; then
+  [ "${2:-}" = "--json" ] || { echo "fake: preview needs --json" >&2; exit 2; }
+  fps=15
+  if [ $# -gt 2 ]; then
+    [ $# -eq 4 ] && [ "$3" = "--fps" ] || { echo "fake: usage: preview --json [--fps 15|30]" >&2; exit 2; }
+    fps=$4
+  fi
+  case $fps in
+    15) delay=0.066 ;;
+    30) delay=0.033 ;;
+    *) echo "fake: invalid value '$fps' for '--fps'" >&2; exit 2 ;;
+  esac
+  rt=${XDG_RUNTIME_DIR:-}
+  [ -n "$rt" ] && [ "$rt" = "$(dirname -- "$dir")/runtime" ] || { echo "fake: refusing XDG_RUNTIME_DIR=$rt" >&2; exit 3; }
+  out=$rt/omarchy-broadcast
+  mkdir -p -- "$out" && chmod 700 -- "$out" || exit 1
+  path=$out/preview.jpg
+  trap 'rm -f -- "$path" "$path.tmp"; exit 0' TERM INT HUP
+  [ -f "$dir/preview-error" ] && cat "$dir/preview-error"
+  printf '{"v":1,"type":"preview","active":true,"fps":%s,"path":"%s"}\n' "$fps" "$path"
+  [ -f "$dir/preview-hostile" ] && cat "$dir/preview-hostile"
+  [ -f "$dir/preview-exit" ] && exit "$(cat "$dir/preview-exit")"
+  n=0
+  while :; do
+    n=$((n + 1))
+    cp -- "$dir/frames/$((n % 4)).jpg" "$path.tmp" && mv -f -- "$path.tmp" "$path" || exit 1
+    printf '{"v":1,"type":"frame","seq":%s,"path":"%s"}\n' "$n" "$path"
+    sleep "$delay"
   done
 fi
 

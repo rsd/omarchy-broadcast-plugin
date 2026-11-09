@@ -1278,4 +1278,367 @@ TestCase {
     compare(Model.localPathFromUrl("file:///a/b%20c/"), "/a/b c")
     compare(Model.localPathFromUrl("qrc:/x"), "")
   }
+
+  // ---- preview -------------------------------------------------------------
+
+  readonly property string runtimeDir: "/run/user/1000"
+  readonly property string framePath: "/run/user/1000/omarchy-broadcast/preview.jpg"
+
+  // A rev-5 record in `state` with the given loopback and PipeWire consumers.
+  function previewRecord(state, loopback, pipewire, revision) {
+    var r = snap({ interface_revision: revision === undefined ? 5 : revision, denoise: false,
+                   loopback_consumers: loopback, pipewire_consumers: pipewire,
+                   consumers: (loopback || 0) + (pipewire || 0) + 1 })
+    if (state === "idle") return r
+    return Model.reduce(r, line(stateObject({ state: state, interface_revision: revision === undefined ? 5 : revision, denoise: false,
+                                              loopback_consumers: loopback, pipewire_consumers: pipewire,
+                                              consumers: (loopback || 0) + (pipewire || 0) + 1 }))).record
+  }
+
+  function test_consumer_split_parsed() {
+    var r = previewRecord("active", 2, 1)
+    compare(r.loopbackConsumers, 2)
+    compare(r.pipewireConsumers, 1)
+    compare(Model.otherConsumers(r), 3)
+    var old = snap({})
+    compare(old.loopbackConsumers, -1, "absent: unknown")
+    compare(Model.otherConsumers(old), -1)
+    compare(snap({ loopback_consumers: -1, pipewire_consumers: 0 }).loopbackConsumers, -1)
+    compare(snap({ loopback_consumers: 1.5, pipewire_consumers: 0 }).loopbackConsumers, -1)
+    compare(Model.otherConsumers(snap({ loopback_consumers: "1", pipewire_consumers: 0 })), -1)
+  }
+
+  function test_should_preview_truth_table() {
+    var idle = previewRecord("idle", 0, 0)
+    var activeOnlyPreview = previewRecord("active", 0, 0)
+    var activeLoopback = previewRecord("active", 1, 0)
+    var activePipewire = previewRecord("active", 0, 1)
+    var startingLoopback = previewRecord("starting", 1, 0)
+    // R1: the switch off never starts or holds the camera
+    compare(Model.shouldPreview(1, true, false, idle), false, "switch off, idle")
+    compare(Model.shouldPreview(1, true, false, activeOnlyPreview), false, "switch off, active for preview leases only")
+    compare(Model.shouldPreview(1, true, false, activeLoopback), true, "switch off, active, loopback 1")
+    compare(Model.shouldPreview(1, true, false, activePipewire), true, "switch off, active, PipeWire 1")
+    compare(Model.shouldPreview(1, true, false, startingLoopback), false, "switch off, starting: not active yet")
+    compare(Model.shouldPreview(1, true, false, snap({ state: "active" })), false, "unknown split")
+    // the switch on starts it in any state the daemon can show
+    compare(Model.shouldPreview(1, true, true, idle), true, "switch on, idle")
+    compare(Model.shouldPreview(2, true, true, activeOnlyPreview), true, "switch on, two panels")
+    compare(Model.shouldPreview(1, true, true, snap({ state: "off", enabled: false, interface_revision: 5 })), true, "switch on, off")
+    // panel closed
+    compare(Model.shouldPreview(0, true, true, idle), false, "no holder, switch on")
+    compare(Model.shouldPreview(0, true, false, activeLoopback), false, "no holder, active")
+    compare(Model.shouldPreview(-1, true, true, idle), false)
+    compare(Model.shouldPreview("1", true, true, idle), false)
+    // not supported
+    compare(Model.shouldPreview(1, false, true, idle), false, "unsupported, switch on")
+    compare(Model.shouldPreview(1, false, false, activeLoopback), false, "unsupported, active")
+    compare(Model.shouldPreview(1, "yes", true, idle), false)
+    compare(Model.shouldPreview(1, true, "true", idle), false, "only a real true is on")
+    // unavailable daemon, with the switch off
+    compare(Model.shouldPreview(1, true, false, Model.withLink("not-running")), false)
+  }
+
+  function test_preview_supported_needs_revision_5() {
+    compare(Model.previewSupported(previewRecord("idle", 0, 0, 5)), true)
+    compare(Model.previewSupported(previewRecord("idle", 0, 0, 6)), true)
+    compare(Model.previewSupported(previewRecord("idle", 0, 0, 4)), false, "rev 4")
+    compare(Model.previewSupported(snap({ interface_revision: "5" })), false, "unknown revision")
+    compare(Model.previewSupported(Model.withLink("not-running")), false)
+    // so a rev-4 daemon never runs it, whatever the rest says
+    var rev4 = previewRecord("active", 1, 0, 4)
+    compare(Model.shouldPreview(1, Model.previewSupported(rev4), true, rev4), false)
+  }
+
+  function test_preview_argv() {
+    compare(JSON.stringify(Model.previewArgv(cli, 15)), JSON.stringify([cli, "preview", "--json", "--fps", "15"]))
+    compare(JSON.stringify(Model.previewArgv(cli, 30)), JSON.stringify([cli, "preview", "--json", "--fps", "30"]))
+    compare(Model.previewArgv(cli, 20), null)
+    compare(Model.previewArgv(cli, "30"), null)
+    compare(Model.previewArgv(cli, NaN), null)
+    compare(Model.previewArgv("omarchy-broadcast", 15), null, "relative CLI")
+    compare(Model.previewArgv("/a\nb", 15), null)
+  }
+
+  function test_preview_path_validation() {
+    compare(Model.previewPath(runtimeDir).path, framePath)
+    compare(Model.previewPath(runtimeDir + "/").path, framePath, "trailing slash dropped")
+    compare(Model.previewPath(runtimeDir + "///").path, framePath)
+    compare(Model.previewPath("/tmp/a b/rt").path, "/tmp/a b/rt/omarchy-broadcast/preview.jpg", "a space is a path character")
+    var bad = ["", "run/user/1000", "./run", "/run/user/../1000", "/run/..", "/run/user/1000\n", "/run/\u0001x",
+               "/run/\u007fx", "/run/u?x", "/run/u#x", "/run/u%41", "/", "///", "/run/ x",
+               "//evil.host/share", "//run/user/1000"]
+    for (var i = 0; i < bad.length; i++) {
+      var r = Model.previewPath(bad[i])
+      compare(r.path, "", JSON.stringify(bad[i]))
+      verify(r.reason !== "", "a reason for " + JSON.stringify(bad[i]))
+    }
+    compare(Model.previewPath(undefined).reason, "XDG_RUNTIME_DIR is not set")
+    compare(Model.previewPath(null).path, "")
+    compare(Model.previewPath(7).path, "")
+    compare(Model.previewPath("relative").reason, "XDG_RUNTIME_DIR is not an absolute path")
+    compare(Model.previewPath("//evil.host/share").reason, "XDG_RUNTIME_DIR starts with //", "no URL host in file:////host")
+    compare(Model.previewPath("/run//user/1000").path, "/run//user/1000/omarchy-broadcast/preview.jpg", "an inner // is a local path")
+    var long = "/"
+    for (var j = 0; j < Model.PATH_CAP; j++) long += "a"
+    compare(Model.previewPath(long).path, "", "over PATH_CAP")
+  }
+
+  function test_preview_source() {
+    compare(Model.previewSource(framePath, 7), "file://" + framePath + "?7")
+    compare(Model.previewSource(framePath, 0), "")
+    compare(Model.previewSource(framePath, 1.5), "")
+    compare(Model.previewSource("", 7), "")
+  }
+
+  function frameLine(seq, path, extra) {
+    var m = { v: 1, type: "frame", seq: seq, path: path }
+    for (var k in extra) m[k] = extra[k]
+    return JSON.stringify(m)
+  }
+
+  function test_preview_frame_lines() {
+    var r = Model.parsePreviewLine(frameLine(1, framePath), framePath, 0)
+    compare(r.kind, "frame")
+    compare(r.seq, 1)
+    compare(Model.parsePreviewLine(frameLine(9, framePath), framePath, 3).seq, 9)
+    // the path must be exactly the expected one
+    var paths = ["/etc/passwd", framePath + "?x=1", "/run/user/1000/omarchy-broadcast/../../../etc/shadow",
+                 "/run/user/1000//omarchy-broadcast/preview.jpg", framePath + "/", framePath.toUpperCase(),
+                 "file://" + framePath, "", null, 7]
+    for (var i = 0; i < paths.length; i++) {
+      var d = Model.parsePreviewLine(frameLine(5, paths[i]), framePath, 0)
+      compare(d.kind, "dropped", JSON.stringify(paths[i]))
+      compare(d.reason, "path", JSON.stringify(paths[i]))
+    }
+    compare(Model.parsePreviewLine(frameLine(5, framePath), "", 0).kind, "dropped", "no expected path: nothing matches")
+    // seq: a positive integer, increasing
+    var seqs = [0, -1, 1.5, "2", NaN, null, Infinity, 9007199254740992, true]
+    for (var j = 0; j < seqs.length; j++) {
+      var line = frameLine(seqs[j], framePath)
+      var e = Model.parsePreviewLine(line, framePath, 0)
+      compare(e.kind, "dropped", String(seqs[j]))
+    }
+    // NaN and Infinity reach JSON as null; a literal 1e999 (Infinity) is no frame either
+    verify(Model.parsePreviewLine('{"v":1,"type":"frame","seq":1e999,"path":"' + framePath + '"}', framePath, 0).kind !== "frame")
+    compare(Model.previewSeq(Infinity), 0)
+    compare(Model.previewSeq(NaN), 0)
+    compare(Model.parsePreviewLine(frameLine(3, framePath), framePath, 3).reason, "stale", "same seq")
+    compare(Model.parsePreviewLine(frameLine(2, framePath), framePath, 3).reason, "stale", "older seq")
+    // the line itself
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 2, type: "frame", seq: 1, path: framePath }), framePath, 0).kind, "invalid", "v 2")
+    compare(Model.parsePreviewLine(JSON.stringify({ v: "1", type: "frame", seq: 1, path: framePath }), framePath, 0).kind, "invalid", "v \"1\"")
+    compare(Model.parsePreviewLine(JSON.stringify({ type: "frame", seq: 1, path: framePath }), framePath, 0).kind, "invalid", "no v")
+    compare(Model.parsePreviewLine("not json <img src=x>", framePath, 0).kind, "invalid")
+    compare(Model.parsePreviewLine("[1]", framePath, 0).kind, "invalid")
+    compare(Model.parsePreviewLine("", framePath, 0).kind, "ignored")
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "stats", fps: 30 }), framePath, 0).kind, "ignored", "unknown type")
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "snapshot" }), framePath, 0).kind, "ignored", "a watch type")
+    var pad = ""
+    for (var k = 0; k < Model.LINE_CAP; k++) pad += "x"
+    var over = frameLine(1, framePath, { pad: pad })
+    var t0 = Date.now()
+    var o = Model.parsePreviewLine(over, framePath, 0)
+    compare(o.kind, "dropped")
+    compare(o.reason, "too-long")
+    verify(Date.now() - t0 < 100)
+  }
+
+  function test_preview_lease_and_error_lines() {
+    var on = Model.parsePreviewLine(JSON.stringify({ v: 1, type: "preview", active: true, fps: 30, path: framePath }), framePath, 0)
+    compare(on.kind, "preview")
+    compare(on.active, true)
+    compare(on.fps, 30)
+    compare(on.pathMismatch, false)
+    var elsewhere = Model.parsePreviewLine(JSON.stringify({ v: 1, type: "preview", active: true, fps: 15, path: "/tmp/x.jpg" }), framePath, 0)
+    compare(elsewhere.pathMismatch, true)
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "preview", active: true, fps: 99, path: framePath }), framePath, 0).fps, 0)
+    var off = Model.parsePreviewLine(JSON.stringify({ v: 1, type: "preview", active: false }), framePath, 0)
+    compare(off.kind, "preview")
+    compare(off.active, false)
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "preview", active: "yes" }), framePath, 0).kind, "invalid")
+    var err = Model.parsePreviewLine(JSON.stringify({ v: 1, type: "error", code: "daemon-not-running", error: "x" }), framePath, 0)
+    compare(err.kind, "error")
+    compare(err.text, "omarchy-broadcastd is not running")
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "error", code: "unsupported-daemon" }), framePath, 0).text,
+            "Preview needs omarchy-broadcast 0.18 or newer")
+    var hostile = "<img src='http://127.0.0.1:9/b'>\n&"
+    for (var i = 0; i < 200; i++) hostile += "z"
+    var h = Model.parsePreviewLine(JSON.stringify({ v: 1, type: "error", code: hostile }), framePath, 0)
+    compare(h.kind, "error")
+    verify(!/[<>&\n]/.test(h.text), h.text)
+    verify(h.code.length <= Model.PREVIEW_CODE_CAP, h.code.length)
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "error" }), framePath, 0).text, "Preview stream error: unknown")
+    compare(Model.parsePreviewLine(JSON.stringify({ v: 1, type: "error", code: "dbus-error" }), framePath, 0).text, "Preview stream error: dbus-error")
+  }
+
+  function test_preview_exit_text() {
+    verify(Model.previewExitText(1, false, true, false).indexOf("exited with status 1") !== -1)
+    verify(Model.previewExitText(15, true, true, false).indexOf("stopped by signal 15") !== -1)
+    verify(Model.previewExitText(0, false, false, false).indexOf("could not be started") !== -1)
+    verify(Model.previewExitText(2, false, true, false).indexOf("needs 0.18 or newer") !== -1, "clap usage error: an old CLI")
+    verify(Model.previewExitText(0, false, true, true).indexOf("longer than " + Model.LINE_CAP) !== -1)
+    verify(Model.previewExitText(1, false, true, false).indexOf(Model.PREVIEW_RETRY_HINT) !== -1)
+  }
+
+  function placeholderFor(o) {
+    var s = { record: previewRecord("idle", 0, 0), pathReason: "", switchOn: false, wanted: false, running: false,
+              leaseActive: false, hasFrame: false, exitError: "", streamError: "", pathMismatch: false }
+    for (var k in o) s[k] = o[k]
+    return Model.previewPlaceholder(s)
+  }
+
+  function test_preview_placeholder_per_state() {
+    compare(placeholderFor({ record: Model.withLink("not-running") }).mode, "hidden", "daemon unavailable")
+    compare(placeholderFor({ record: Model.withLink("connecting") }).mode, "hidden")
+    var old = placeholderFor({ record: previewRecord("idle", 0, 0, 4), switchOn: true })
+    compare(old.mode, "note")
+    compare(old.text, "Preview needs omarchy-broadcast 0.18 or newer")
+    var badPath = placeholderFor({ pathReason: "XDG_RUNTIME_DIR is not set" })
+    compare(badPath.mode, "note")
+    compare(badPath.text, "Preview unavailable: XDG_RUNTIME_DIR is not set")
+    var idle = placeholderFor({})
+    compare(idle.mode, "note", "nothing shown or starting: one line, no empty frame area")
+    compare(idle.text, "Camera idle; turn on Preview to start it")
+    compare(idle.error, false)
+    var activeOff = placeholderFor({ record: previewRecord("active", 0, 0) })
+    compare(activeOff.text, "Preview off", "active for other previews only")
+    compare(activeOff.mode, "note")
+    var cameraOff = placeholderFor({ record: snap({ state: "off", enabled: false, interface_revision: 5 }) })
+    compare(cameraOff.text, "Camera off", "the camera itself is off")
+    compare(cameraOff.mode, "note")
+    compare(placeholderFor({ record: snap({ state: "idle", enabled: false, interface_revision: 5 }) }).text, "Camera off",
+            "Enabled false wins over the state")
+    compare(placeholderFor({ record: snap({ state: "off", enabled: false, interface_revision: 5 }), switchOn: true, wanted: true }).mode,
+            "box", "camera off, Preview on: it starts")
+    var starting = placeholderFor({ switchOn: true, wanted: true })
+    compare(starting.text, "Starting preview…", "armed, nothing yet")
+    compare(starting.mode, "box", "the 16:9 area while it starts")
+    compare(placeholderFor({ switchOn: true, wanted: true, running: true }).text, "Starting preview…", "running, no lease")
+    compare(placeholderFor({ switchOn: true, wanted: true, running: true, leaseActive: true }).text, "Starting preview…", "lease, no frame")
+    compare(placeholderFor({ switchOn: true, wanted: true, running: true, leaseActive: true, hasFrame: true }).mode, "image")
+    compare(placeholderFor({ wanted: true, running: true, leaseActive: true, hasFrame: true,
+                             record: previewRecord("active", 1, 0) }).mode, "image", "shown at once for another consumer")
+    var exit = placeholderFor({ switchOn: true, wanted: true, exitError: "omarchy-broadcast preview exited with status 1. Reopen the panel to retry." })
+    compare(exit.mode, "note", "an error is a line, not a box")
+    compare(exit.error, true)
+    verify(exit.text.indexOf("status 1") !== -1)
+    var stream = placeholderFor({ switchOn: true, wanted: true, running: true, streamError: "Preview stream error: dbus-error" })
+    compare(stream.text, "Preview stream error: dbus-error")
+    compare(stream.error, true)
+    compare(stream.mode, "note")
+    var mismatch = placeholderFor({ switchOn: true, wanted: true, running: true, leaseActive: true, pathMismatch: true })
+    compare(mismatch.error, true)
+    compare(mismatch.mode, "note")
+    verify(mismatch.text.indexOf("XDG_RUNTIME_DIR") !== -1)
+    compare(Model.previewPlaceholder(null).mode, "hidden")
+  }
+
+  function test_preview_controls_and_cursor() {
+    var r5 = previewRecord("idle", 0, 0)
+    compare(Model.previewControlsShown(r5, ""), true)
+    compare(Model.previewControlsShown(r5, "XDG_RUNTIME_DIR is not set"), false)
+    compare(Model.previewControlsShown(previewRecord("idle", 0, 0, 4), ""), false)
+    var kinds = Model.cursorStops(r5, 2, true).map(function(s) { return s.kind })
+    compare(JSON.stringify(kinds), JSON.stringify(["switch", "preview", "fps", "effect", "denoise", "camera", "camera", "next"]))
+    var without = Model.cursorStops(r5, 2, false).map(function(s) { return s.kind })
+    compare(without.indexOf("preview"), -1)
+    compare(Model.cursorStops(r5, 2).length, without.length, "the old two-argument call is unchanged")
+    compare(JSON.stringify(Model.cursorStops(Model.withLink("not-running"), 2, true)), "[]")
+    var fps = Model.fpsOptions(30)
+    compare(JSON.stringify(fps.map(function(o) { return o.value })), "[15,30]")
+    compare(fps[1].selected, true)
+    compare(fps[0].label, "15 fps")
+    compare(fps[1].tooltip, "Smoother, closer to what apps see; uses more CPU")
+    compare(fps[0].tooltip, "Lighter; uses less CPU")
+    compare(Model.fpsOptions(42)[0].selected, true, "anything else reads as 15")
+  }
+
+  function test_preview_settings_normalised() {
+    compare(JSON.stringify(Model.previewSettings({})), JSON.stringify({ enabled: false, fps: 15 }))
+    compare(JSON.stringify(Model.previewSettings(null)), JSON.stringify({ enabled: false, fps: 15 }))
+    compare(JSON.stringify(Model.previewSettings({ previewEnabled: true, previewFps: 30 })), JSON.stringify({ enabled: true, fps: 30 }))
+    var fpsValues = [0, 15, 20, 29.9, 31, 60, -30, "30", null, undefined, NaN, Infinity, [30], { v: 30 }, true]
+    for (var i = 0; i < fpsValues.length; i++)
+      compare(Model.previewFpsValue(fpsValues[i]), 15, String(fpsValues[i]))
+    compare(Model.previewFpsValue(30), 30)
+    var on = [1, "true", "on", {}, [true]]
+    for (var j = 0; j < on.length; j++)
+      compare(Model.previewSettings({ previewEnabled: on[j] }).enabled, false, JSON.stringify(on[j]))
+  }
+
+  function test_settings_entry_merge() {
+    var settings = { cliPath: "~/bin/omarchy-broadcast", other: { nested: 1 } }
+    var before = JSON.stringify(settings)
+    var e = Model.settingsEntry("br.com.dias.omarchy-broadcast", settings, { previewEnabled: true })
+    compare(JSON.stringify(e), JSON.stringify({ id: "br.com.dias.omarchy-broadcast", cliPath: "~/bin/omarchy-broadcast",
+                                                other: { nested: 1 }, previewEnabled: true }))
+    compare(JSON.stringify(settings), before, "the settings given are not modified")
+    var f = Model.settingsEntry("m", { previewEnabled: true, previewFps: 15, id: "stale" }, { previewFps: 30 })
+    compare(JSON.stringify(f), JSON.stringify({ id: "m", previewEnabled: true, previewFps: 30 }), "id from the module name")
+    compare(JSON.stringify(Model.settingsFromEntry(f)), JSON.stringify({ previewEnabled: true, previewFps: 30 }))
+    compare(JSON.stringify(Model.settingsEntry("m", undefined, { previewEnabled: false })), JSON.stringify({ id: "m", previewEnabled: false }))
+    // writes nothing that is not a valid user's value
+    compare(Model.settingsEntry("m", settings, {}), null, "nothing to write")
+    compare(Model.settingsEntry("m", settings, { cliPath: "/x" }), null, "only preview keys")
+    compare(Model.settingsEntry("m", settings, { previewEnabled: "true" }), null)
+    compare(Model.settingsEntry("m", settings, { previewFps: 20 }), null)
+    compare(Model.settingsEntry("m", settings, { previewFps: "30" }), null)
+    compare(Model.settingsEntry("", settings, { previewEnabled: true }), null)
+    compare(Model.settingsEntry("m", "junk", { previewEnabled: true }), null)
+    compare(Model.settingsEntry("m", [1], { previewEnabled: true }), null)
+    compare(Model.settingsEntry("m", settings, null), null)
+    var huge = {}
+    for (var i = 0; i <= Model.SETTINGS_KEY_CAP; i++) huge["k" + i] = i
+    compare(Model.settingsEntry("m", huge, { previewEnabled: true }), null, "too many keys: not rewritten, not truncated")
+    compare(Model.SETTINGS_KEY_CAP, 256)
+    var atCap = {}
+    for (var c = 0; c < Model.SETTINGS_KEY_CAP; c++) atCap["k" + c] = c
+    verify(Model.settingsEntry("m", atCap, { previewEnabled: true }) !== null, "exactly at the cap: written")
+    // reading never writes
+    var read = { cliPath: "/x" }
+    Model.previewSettings(read)
+    Model.previewFpsValue(read.previewFps)
+    compare(JSON.stringify(read), JSON.stringify({ cliPath: "/x" }), "no default written back on read")
+  }
+
+  // A widget re-injected with the same stored values never undoes a choice
+  // of this session; a value the settings changed always replaces it (S8).
+  function test_preview_prefs_after_injection() {
+    var off15 = { enabled: false, fps: 15 }
+    var on15 = { enabled: true, fps: 15 }
+    compare(JSON.stringify(Model.previewPrefsAfter(on15, null, off15)), JSON.stringify(off15), "first hand-over: as given")
+    compare(JSON.stringify(Model.previewPrefsAfter(null, off15, on15)), JSON.stringify(on15), "nothing in force yet")
+    compare(JSON.stringify(Model.previewPrefsAfter(on15, off15, off15)), JSON.stringify(on15), "same stored values: the session's choice holds")
+    compare(JSON.stringify(Model.previewPrefsAfter(on15, off15, { enabled: false, fps: 30 })), JSON.stringify({ enabled: true, fps: 30 }),
+            "only the changed value replaces the one in force")
+    compare(JSON.stringify(Model.previewPrefsAfter(off15, off15, on15)), JSON.stringify(on15), "a stored change wins")
+    compare(JSON.stringify(Model.previewPrefsAfter({ enabled: true, fps: 30 }, { enabled: true, fps: 30 }, off15)), JSON.stringify(off15))
+    compare(JSON.stringify(Model.previewPrefsAfter(off15, off15, null)), JSON.stringify(off15), "junk reads as the defaults")
+    compare(Model.previewPrefsAfter(off15, off15, { enabled: "yes", fps: 1e9 }).fps, 15)
+  }
+
+  function test_preview_prefs_chosen() {
+    var off15 = { enabled: false, fps: 15 }
+    compare(JSON.stringify(Model.previewPrefsChosen(off15, { previewEnabled: true })), JSON.stringify({ enabled: true, fps: 15 }))
+    compare(JSON.stringify(Model.previewPrefsChosen(off15, { previewFps: 30 })), JSON.stringify({ enabled: false, fps: 30 }))
+    var junk = [{ previewEnabled: "true" }, { previewFps: 20 }, { previewFps: "30" }, null, "x", { cliPath: "/x" }]
+    for (var i = 0; i < junk.length; i++)
+      compare(JSON.stringify(Model.previewPrefsChosen(off15, junk[i])), JSON.stringify(off15), JSON.stringify(junk[i]))
+  }
+
+  // An unchanged entry is answered false by the shell, as a missing one is:
+  // only the second is a choice that was not saved (S7, S8).
+  function test_settings_hold_and_unsaved() {
+    compare(Model.settingsHold({ previewEnabled: true, cliPath: "/x" }, { previewEnabled: true }), true)
+    compare(Model.settingsHold({ previewEnabled: false }, { previewEnabled: true }), false)
+    compare(Model.settingsHold({}, { previewFps: 15 }), false, "a default is not a stored value")
+    compare(Model.settingsHold({ previewFps: 30 }, {}), false)
+    compare(Model.settingsHold(null, { previewFps: 30 }), false)
+    compare(Model.previewUnsaved({ enabled: true, fps: 15 }, { enabled: false, fps: 15 }), true)
+    compare(Model.previewUnsaved({ enabled: false, fps: 30 }, { enabled: false, fps: 15 }), true)
+    compare(Model.previewUnsaved({ enabled: true, fps: 30 }, { enabled: true, fps: 30 }), false)
+    compare(Model.previewUnsaved({ enabled: true, fps: 30 }, null), false, "nothing handed over yet")
+    compare(Model.PREVIEW_UNSAVED_TEXT, "Could not save the preview setting")
+  }
 }

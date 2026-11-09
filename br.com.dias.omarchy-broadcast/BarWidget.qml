@@ -6,7 +6,9 @@ import qs.Ui
 import "Model.js" as Model
 
 // The bar icon and its popup. One of these per monitor; all of them read the
-// same Daemon singleton, which owns the only watch process.
+// same Daemon singleton, which owns the only watch process, and the same
+// Preview singleton, which owns the only preview process: an open panel holds
+// the preview (Preview.hold), a closed one releases it.
 //
 // Left click turns the camera on or off, but only while the daemon's state is
 // known: unavailable, it opens the panel instead, so a persisted `off` the
@@ -25,8 +27,9 @@ BarWidget {
   property bool opened: false
   property bool popoutSwitchClosing: false
 
-  // For the test harness: the shared service, the icon and the popup.
+  // For the test harness: the shared services, the icon and the popup.
   readonly property QtObject service: Daemon
+  readonly property QtObject previewService: Preview
   readonly property Item iconButton: button
   readonly property var popup: panel
 
@@ -58,15 +61,49 @@ BarWidget {
     else root.toggle()
   }
 
+  // A user's change in the panel: in force at once (Preview.choose), then
+  // written to this widget's layout entry, merged over the settings the bar
+  // gave it (a write replaces the entry), as the shell's own panels do. Once
+  // stored, this widget takes the entry at once (the shell's write comes back
+  // through the bar as the same value). When the shell stores nothing (no
+  // layout entry to write, or an entry over Model.SETTINGS_KEY_CAP), the
+  // choice holds for this session and the panel says it was not saved
+  // (Preview.unsaved); the settings stay as the bar gave them, so another
+  // widget re-injected with the same entry cannot undo it. Returns whether
+  // the shell stored it. Never called on a read: defaults are not written back.
+  function persistSettings(values) {
+    Preview.choose(values)
+    var entry = Model.settingsEntry(root.moduleName, root.settings, values)
+    if (!entry) return false
+    var stored = false
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      stored = root.bar.shell.updateEntryInline(root.moduleName, entry) === true
+    // false is also the shell's answer for an entry that already held this.
+    if (!stored && !Model.settingsHold(root.settings, values)) return false
+    root.settings = Model.settingsFromEntry(entry)
+    return true
+  }
+
   onCliSettingChanged: Daemon.configure(root, root.cliSetting)
+  // Every hand-over of the bar, including the first (there is no earlier
+  // call: before it, `settings` is the base's empty default).
+  onSettingsChanged: Preview.configure(root, root.settings)
+  onOpenedChanged: {
+    if (root.opened) Preview.hold(root)
+    else Preview.release(root)
+  }
 
   Component.onCompleted: {
     Daemon.attach(root)
     Daemon.configure(root, root.cliSetting)
   }
-  // Hands the registration back, and nothing else: stopping the watch is the
-  // singleton's call once no widget is left (a reload destroys every widget).
-  Component.onDestruction: Daemon.detach(root)
+  // Hands the registrations back, and nothing else: stopping the watch or the
+  // preview is the singletons' call once nobody holds them (a reload destroys
+  // every widget, and a panel open at that moment gets no close event).
+  Component.onDestruction: {
+    Daemon.detach(root)
+    Preview.release(root)
+  }
 
   BarIconButton {
     id: button
@@ -97,6 +134,7 @@ BarWidget {
         bar: root.bar
         opened: root.opened
         onCloseRequested: root.close()
+        onSettingsRequested: function(values) { root.persistSettings(values) }
         onSwitchRequested: function(direction) { root.switchPanel(direction) }
       }
     }
