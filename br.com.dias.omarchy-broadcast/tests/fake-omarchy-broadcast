@@ -1,5 +1,5 @@
 #!/bin/sh
-# A stand-in for the oma-broadcast CLI, for tests/harness/shell.qml. Never
+# A stand-in for the omarchy-broadcast CLI, for tests/harness/shell.qml. Never
 # talks to D-Bus or to a real daemon.
 #
 # Every invocation appends one line to $FAKE_OB_DIR/log:

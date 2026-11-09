@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "br.com.dias.omarchy-broadcast",
+  "name": "Omarchy Broadcast",
+  "version": "0.15.0",
+  "author": "Raul Dias",
+  "license": "MIT OR Apache-2.0",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace) and live stream figures.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omarchy Broadcast",
+    "description": "Shows the virtual camera's state; left click turns it on or off, right click opens the panel with cameras and live figures.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "cliPath": ""
+    },
+    "schema": [
+      {
+        "key": "cliPath",
+        "type": "path",
+        "label": "omarchy-broadcast CLI path",
+        "defaultValue": "",
+        "description": "Optional. Absolute path to the omarchy-broadcast binary (a leading ~/ is your home); a bare name or a relative path is refused. Empty: omarchy-broadcast on PATH, else the repository's target/release build next to the plugin."
+      }
+    ]
+  }
+}

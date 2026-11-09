@@ -19,7 +19,7 @@ qmllint=${QMLLINT:-/usr/lib/qt6/bin/qmllint}
 [ -x "$qmllint" ] || { echo "lint: qmllint not found at $qmllint" >&2; exit 1; }
 [ -d "$shell_dir/Commons" ] && [ -d "$shell_dir/Ui" ] || { echo "lint: Omarchy shell modules not found at $shell_dir" >&2; exit 1; }
 
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/oma-broadcast-lint.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/omarchy-broadcast-lint.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT INT TERM
 mkdir -p "$scratch/qs"
 ln -s "$shell_dir/Commons" "$scratch/qs/Commons"

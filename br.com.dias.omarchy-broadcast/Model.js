@@ -3,7 +3,7 @@
 // Everything the bar widget decides, as pure functions over plain values, so
 // tests/tst_model.qml can reach all of it without a shell, a daemon or a CLI.
 //
-// The input is the NDJSON stream of `oma-broadcast watch --json`, specified in
+// The input is the NDJSON stream of `omarchy-broadcast watch --json`, specified in
 // docs/cli-json.md (schema v1). One record of the daemon is kept: a snapshot
 // replaces it, a state line replaces its scalars, a cameras line its camera
 // list, a stats line its figures, and an error line makes it unavailable until
@@ -17,10 +17,10 @@
 var SCHEMA_VERSION = 1
 
 // Product name, as in the manifest and the panel title.
-var PRODUCT = "OMA Broadcast"
+var PRODUCT = "Omarchy Broadcast"
 
 // Ingestion caps. The first cap is the producer's: the CLI writes no line
-// longer than 4096 bytes (crates/oma-broadcast/src/json.rs, MAX_LINE_BYTES,
+// longer than 4096 bytes (crates/omarchy-broadcast/src/json.rs, MAX_LINE_BYTES,
 // asserted by its tests), in another process, before the pipe. This consumer
 // cap only bounds what reaches JSON.parse: Quickshell's SplitParser hands over
 // a whole line, so a longer one has already been read into memory when it is
@@ -38,7 +38,7 @@ var MODE_CAP = 64
 var EFFECT_CAP = 32
 // The background image path, display only; it is never sent back as an
 // argument. The producer clips it to 256 bytes and keeps the end of the path
-// (the file name) behind a leading ellipsis (crates/oma-broadcast/src/json.rs,
+// (the file name) behind a leading ellipsis (crates/omarchy-broadcast/src/json.rs,
 // MAX_PATH_BYTES), so this looser bound does not cut a v1 producer's path; it
 // bounds the work for an off-contract one.
 var IMAGE_PATH_CAP = 512
@@ -51,7 +51,7 @@ var TOOLTIP_CAP = 200
 var PATH_CAP = 4096
 
 // The CLI-missing message; where it names a path, the path follows ": ".
-var CLI_MISSING_TEXT = "oma-broadcast CLI not found"
+var CLI_MISSING_TEXT = "omarchy-broadcast CLI not found"
 // Sane upper bounds for figures: anything above reads as unknown.
 var COUNT_MAX = 1000000
 var STAT_MAX = 1000000
@@ -67,12 +67,12 @@ var BACKOFF_RESET_UPTIME_MS = 30000
 var STATES = ["off", "idle", "starting", "active", "error"]
 
 // The video effects the daemon accepts (docs/adr/0012), in panel order. The
-// only words ever passed to `oma-broadcast effect`.
+// only words ever passed to `omarchy-broadcast effect`.
 var EFFECTS = ["none", "blur", "replace"]
 var EFFECT_LABELS = { none: "None", blur: "Blur", replace: "Replace" }
 // Said instead of offering effects when the CLI predates them (it prints no
 // blur_strength and has no `effect` command).
-var CLI_NO_EFFECTS = "The oma-broadcast CLI needs updating for effects"
+var CLI_NO_EFFECTS = "The omarchy-broadcast CLI needs updating for effects"
 // Said instead when the CLI knows effects but the running daemon does not (an
 // interface revision below EFFECTS_REVISION, or none readable): the CLI would
 // refuse every `effect` request.
@@ -287,7 +287,7 @@ function applyScalars(r, m) {
 //
 // `selectId` is the argv selector for the row, "" when the row cannot be
 // selected. The CLI reads the word `next` as the NextCamera command even after
-// `--` (crates/oma-broadcast/src/main.rs), so a camera whose id is literally
+// `--` (crates/omarchy-broadcast/src/main.rs), so a camera whose id is literally
 // "next" is selected by its USB vid:pid instead, when it has one that no other
 // listed camera shares; otherwise it cannot be selected (`selectNote` says why).
 function cameraList(value) {
@@ -371,7 +371,7 @@ function reduce(record, text) {
   if (p.kind === "unsupported") {
     if (base.link === "unsupported") return { record: base, outcome: "unsupported" }
     return {
-      record: emptyRecord("unsupported", "oma-broadcast prints output schema v" + p.version
+      record: emptyRecord("unsupported", "omarchy-broadcast prints output schema v" + p.version
         + "; this plugin reads v" + SCHEMA_VERSION + ". Update the plugin."),
       outcome: "unsupported"
     }
@@ -488,8 +488,8 @@ function linkLabel(record) {
   case "not-running": return "daemon not running"
   case "unreachable": return "daemon unreachable"
   case "cli-missing": return CLI_MISSING_TEXT
-  case "cli-failed": return "oma-broadcast watch stopped"
-  case "unsupported": return "unsupported oma-broadcast version"
+  case "cli-failed": return "omarchy-broadcast watch stopped"
+  case "unsupported": return "unsupported omarchy-broadcast version"
   default: return "connecting\u2026"
   }
 }
@@ -554,7 +554,7 @@ function unavailableMessage(record) {
   var link = record ? record.link : "connecting"
   var detail = record ? record.linkText : ""
   if (unknownState(record)) {
-    return { title: "oma-broadcastd reports a state this plugin does not know"
+    return { title: "omarchy-broadcastd reports a state this plugin does not know"
                + (record.rawState !== "" ? ": " + record.rawState : ""),
              path: "", detail: "", hint: "Update the plugin.", commandText: "" }
   }
@@ -562,11 +562,11 @@ function unavailableMessage(record) {
   case "ok":
     return { title: "", path: "", detail: "", hint: "", commandText: "" }
   case "not-running":
-    return { title: "oma-broadcastd is not running", path: "", detail: "",
-             hint: "Start it with:", commandText: "systemctl --user start oma-broadcastd" }
+    return { title: "omarchy-broadcastd is not running", path: "", detail: "",
+             hint: "Start it with:", commandText: "systemctl --user start omarchy-broadcastd" }
   case "unreachable":
-    return { title: "oma-broadcastd is not answering", path: "", detail: detail,
-             hint: "Retrying every 2 s. Its log:", commandText: "journalctl --user -u oma-broadcastd" }
+    return { title: "omarchy-broadcastd is not answering", path: "", detail: detail,
+             hint: "Retrying every 2 s. Its log:", commandText: "journalctl --user -u omarchy-broadcastd" }
   case "cli-missing":
     // The text ends on the path it searched or was given, when it names one.
     var parts = splitTrailingPath(detail !== "" ? detail : CLI_MISSING_TEXT)
@@ -577,11 +577,11 @@ function unavailableMessage(record) {
                + "Or set the cliPath setting.",
              commandText: "" }
   case "cli-failed":
-    return { title: "oma-broadcast watch stopped", path: "", detail: detail, hint: "", commandText: "" }
+    return { title: "omarchy-broadcast watch stopped", path: "", detail: detail, hint: "", commandText: "" }
   case "unsupported":
-    return { title: "Unsupported oma-broadcast version", path: "", detail: detail, hint: "", commandText: "" }
+    return { title: "Unsupported omarchy-broadcast version", path: "", detail: detail, hint: "", commandText: "" }
   default:
-    return { title: "Connecting to oma-broadcastd\u2026", path: "", detail: "", hint: "", commandText: "" }
+    return { title: "Connecting to omarchy-broadcastd\u2026", path: "", detail: "", hint: "", commandText: "" }
   }
 }
 
@@ -655,7 +655,7 @@ function effectsMissingText(record) {
 // Whether `effect` may be requested now: a known effect, a daemon that can
 // be controlled through a CLI that knows `effect`, and for `replace` a
 // background image the daemon already holds (the daemon refuses `replace`
-// without one; the image is set with `oma-broadcast effect replace --image
+// without one; the image is set with `omarchy-broadcast effect replace --image
 // PATH` or in its configuration).
 function effectSelectable(record, effect) {
   if (!effectsSupported(record) || effectKey(effect) === "") return false
@@ -731,25 +731,25 @@ function effectHint(record) {
   if (!available(record)) return { text: "", commandText: "" }
   if (!effectsSupported(record)) return { text: effectsMissingText(record) + ".", commandText: "" }
   if (record.effectKey === "")
-    return { text: "oma-broadcastd reports an effect this plugin does not know"
+    return { text: "omarchy-broadcastd reports an effect this plugin does not know"
                + (record.effect !== "" ? ": " + record.effect : "") + ". Update the plugin.",
              commandText: "" }
   if (!hasBackgroundImage(record))
-    return { text: "Replace needs an image:", commandText: "oma-broadcast effect replace --image PATH" }
+    return { text: "Replace needs an image:", commandText: "omarchy-broadcast effect replace --image PATH" }
   return { text: "", commandText: "" }
 }
 
 // Exit status of a control command -> a short, capped message for the panel.
 // `code` -1 means the command could not be started at all.
 function commandFailureText(code, stderrLine, cliPath) {
-  var detail = typeof stderrLine === "string" ? stderrLine.slice(0, STDERR_CAP).replace(/^oma-broadcast:\s*/, "") : ""
+  var detail = typeof stderrLine === "string" ? stderrLine.slice(0, STDERR_CAP).replace(/^omarchy-broadcast:\s*/, "") : ""
   detail = sanitize(detail, DETAIL_CAP)
   var text
   switch (code) {
   case -1: text = CLI_MISSING_TEXT + ": " + (typeof cliPath === "string" ? cliPath : ""); break
   case 1: text = "The daemon refused the request" + (detail !== "" ? ": " + detail : ""); break
   case 2: text = "Invalid command line (a plugin bug)" + (detail !== "" ? ": " + detail : ""); break
-  case 3: text = "oma-broadcastd is not running"; break
+  case 3: text = "omarchy-broadcastd is not running"; break
   case 4: text = "D-Bus failure" + (detail !== "" ? ": " + detail : ""); break
   default: text = "Command failed with status " + code + (detail !== "" ? ": " + detail : "")
   }
@@ -760,7 +760,7 @@ function commandFailureText(code, stderrLine, cliPath) {
 // (1 = killed by a signal, whose number is then the exit code).
 function watchExitText(code, crashed, delayMs) {
   var how = crashed ? "stopped by signal " + code : "exited with status " + code
-  return "oma-broadcast watch " + how + "; restarting in " + Math.round(delayMs / 1000) + " s"
+  return "omarchy-broadcast watch " + how + "; restarting in " + Math.round(delayMs / 1000) + " s"
 }
 
 // ---------------------------------------------------------------- stderr framing
@@ -941,17 +941,17 @@ function cliPlan(setting, home) {
   return { mode: "setting", path: s }
 }
 
-// The resolver: (1) `oma-broadcast` on PATH, else (2) the repository's release
+// The resolver: (1) `omarchy-broadcast` on PATH, else (2) the repository's release
 // build, found from the plugin's real directory (the plugin dir is meant to be
 // a symlink into the repo). The plugin dir is a positional argument, never
 // interpolated into the script; an empty one skips (2). A path holding a
 // newline is never printed (it would read as two answers).
 var RESOLVER_SCRIPT = ""
   + "nl='\n'; "
-  + "p=$(command -v oma-broadcast 2>/dev/null) && case $p in *\"$nl\"*) ;; /*) printf '%s\\n' \"$p\"; exit 0;; esac; "
+  + "p=$(command -v omarchy-broadcast 2>/dev/null) && case $p in *\"$nl\"*) ;; /*) printf '%s\\n' \"$p\"; exit 0;; esac; "
   + "[ -n \"$1\" ] || exit 1; "
   + "d=$(readlink -f -- \"$1\" 2>/dev/null) || exit 1; "
-  + "c=$(readlink -f -- \"$d/../../../target/release/oma-broadcast\" 2>/dev/null) || exit 1; "
+  + "c=$(readlink -f -- \"$d/../../../target/release/omarchy-broadcast\" 2>/dev/null) || exit 1; "
   + "case $c in *\"$nl\"*) exit 1;; esac; "
   + "[ -f \"$c\" ] && [ -x \"$c\" ] && { printf '%s\\n' \"$c\"; exit 0; }; "
   + "exit 1"
@@ -967,15 +967,15 @@ function resolverDirUsable(pluginDir) {
 // (it is then passed as "", which skips the development-build search).
 function resolverArgv(pluginDir) {
   var dir = resolverDirUsable(pluginDir) ? pluginDir : ""
-  return ["sh", "-c", RESOLVER_SCRIPT, "oma-broadcast-resolve", dir]
+  return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir]
 }
 
 // What the resolver searched, for the panel when it found nothing.
 function resolverMissText(pluginDir) {
   if (!resolverDirUsable(pluginDir))
-    return "oma-broadcast is not on PATH (no development build was searched: the plugin directory is not a usable local path)"
-  return "oma-broadcast is not on PATH, and there is no development build at "
-    + pluginDir + "/../../../target/release/oma-broadcast"
+    return "omarchy-broadcast is not on PATH (no development build was searched: the plugin directory is not a usable local path)"
+  return "omarchy-broadcast is not on PATH, and there is no development build at "
+    + pluginDir + "/../../../target/release/omarchy-broadcast"
 }
 
 // One stdout line of the resolver -> an absolute path, or "".

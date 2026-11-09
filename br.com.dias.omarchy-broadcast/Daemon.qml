@@ -4,8 +4,8 @@ import Quickshell
 import Quickshell.Io
 import "Model.js" as Model
 
-// The one link to oma-broadcastd for every bar on every monitor: one
-// `oma-broadcast watch --json` child, one command child, one record. The
+// The one link to omarchy-broadcastd for every bar on every monitor: one
+// `omarchy-broadcast watch --json` child, one command child, one record. The
 // qmldir beside this file declares it a singleton; without that line the
 // name resolves to the component type and every read off it is undefined.
 //
@@ -229,7 +229,7 @@ Singleton {
     // A rejected producer never earns the short delay back.
     var delay = Model.backoffAfterExit(backoffMs, rejected ? 0 : uptime)
     if (rejected) {
-      record = Model.withLink("unsupported", "oma-broadcast printed a line longer than " + Model.LINE_CAP
+      record = Model.withLink("unsupported", "omarchy-broadcast printed a line longer than " + Model.LINE_CAP
         + " characters, which no schema v1 producer does; restarting in " + Math.round(delay / 1000) + " s")
     } else if (!started) {
       watchStartFailures++
