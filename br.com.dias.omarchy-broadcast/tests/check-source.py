@@ -142,7 +142,7 @@ for path, src in everything.items():
 sh_uses = [p.name for p, s in everything.items() if '"sh", "-c"' in s]
 check("sh -c only in Model.resolverArgv", sh_uses == ["Model.js"], str(sh_uses))
 model = js_sources[PLUGIN / "Model.js"]
-check("resolver passes the dir as $1", 'return ["sh", "-c", RESOLVER_SCRIPT, "oma-broadcast-resolve", dir]' in model)
+check("resolver passes the dir as $1", 'return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir]' in model)
 
 
 def block(src, header):

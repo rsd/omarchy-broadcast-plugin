@@ -15,7 +15,7 @@ import "Model.js" as Model
 // middle click opens and closes the panel.
 BarWidget {
   id: root
-  moduleName: "br.com.dias.oma-broadcast"
+  moduleName: "br.com.dias.omarchy-broadcast"
 
   readonly property var record: Daemon.record
   readonly property var visual: Model.visualFor(Model.visualKey(record))

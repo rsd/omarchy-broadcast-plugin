@@ -8,9 +8,9 @@ import "../Model.js" as Model
 // Run (headless):
 //   QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_model.qml
 TestCase {
-  name: "OmaBroadcastModel"
+  name: "OmarchyBroadcastModel"
 
-  readonly property string cli: "/opt/bin/oma-broadcast"
+  readonly property string cli: "/opt/bin/omarchy-broadcast"
   readonly property string brioId: "usb-046d_0944-video-index0"
   readonly property string fhdId: "pci-0000:00:14.0-usb-0:5:1.0-video-index0"
 
@@ -156,7 +156,7 @@ TestCase {
 
   function test_error_daemon_not_running_until_next_snapshot() {
     var r = active()
-    var res = Model.reduce(r, '{"v":1,"type":"error","code":"daemon-not-running","error":"oma-broadcastd is not running"}')
+    var res = Model.reduce(r, '{"v":1,"type":"error","code":"daemon-not-running","error":"omarchy-broadcastd is not running"}')
     compare(res.outcome, "error")
     r = res.record
     compare(r.link, "not-running")
@@ -180,8 +180,8 @@ TestCase {
     compare(b.link, "unreachable")
     var c = Model.reduce(snap(), '{"v":1,"type":"error"}').record
     compare(c.link, "unreachable")
-    compare(Model.tooltipText(a), "OMA Broadcast: daemon unreachable")
-    compare(Model.tooltipText(Model.emptyRecord("not-running")), "OMA Broadcast: daemon not running")
+    compare(Model.tooltipText(a), "Omarchy Broadcast: daemon unreachable")
+    compare(Model.tooltipText(Model.emptyRecord("not-running")), "Omarchy Broadcast: daemon not running")
   }
 
   function test_unknown_types_and_fields_are_ignored() {
@@ -231,7 +231,7 @@ TestCase {
     compare(Model.cursorStops(r, 2).length, 0)
     compare(Model.statsRows(r).length, 0)
     compare(Model.stateLabel(r), "unsupported state")
-    compare(Model.tooltipText(r), "OMA Broadcast: unsupported state")
+    compare(Model.tooltipText(r), "Omarchy Broadcast: unsupported state")
     compare(Model.heroMeta(r), "unavailable")
     verify(Model.unavailableMessage(r).title.indexOf("dancing") !== -1, Model.unavailableMessage(r).title)
     var back = Model.reduce(r, line(stateObject({ state: "idle" })))
@@ -269,8 +269,8 @@ TestCase {
 
   function test_off_tooltip_includes_error() {
     compare(Model.tooltipText(snap({ state: "off", enabled: false, error: "config <b>rejected</b>" })),
-            "OMA Broadcast: off \u00b7 error: config brejected/b")
-    compare(Model.tooltipText(snap({ state: "off", enabled: false })), "OMA Broadcast: off")
+            "Omarchy Broadcast: off \u00b7 error: config brejected/b")
+    compare(Model.tooltipText(snap({ state: "off", enabled: false })), "Omarchy Broadcast: off")
   }
 
   function test_active_camera_not_in_list() {
@@ -288,8 +288,8 @@ TestCase {
   }
 
   function test_watch_exit_text() {
-    compare(Model.watchExitText(15, true, 2000), "oma-broadcast watch stopped by signal 15; restarting in 2 s")
-    compare(Model.watchExitText(1, false, 1000), "oma-broadcast watch exited with status 1; restarting in 1 s")
+    compare(Model.watchExitText(15, true, 2000), "omarchy-broadcast watch stopped by signal 15; restarting in 2 s")
+    compare(Model.watchExitText(1, false, 1000), "omarchy-broadcast watch exited with status 1; restarting in 1 s")
   }
 
   // The CLI reads `next` as NextCamera even after `--`.
@@ -339,11 +339,11 @@ TestCase {
 
   function test_stderr_first_line() {
     var st = Model.firstLineStart()
-    st = Model.firstLineFeed(st, "oma-broadcast: no camera ")
+    st = Model.firstLineFeed(st, "omarchy-broadcast: no camera ")
     compare(st.done, false)
     st = Model.firstLineFeed(st, "matches\nsecond line\n")
     compare(st.done, true)
-    compare(st.text, "oma-broadcast: no camera matches")
+    compare(st.text, "omarchy-broadcast: no camera matches")
     verify(Model.firstLineFeed(st, "more") === st, "ignored once done")
     // blank first lines are skipped
     var b = Model.firstLineFeed(Model.firstLineStart(), "\n  \nreal\n")
@@ -366,8 +366,8 @@ TestCase {
     compare(JSON.stringify(Model.intentArgv({ verb: "enable", on: false }, cli, r)), JSON.stringify([cli, "off"]))
     compare(JSON.stringify(Model.intentArgv({ verb: "select", id: fhdId }, cli, r)), JSON.stringify([cli, "camera", "--", fhdId]))
     compare(JSON.stringify(Model.intentArgv({ verb: "next" }, cli, r)), JSON.stringify([cli, "camera", "next"]))
-    compare(JSON.stringify(Model.intentArgv({ verb: "enable", on: true }, "/new/oma-broadcast", r)),
-            JSON.stringify(["/new/oma-broadcast", "on"]), "the CLI path of the moment")
+    compare(JSON.stringify(Model.intentArgv({ verb: "enable", on: true }, "/new/omarchy-broadcast", r)),
+            JSON.stringify(["/new/omarchy-broadcast", "on"]), "the CLI path of the moment")
     var gone = Model.emptyRecord("not-running")
     compare(Model.intentArgv({ verb: "enable", on: true }, cli, gone), null, "never D-Bus-activates a stopped daemon")
     compare(Model.intentArgv({ verb: "select", id: fhdId }, cli, gone), null)
@@ -429,7 +429,7 @@ TestCase {
     compare(Model.heroMeta(Model.emptyRecord("connecting")), "connecting\u2026")
     var links = ["not-running", "unreachable", "cli-missing", "cli-failed", "unsupported"]
     for (var i = 0; i < links.length; i++) {
-      var rec = Model.withLink(links[i], "oma-broadcast CLI not found: /x")
+      var rec = Model.withLink(links[i], "omarchy-broadcast CLI not found: /x")
       var meta = Model.heroMeta(rec)
       compare(meta, "unavailable", links[i])
       verify(Model.unavailableMessage(rec).title.toLowerCase() !== meta, "body does not repeat the status line")
@@ -648,28 +648,28 @@ TestCase {
 
   function test_tooltips() {
     var r = Model.reduce(active(), line(stateObject({ state: "active", consumers: 2 }))).record
-    compare(Model.tooltipText(r), "OMA Broadcast: active \u00b7 Logitech MX Brio \u00b7 2 consumers")
-    compare(Model.tooltipText(snap({ state: "off", enabled: false })), "OMA Broadcast: off")
-    compare(Model.tooltipText(snap({ state: "idle", consumers: 1 })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 1 consumer")
-    compare(Model.tooltipText(snap({ active_camera: "", active_camera_name: "" })), "OMA Broadcast: idle \u00b7 no camera \u00b7 0 consumers")
-    compare(Model.tooltipText(snap({ state: "error", error: "loopback missing" })), "OMA Broadcast: error \u00b7 loopback missing")
+    compare(Model.tooltipText(r), "Omarchy Broadcast: active \u00b7 Logitech MX Brio \u00b7 2 consumers")
+    compare(Model.tooltipText(snap({ state: "off", enabled: false })), "Omarchy Broadcast: off")
+    compare(Model.tooltipText(snap({ state: "idle", consumers: 1 })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 1 consumer")
+    compare(Model.tooltipText(snap({ active_camera: "", active_camera_name: "" })), "Omarchy Broadcast: idle \u00b7 no camera \u00b7 0 consumers")
+    compare(Model.tooltipText(snap({ state: "error", error: "loopback missing" })), "Omarchy Broadcast: error \u00b7 loopback missing")
     verify(Model.tooltipText(snap({ error: "bad config" })).indexOf("error: bad config") !== -1)
-    compare(Model.tooltipText(Model.emptyRecord("cli-missing")), "OMA Broadcast: oma-broadcast CLI not found")
-    compare(Model.tooltipText(Model.emptyRecord("connecting")), "OMA Broadcast: connecting\u2026")
+    compare(Model.tooltipText(Model.emptyRecord("cli-missing")), "Omarchy Broadcast: omarchy-broadcast CLI not found")
+    compare(Model.tooltipText(Model.emptyRecord("connecting")), "Omarchy Broadcast: connecting\u2026")
     var hostile = snap({ active_camera_name: "<img src='http://x/y'>" })
     verify(!/[<>&]/.test(Model.tooltipText(hostile)))
   }
 
   function test_unavailable_messages() {
     var m = Model.unavailableMessage(Model.emptyRecord("not-running"))
-    compare(m.title, "oma-broadcastd is not running")
-    compare(m.commandText, "systemctl --user start oma-broadcastd")
+    compare(m.title, "omarchy-broadcastd is not running")
+    compare(m.commandText, "systemctl --user start omarchy-broadcastd")
     compare(Model.unavailableMessage(snap()).title, "")
-    var c = Model.unavailableMessage(Model.withLink("cli-missing", "oma-broadcast CLI not found: /nope"))
-    compare(c.title, "oma-broadcast CLI not found:")
+    var c = Model.unavailableMessage(Model.withLink("cli-missing", "omarchy-broadcast CLI not found: /nope"))
+    compare(c.title, "omarchy-broadcast CLI not found:")
     compare(c.path, "/nope")
     var none = Model.unavailableMessage(Model.emptyRecord("cli-missing"))
-    compare(none.title, "oma-broadcast CLI not found")
+    compare(none.title, "omarchy-broadcast CLI not found")
     compare(none.path, "")
     verify(Model.unavailableMessage(Model.emptyRecord("unreachable")).title !== m.title, "unreachable reads differently")
   }
@@ -679,12 +679,12 @@ TestCase {
   // one is covered: the configured cliPath, the resolver's miss, the command failure.
   function test_paths_leave_the_title() {
     var cases = [
-      Model.CLI_MISSING_TEXT + ": /nonexistent/oma-broadcast",
-      Model.CLI_MISSING_TEXT + ": /home/a b/with space/oma-broadcast",
-      Model.resolverMissText("/p/br.com.dias.oma-broadcast")
+      Model.CLI_MISSING_TEXT + ": /nonexistent/omarchy-broadcast",
+      Model.CLI_MISSING_TEXT + ": /home/a b/with space/omarchy-broadcast",
+      Model.resolverMissText("/p/br.com.dias.omarchy-broadcast")
     ]
-    var paths = ["/nonexistent/oma-broadcast", "/home/a b/with space/oma-broadcast",
-                 "/p/br.com.dias.oma-broadcast/../../../target/release/oma-broadcast"]
+    var paths = ["/nonexistent/omarchy-broadcast", "/home/a b/with space/omarchy-broadcast",
+                 "/p/br.com.dias.omarchy-broadcast/../../../target/release/omarchy-broadcast"]
     for (var i = 0; i < cases.length; i++) {
       var m = Model.unavailableMessage(Model.withLink("cli-missing", cases[i]))
       compare(m.path, paths[i], cases[i])
@@ -707,10 +707,10 @@ TestCase {
       compare(Model.unavailableMessage(Model.withLink(links[k], "text")).path, "", links[k])
     compare(Model.unavailableMessage(snap({ state: "dancing" })).path, "")
     // The command failure: only the CLI-missing text is split.
-    var f = Model.commandErrorParts(Model.commandFailureText(-1, "", "/nope/oma-broadcast"))
-    compare(f.text, "oma-broadcast CLI not found:")
-    compare(f.path, "/nope/oma-broadcast")
-    var g = Model.commandErrorParts(Model.commandFailureText(1, "oma-broadcast: no camera matches /dev/video3 now", cli))
+    var f = Model.commandErrorParts(Model.commandFailureText(-1, "", "/nope/omarchy-broadcast"))
+    compare(f.text, "omarchy-broadcast CLI not found:")
+    compare(f.path, "/nope/omarchy-broadcast")
+    var g = Model.commandErrorParts(Model.commandFailureText(1, "omarchy-broadcast: no camera matches /dev/video3 now", cli))
     compare(g.path, "", "the CLI's own words are shown whole")
     compare(g.text, "The daemon refused the request: no camera matches /dev/video3 now")
     // A path that itself holds " /": everything after the first one is the path.
@@ -732,11 +732,11 @@ TestCase {
   }
 
   function test_command_failure_text() {
-    compare(Model.commandFailureText(3, "", cli), "oma-broadcastd is not running")
-    var t = Model.commandFailureText(1, "oma-broadcast: no camera matches <img src=x>\n", cli)
+    compare(Model.commandFailureText(3, "", cli), "omarchy-broadcastd is not running")
+    var t = Model.commandFailureText(1, "omarchy-broadcast: no camera matches <img src=x>\n", cli)
     verify(t.indexOf("The daemon refused the request: no camera matches") === 0, t)
     verify(!/[<>&\n]/.test(t))
-    verify(Model.commandFailureText(-1, "", "/nope/oma-broadcast").indexOf("/nope/oma-broadcast") !== -1)
+    verify(Model.commandFailureText(-1, "", "/nope/omarchy-broadcast").indexOf("/nope/omarchy-broadcast") !== -1)
     verify(Model.commandFailureText(4, "timeout", cli).indexOf("D-Bus failure") === 0)
     verify(Model.commandFailureText(2, "", cli).indexOf("Invalid command line") === 0)
     verify(Model.commandFailureText(137, "", cli).indexOf("status 137") !== -1)
@@ -814,7 +814,7 @@ TestCase {
     var odd = [null, undefined, 0, 1, true, ["blur"], { effect: "blur" }, new String("blur")]
     for (var o = 0; o < odd.length; o++) compare(Model.effectArgv(cli, odd[o]), null, String(odd[o]))
     compare(Model.effectArgv("", "blur"), null, "no CLI")
-    compare(Model.effectArgv("oma-broadcast", "blur"), null, "a bare name is not a CLI path")
+    compare(Model.effectArgv("omarchy-broadcast", "blur"), null, "a bare name is not a CLI path")
     compare(Model.effectArgv("/a/b\nc", "blur"), null)
   }
 
@@ -922,7 +922,7 @@ TestCase {
             "only Replace is faded; the current effect never is")
     var hint = Model.effectHint(none)
     compare(hint.text, "Replace needs an image:")
-    compare(hint.commandText, "oma-broadcast effect replace --image PATH")
+    compare(hint.commandText, "omarchy-broadcast effect replace --image PATH")
     verify(opts[2].tooltip.indexOf("under [effect]") !== -1, opts[2].tooltip)
     compare(opts[0].tooltip, "The camera image, unchanged")
     compare(Model.intentArgv({ verb: "effect", effect: "replace" }, cli, none), null)
@@ -963,7 +963,7 @@ TestCase {
       compare(Model.intentArgv({ verb: "effect", effect: Model.EFFECTS[i] }, cli, old), null, Model.EFFECTS[i])
     }
     var hint = Model.effectHint(old)
-    compare(hint.text, "The oma-broadcast CLI needs updating for effects.")
+    compare(hint.text, "The omarchy-broadcast CLI needs updating for effects.")
     compare(hint.commandText, "")
     verify(hint.text.indexOf("plugin") === -1, "never blamed on the plugin")
     compare(Model.effectRows(old).length, 0)
@@ -1007,7 +1007,7 @@ TestCase {
     verify(Model.intentArgv({ verb: "enable", on: false }, cli, old) !== null, "the other controls are untouched")
     // an old CLI with an old daemon names the CLI first: it is what to update first
     var both = snap({ interface_revision: 1, blur_strength: undefined })
-    compare(Model.effectHint(both).text, "The oma-broadcast CLI needs updating for effects.")
+    compare(Model.effectHint(both).text, "The omarchy-broadcast CLI needs updating for effects.")
     compare(Model.effectOptions(both)[0].tooltip, Model.CLI_NO_EFFECTS)
     // a state line from the restarted daemon brings effects back
     var back = Model.reduce(old, line(stateObject({ changed: ["interface_revision"], interface_revision: 2 }))).record
@@ -1077,12 +1077,12 @@ TestCase {
   }
 
   function test_effect_in_tooltip() {
-    compare(Model.tooltipText(snap({ effect: "blur" })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background blurred")
+    compare(Model.tooltipText(snap({ effect: "blur" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background blurred")
     compare(Model.tooltipText(snap({ effect: "replace", background_image: image })),
-            "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background replaced")
-    compare(Model.tooltipText(snap({ effect: "none" })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
-    compare(Model.tooltipText(snap({ effect: "sepia" })), "OMA Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
-    compare(Model.tooltipText(snap({ state: "off", enabled: false, effect: "blur" })), "OMA Broadcast: off")
+            "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background replaced")
+    compare(Model.tooltipText(snap({ effect: "none" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
+    compare(Model.tooltipText(snap({ effect: "sepia" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
+    compare(Model.tooltipText(snap({ state: "off", enabled: false, effect: "blur" })), "Omarchy Broadcast: off")
   }
 
   // ---- CLI resolution ------------------------------------------------------
@@ -1092,12 +1092,12 @@ TestCase {
     compare(Model.cliPlan("   ", "/home/u").mode, "search")
     compare(Model.cliPlan(null, "/home/u").mode, "search")
     compare(Model.cliPlan(undefined, "/home/u").mode, "search")
-    var p = Model.cliPlan(" /x/y/oma-broadcast ", "/home/u")
+    var p = Model.cliPlan(" /x/y/omarchy-broadcast ", "/home/u")
     compare(p.mode, "setting")
-    compare(p.path, "/x/y/oma-broadcast")
-    compare(Model.cliPlan("~/bin/oma-broadcast", "/home/u/").path, "/home/u/bin/oma-broadcast")
+    compare(p.path, "/x/y/omarchy-broadcast")
+    compare(Model.cliPlan("~/bin/omarchy-broadcast", "/home/u/").path, "/home/u/bin/omarchy-broadcast")
     // absolute only: a bare name or a relative path never runs
-    var refused = ["oma-broadcast", "rm", "bin/x", "./oma-broadcast", "~", "~user/x", "/"]
+    var refused = ["omarchy-broadcast", "rm", "bin/x", "./omarchy-broadcast", "~", "~user/x", "/"]
     for (var r = 0; r < refused.length; r++) {
       var plan = Model.cliPlan(refused[r], "/home/u")
       compare(plan.mode, "invalid", refused[r])
@@ -1105,8 +1105,8 @@ TestCase {
     }
     compare(Model.cliUsable("rm"), false)
     compare(Model.enableArgv("rm", false), null)
-    compare(Model.watchArgv("bin/oma-broadcast"), null)
-    compare(Model.selectArgv("oma-broadcast", brioId), null)
+    compare(Model.watchArgv("bin/omarchy-broadcast"), null)
+    compare(Model.selectArgv("omarchy-broadcast", brioId), null)
     compare(Model.cliPlan("a\nb", "/home/u").mode, "invalid")
     compare(Model.cliPlan(42, "/home/u").mode, "invalid")
     compare(Model.cliPlan("~/x", "").mode, "invalid")
@@ -1119,7 +1119,7 @@ TestCase {
   }
 
   function test_resolver_argv_passes_dir_positionally() {
-    var dir = "/home/u/plugins/br.com.dias.oma-broadcast; rm -rf ~ $(id)"
+    var dir = "/home/u/plugins/br.com.dias.omarchy-broadcast; rm -rf ~ $(id)"
     var argv = Model.resolverArgv(dir)
     compare(argv.length, 5)
     compare(argv[0], "sh")
@@ -1134,13 +1134,13 @@ TestCase {
     verify(argv[2].indexOf("[ -n \"$1\" ] || exit 1") !== -1, "an empty dir skips the development search")
     verify(argv[2].indexOf("nl='\n'") === 0, "newline guard")
     verify(Model.resolverMissText("").indexOf("no development build was searched") !== -1)
-    var miss = Model.resolverMissText("/p/br.com.dias.oma-broadcast")
-    verify(miss.indexOf("not on PATH") !== -1 && miss.indexOf("/p/br.com.dias.oma-broadcast/../../../target/release/oma-broadcast") !== -1, miss)
-    compare(Model.resolverAnswer("/usr/bin/oma-broadcast", 1), "/usr/bin/oma-broadcast")
+    var miss = Model.resolverMissText("/p/br.com.dias.omarchy-broadcast")
+    verify(miss.indexOf("not on PATH") !== -1 && miss.indexOf("/p/br.com.dias.omarchy-broadcast/../../../target/release/omarchy-broadcast") !== -1, miss)
+    compare(Model.resolverAnswer("/usr/bin/omarchy-broadcast", 1), "/usr/bin/omarchy-broadcast")
     compare(Model.resolverAnswer("/x/nl", 2), "", "two lines are no answer")
     compare(Model.resolverAnswer("", 0), "")
-    compare(Model.parseResolverLine("/usr/bin/oma-broadcast\n"), "/usr/bin/oma-broadcast")
-    compare(Model.parseResolverLine("oma-broadcast"), "")
+    compare(Model.parseResolverLine("/usr/bin/omarchy-broadcast\n"), "/usr/bin/omarchy-broadcast")
+    compare(Model.parseResolverLine("omarchy-broadcast"), "")
     compare(Model.parseResolverLine(""), "")
     compare(Model.parseResolverLine(7), "")
     compare(Model.localPathFromUrl("file:///a/b%20c/"), "/a/b c")

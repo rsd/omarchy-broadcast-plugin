@@ -18,10 +18,10 @@ import qs.Ui
 //   OBH_SCREENS  where PNG grabs go
 //   OBH_LINKED   a symlink to the plugin dir, for the resolver checks (mock)
 //   OBH_NOREPO   a plugin-named dir outside any repository (mock)
-//   OBH_REPO_CLI the repository's target/release/oma-broadcast (mock)
-//   OBH_DAEMON   oma-broadcastd binary; OBH_LIVE the live scratch dir (live)
+//   OBH_REPO_CLI the repository's target/release/omarchy-broadcast (mock)
+//   OBH_DAEMON   omarchy-broadcastd binary; OBH_LIVE the live scratch dir (live)
 //   OBH_DEVLINK  a symlink to a plugin copy inside a scratch repository whose
-//                target/release/oma-broadcast is OBH_DEVCLI (mock)
+//                target/release/omarchy-broadcast is OBH_DEVCLI (mock)
 //   OBH_NLPLUGIN a plugin dir whose path holds a newline; OBH_NLBIN a PATH
 //                entry whose name holds one, with a CLI in it (mock)
 //
@@ -38,12 +38,12 @@ ShellRoot {
   readonly property string cli: Quickshell.env("OBH_CLI") || ""
   readonly property string fakeDir: Quickshell.env("OBH_FAKE") || ""
   readonly property string screens: Quickshell.env("OBH_SCREENS") || ""
-  readonly property string moduleName: "br.com.dias.oma-broadcast"
+  readonly property string moduleName: "br.com.dias.omarchy-broadcast"
 
   PluginBarApi {
     id: barA
-    pluginId: "br.com.dias.oma-broadcast"
-    moduleName: "br.com.dias.oma-broadcast"
+    pluginId: "br.com.dias.omarchy-broadcast"
+    moduleName: "br.com.dias.omarchy-broadcast"
     foreground: Commons.Color.bar.text
     barForeground: Commons.Color.bar.text
     background: Commons.Color.bar.background
@@ -53,8 +53,8 @@ ShellRoot {
   }
   PluginBarApi {
     id: barB
-    pluginId: "br.com.dias.oma-broadcast"
-    moduleName: "br.com.dias.oma-broadcast"
+    pluginId: "br.com.dias.omarchy-broadcast"
+    moduleName: "br.com.dias.omarchy-broadcast"
     foreground: Commons.Color.bar.text
     barForeground: Commons.Color.bar.text
     background: Commons.Color.bar.background
@@ -486,7 +486,7 @@ ShellRoot {
       h.eq("idle glyph (B)", B().iconButton.text, glyphOf("idle"))
       h.eq("idle not dimmed", A().iconButton.dimmed, false)
       h.eq("idle uses the foreground", A().iconButton.active, false)
-      h.eq("tooltip (A)", A().iconButton.tooltipText, "OMA Broadcast: idle · Logitech MX Brio · 0 consumers")
+      h.eq("tooltip (A)", A().iconButton.tooltipText, "Omarchy Broadcast: idle · Logitech MX Brio · 0 consumers")
       h.eq("tooltip (B)", B().iconButton.tooltipText, A().iconButton.tooltipText)
     })
     h.countStep(1, "with two widgets")
@@ -521,7 +521,7 @@ ShellRoot {
     }, function() { return S().record.activeCamera === fhdId })
     h.step("selection arrives on the stream", function() {
       h.check("row 1 now marked", h.row(A(), 1).isActive && !h.row(A(), 0).isActive)
-      h.eq("tooltip names FHD", A().iconButton.tooltipText, "OMA Broadcast: idle · FHD Camera · 0 consumers")
+      h.eq("tooltip names FHD", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers")
     })
 
     h.step("hostile id stays one argv element after --", function() {
@@ -560,7 +560,7 @@ ShellRoot {
       h.eq("None is selected", h.find(A(), "effectChoice-none").selected, true)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
       h.check("Replace faded without a background image", h.find(A(), "effectChoice-replace").opacity < 1)
-      h.eq("hint command", h.find(A(), "effectHintCommand").text, "oma-broadcast effect replace --image PATH")
+      h.eq("hint command", h.find(A(), "effectHintCommand").text, "omarchy-broadcast effect replace --image PATH")
       h.key(Qt.Key_Right)
       h.key("l")
       h.key(Qt.Key_Right)
@@ -683,7 +683,7 @@ ShellRoot {
       h.eq("off glyph", A().iconButton.text, glyphOf("off"))
       h.eq("off dimmed", A().iconButton.dimmed, true)
       h.eq("off foreground", A().iconButton.active, false)
-      h.eq("off tooltip", B().iconButton.tooltipText, "OMA Broadcast: off")
+      h.eq("off tooltip", B().iconButton.tooltipText, "Omarchy Broadcast: off")
     })
     h.grabStep(function() { return strip }, "bar-off.png")
     h.step("left click on the other monitor turns on", function() {
@@ -717,7 +717,7 @@ ShellRoot {
     h.step("active icon and panel", function() {
       h.eq("active glyph", A().iconButton.text, glyphOf("active"))
       h.eq("active accent", A().iconButton.active, true)
-      h.eq("tooltip", A().iconButton.tooltipText, "OMA Broadcast: active · FHD Camera · 1 consumer")
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: active · FHD Camera · 1 consumer")
       h.eq("stats block shown", h.find(A(), "statsBlock").visible, true)
       h.eq("hero status line", h.content(A()).heroMeta, "active")
       var rows = h.model.statsRows(S().record)
@@ -786,7 +786,7 @@ ShellRoot {
     // a failing command shows a capped, sanitised message; a success clears it
     h.step("failing command", function() {
       h.writeFile("exit", ["1"])
-      h.writeFile("stderr", ["oma-broadcast: no camera matches <img src=x> & more", "second line"])
+      h.writeFile("stderr", ["omarchy-broadcast: no camera matches <img src=x> & more", "second line"])
     }, function() { return h.writerIdle() })
     h.step("run it", function() { S().selectCamera(fhdId) }, function() { return S().commandError !== "" })
     h.step("failure shown", function() {
@@ -807,7 +807,7 @@ ShellRoot {
       h.writeFile("exit", ["3"])
       h.removeFile("stderr")
     }, function() { return h.writerIdle() })
-    h.step("exit 3", function() { S().nextCamera() }, function() { return S().commandError === "oma-broadcastd is not running" })
+    h.step("exit 3", function() { S().nextCamera() }, function() { return S().commandError === "omarchy-broadcastd is not running" })
     h.step("success clears", function() {
       h.writeFile("exit", ["0"])
     }, function() { return h.writerIdle() })
@@ -820,7 +820,7 @@ ShellRoot {
     h.wait(200)
     h.step("unknown state is unavailable", function() {
       h.eq("glyph", A().iconButton.text, glyphOf("unavailable"))
-      h.eq("tooltip", A().iconButton.tooltipText, "OMA Broadcast: unsupported state")
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: unsupported state")
       h.eq("switch hidden", h.find(A(), "enableSwitch").visible, false)
       h.eq("cameras hidden", h.find(A(), "camerasBlock").visible, false)
       h.check("panel says so", h.find(A(), "unavailableTitle").text.indexOf("dancing") !== -1, h.find(A(), "unavailableTitle").text)
@@ -838,16 +838,16 @@ ShellRoot {
 
     // daemon goes away
     h.step("daemon-not-running", function() {
-      h.feed(['{"v":1,"type":"error","code":"daemon-not-running","error":"oma-broadcastd is not running (no owner); start it with: systemctl --user start oma-broadcastd"}'])
+      h.feed(['{"v":1,"type":"error","code":"daemon-not-running","error":"omarchy-broadcastd is not running (no owner); start it with: systemctl --user start omarchy-broadcastd"}'])
     }, function() { return S().record.link === "not-running" })
     h.step("unavailable icon and panel", function() {
       h.eq("unavailable glyph", A().iconButton.text, glyphOf("unavailable"))
       h.eq("unavailable dimmed", A().iconButton.dimmed, true)
       h.check("distinct from off", glyphOf("unavailable") !== glyphOf("off"))
-      h.eq("tooltip", A().iconButton.tooltipText, "OMA Broadcast: daemon not running")
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: daemon not running")
       h.eq("hero status line", h.content(A()).heroMeta, "unavailable")
-      h.eq("unavailable title", h.find(A(), "unavailableTitle").text, "oma-broadcastd is not running")
-      h.eq("start command as text", h.find(A(), "unavailableCommand").text, "systemctl --user start oma-broadcastd")
+      h.eq("unavailable title", h.find(A(), "unavailableTitle").text, "omarchy-broadcastd is not running")
+      h.eq("start command as text", h.find(A(), "unavailableCommand").text, "systemctl --user start omarchy-broadcastd")
       h.eq("switch hidden", h.find(A(), "enableSwitch").visible, false)
       h.eq("cameras hidden", h.find(A(), "camerasBlock").visible, false)
       A().close()
@@ -875,7 +875,7 @@ ShellRoot {
       ["none", "blur", "replace"].forEach(function(e) {
         h.check(e + " faded", h.find(A(), "effectChoice-" + e).opacity < 1)
       })
-      h.eq("hint", h.find(A(), "effectHint").text, "The oma-broadcast CLI needs updating for effects.")
+      h.eq("hint", h.find(A(), "effectHint").text, "The omarchy-broadcast CLI needs updating for effects.")
       h.eq("no command", h.find(A(), "effectHintCommand").visible, false)
       h.eq("no effect stop", h.content(A()).stops.filter(function(st) { return st.kind === "effect" }).length, 0)
       h.markLog()
@@ -938,7 +938,7 @@ ShellRoot {
     }, function() { return S().backingOff })
     h.step("backing off", function() {
       h.eq("unavailable while respawning", S().record.link, "cli-failed")
-      h.check("signal named", S().record.linkText.indexOf("oma-broadcast watch stopped by signal 9") === 0, S().record.linkText)
+      h.check("signal named", S().record.linkText.indexOf("omarchy-broadcast watch stopped by signal 9") === 0, S().record.linkText)
     }, function() { return S().watchStarts === h.notes.starts + 1 && S().record.link === "ok" }, 6000)
     h.step("respawned; the split name arrived whole", function() {
       var waited = Date.now() - h.mark
@@ -1086,7 +1086,7 @@ ShellRoot {
       h.removeFile("watch-exit")
     }, function() { return h.writerIdle() })
 
-    // search mode: no cliPath -> oma-broadcast on PATH (the fake)
+    // search mode: no cliPath -> omarchy-broadcast on PATH (the fake)
     h.step("no cliPath: resolved from PATH", function() {
       h.oldService = S()
       A().destroy()
@@ -1114,12 +1114,12 @@ ShellRoot {
       h.markLog()
       h.notes.failures = S().watchStartFailures
       h.notes.resolves = S().resolverRuns
-      A().settings = { cliPath: "/nonexistent/oma-broadcast" }
+      A().settings = { cliPath: "/nonexistent/omarchy-broadcast" }
       h.mark = Date.now()
     }, function() { return S().record.link === "cli-missing" })
     h.step("CLI not found", function() {
-      h.eq("text", S().record.linkText, "oma-broadcast CLI not found: /nonexistent/oma-broadcast")
-      h.eq("tooltip", A().iconButton.tooltipText, "OMA Broadcast: oma-broadcast CLI not found")
+      h.eq("text", S().record.linkText, "omarchy-broadcast CLI not found: /nonexistent/omarchy-broadcast")
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: omarchy-broadcast CLI not found")
       h.eq("unavailable glyph", A().iconButton.text, glyphOf("unavailable"))
       A().close()
       A().iconButton.triggerPress(Qt.LeftButton)
@@ -1129,8 +1129,8 @@ ShellRoot {
     h.step("the path is on a line of its own, never wrapped at a slash", function() {
       var title = h.find(A(), "unavailableTitle")
       var path = h.find(A(), "unavailablePath")
-      h.eq("title", title.text, "oma-broadcast CLI not found:")
-      h.eq("path", path.text, "/nonexistent/oma-broadcast")
+      h.eq("title", title.text, "omarchy-broadcast CLI not found:")
+      h.eq("path", path.text, "/nonexistent/omarchy-broadcast")
       h.eq("path visible", path.visible, true)
       h.eq("path wraps anywhere", path.wrapMode, Text.WrapAnywhere)
       h.check("title holds no slash to wrap at", title.text.indexOf("/") === -1, title.text)
@@ -1148,12 +1148,12 @@ ShellRoot {
 
     // a path longer than the panel is wide wraps inside the name, never at a slash
     h.step("cliPath -> a long path", function() {
-      h.notes.longPath = "/nonexistent/a-rather-long-directory-name/another-long-directory/oma-broadcast-build/release/oma-broadcast"
+      h.notes.longPath = "/nonexistent/a-rather-long-directory-name/another-long-directory/omarchy-broadcast-build/release/omarchy-broadcast"
       A().settings = { cliPath: h.notes.longPath }
     }, function() { return S().record.linkText === h.model.CLI_MISSING_TEXT + ": " + h.notes.longPath })
     h.step("long path on its own wrapping line", function() {
       var path = h.find(A(), "unavailablePath")
-      h.eq("title", h.find(A(), "unavailableTitle").text, "oma-broadcast CLI not found:")
+      h.eq("title", h.find(A(), "unavailableTitle").text, "omarchy-broadcast CLI not found:")
       h.eq("path kept whole", path.text, h.notes.longPath)
       h.check("it needs more than one line", path.lineCount > 1, path.lineCount)
     })
@@ -1167,7 +1167,7 @@ ShellRoot {
       var block = h.find(A(), "commandErrorBlock")
       var text = h.find(A(), "commandError")
       var path = h.find(A(), "commandErrorPath")
-      h.eq("text", text.text, "oma-broadcast CLI not found:")
+      h.eq("text", text.text, "omarchy-broadcast CLI not found:")
       h.eq("path kept whole", path.text, h.notes.longPath)
       h.eq("block visible", block.visible, true)
       h.eq("path wraps anywhere", path.wrapMode, Text.WrapAnywhere)
@@ -1182,7 +1182,7 @@ ShellRoot {
     h.step("cliPath -> bare name", function() {
       h.markLog()
       h.notes.failures = S().watchStartFailures
-      A().settings = { cliPath: "oma-broadcast" }
+      A().settings = { cliPath: "omarchy-broadcast" }
     }, function() { return S().record.linkText === "cliPath must be an absolute path" })
     h.wait(1200)
     h.step("bare name refused", function() {
@@ -1250,8 +1250,8 @@ ShellRoot {
         h.eq("resolver " + label + " status", h.resolverExit, wantExit)
       })
     }
-    var fakeBin = shellRoot.cli.replace(/\/oma-broadcast$/, "")
-    var direct = function(dir) { return ["sh", "-c", h.model.RESOLVER_SCRIPT, "oma-broadcast-resolve", dir] }
+    var fakeBin = shellRoot.cli.replace(/\/omarchy-broadcast$/, "")
+    var direct = function(dir) { return ["sh", "-c", h.model.RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir] }
     var nlPlugin = Quickshell.env("OBH_NLPLUGIN")
     var nlBin = Quickshell.env("OBH_NLBIN")
     resolverCase("PATH wins", h.model.resolverArgv(Quickshell.env("OBH_LINKED")), fakeBin + ":/usr/bin:/bin", shellRoot.cli, 0)
@@ -1307,7 +1307,7 @@ ShellRoot {
     h.step("says what was searched", function() {
       var t = S().record.linkText
       h.check("names PATH and the dev path", t.indexOf("not on PATH") !== -1
-              && t.indexOf(Quickshell.env("OBH_DEVLINK") + "/../../../target/release/oma-broadcast") !== -1, t)
+              && t.indexOf(Quickshell.env("OBH_DEVLINK") + "/../../../target/release/omarchy-broadcast") !== -1, t)
       h.notes.failures = S().watchStartFailures
       h.notes.resolves = S().resolverRuns
     })
@@ -1362,7 +1362,7 @@ ShellRoot {
     var ids = []
 
     h.wait(800)
-    h.step("start oma-broadcastd", function() { shellRoot.startDaemon() }, function() { return daemonProc.running })
+    h.step("start omarchy-broadcastd", function() { shellRoot.startDaemon() }, function() { return daemonProc.running })
     h.step("widgets connect to the real daemon", function() {
       h.widgetA = h.makeWidget(barA, { cliPath: shellRoot.cli })
       h.widgetB = h.makeWidget(barB, { cliPath: shellRoot.cli })
@@ -1447,7 +1447,7 @@ ShellRoot {
     }, function() { return S().record.link === "not-running" && !daemonProc.running }, 15000)
     h.step("daemon gone", function() {
       h.eq("unavailable glyph", A().iconButton.text, glyphOf("unavailable"))
-      h.eq("tooltip", A().iconButton.tooltipText, "OMA Broadcast: daemon not running")
+      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: daemon not running")
       A().open()
     })
     h.wait(400)
