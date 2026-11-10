@@ -15,21 +15,19 @@
 #              mode copies into runtime/
 #   runtime/   XDG_RUNTIME_DIR of the harness shell and the fake (0700): the
 #              fake's preview.jpg goes here, never the user's runtime dir
-#   plugins/   a symlink to the plugin dir, as an install would make one
-#   devrepo/   a scratch development tree in the layout the plugin's
-#              development-build fallback searches (<plugin>/../../../target/
-#              release/omarchy-broadcast): a copy of the plugin under
-#              clients/omarchy-bar/ and the fake as target/release/omarchy-broadcast;
-#              devlink/ links to that copy (the development-build resolution)
-#   realrepo/  only with OMARCHY_BROADCAST_CLI (mock): the same layout, with
-#              target/release/omarchy-broadcast a symlink to that real CLI;
-#              reallink/ links to its plugin copy. The resolver only prints the
-#              path it finds; nothing runs the real CLI in mock mode
-#   nl/        directories whose names hold a newline (resolver framing)
-#   rbin/      symlinks to the external tools the resolver script needs
-#              (readlink; the rest are sh builtins), and nothing else: the
-#              resolver cases' PATH (OBH_RESOLVER_PATH), so an omarchy-broadcast
-#              installed in /usr/bin cannot answer for them
+#   sysbin/    mock only: symlinks to every executable in /usr/bin and /bin
+#              except omarchy-broadcast*. The shell's PATH is bin/ then
+#              sysbin/, so the only omarchy-broadcast it can ever find is the
+#              fake; the run refuses to start if anything else would answer
+#   nl/        a PATH entry whose name holds a newline, with a CLI in it
+#              (resolver framing)
+#   rbin/      an empty directory: the resolver cases' PATH (OBH_RESOLVER_PATH;
+#              the resolver script needs no external tool), so an
+#              omarchy-broadcast installed in /usr/bin cannot answer for them
+#   realbin/   only with OMARCHY_BROADCAST_CLI (mock): omarchy-broadcast, a
+#              symlink to that real CLI, for one resolver case that puts
+#              realbin/ on PATH. The resolver only prints the path it finds;
+#              nothing runs the real CLI in mock mode
 #   live/      live only: the daemon's scratch config, state and log, and
 #              bin/omarchy-broadcast, a symlink to OMARCHY_BROADCAST_CLI that
 #              the widgets run: its path (argv[0]) is the unique marker the
@@ -44,9 +42,10 @@
 # Environment:
 #   OMARCHY_SHELL          the Omarchy shell modules (default /usr/share/omarchy/shell)
 #   OMARCHY_BROADCAST_CLI  absolute path of a real omarchy-broadcast binary.
-#                          Mock: adds a resolver case that finds it through a
-#                          symlinked plugin dir (never executed); unset, that
-#                          case prints SKIP. Live: the CLI the widgets drive,
+#                          Mock: adds a resolver case that finds it on a PATH
+#                          (never executed); unset, that case prints SKIP.
+#                          Nothing else in a mock run can reach it: the shell's
+#                          PATH holds the fake only. Live: the CLI the widgets drive,
 #                          run through live/bin/omarchy-broadcast (required)
 #   OMARCHY_BROADCASTD     live only: the omarchy-broadcastd binary (default:
 #                          omarchy-broadcastd next to OMARCHY_BROADCAST_CLI)
@@ -58,6 +57,8 @@
 # --state under the work dir), drives the real CLI, opens /dev/video11 with
 # gst-launch for ~12 s, kills the daemon by PID, restarts it, and stops it.
 # It refuses to run if br.com.dias.OmarchyBroadcast already has an owner.
+#
+# The work directory is removed on exit; KEEP_WORK=1 keeps it.
 #
 # Exit status 0 when the harness prints "ALL OK". Whatever it started is gone
 # when this returns (checked with pgrep on paths inside the work dir: the
@@ -125,18 +126,27 @@ else
   # else, is deleted to make room.
   work=$(mktemp -d "$(cd -- "$work" && pwd)/obh.XXXXXX")
 fi
+# Only the directory this run's mktemp made is removed, on exit or a signal;
+# KEEP_WORK=1 keeps it (for debugging).
+made_work=$work
+cleanup() {
+  [ "${KEEP_WORK:-}" = 1 ] && return 0
+  if [ -n "$made_work" ] && [ -d "$made_work" ]; then rm -rf -- "$made_work"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 echo "harness: work directory $work"
 [ -n "$screens" ] || screens=$work/screens
 mkdir -p "$screens"
 
-mkdir -p "$work/qs" "$work/bin" "$work/fake" "$work/plugins" "$work/norepo/a/b/br.com.dias.omarchy-broadcast"
+mkdir -p "$work/qs" "$work/bin" "$work/fake"
 cp "$here/harness/shell.qml" "$work/qs/shell.qml"
 ln -s "$shell_dir/Commons" "$work/qs/Commons"
 cp -R "$shell_dir/Ui" "$work/qs/Ui"
 cp "$here/harness/KeyboardPanel.qml" "$work/qs/Ui/KeyboardPanel.qml"
 cp "$here/fake-omarchy-broadcast" "$work/bin/omarchy-broadcast"
 chmod +x "$work/bin/omarchy-broadcast"
-ln -s "$plugin" "$work/plugins/br.com.dias.omarchy-broadcast"
 # The plugin again at another URL, for a reload that yields a new singleton.
 mkdir -p "$work/reload/br.com.dias.omarchy-broadcast"
 cp "$plugin"/*.qml "$plugin"/*.js "$plugin"/qmldir "$plugin"/manifest.json "$work/reload/br.com.dias.omarchy-broadcast/"
@@ -156,45 +166,43 @@ for pattern in smpte smpte75 pinwheel ball; do
     echo "harness: could not make the JPEG frame $frame (needs gst-launch-1.0 with jpegenc, or ImageMagick)" >&2; exit 1; }
   i=$((i + 1))
 done
-# A scratch repository for the development-build resolution, reached through a
-# symlinked plugin dir as an install makes one.
-devplugin=$work/devrepo/clients/omarchy-bar/br.com.dias.omarchy-broadcast
-mkdir -p "$devplugin" "$work/devrepo/target/release" "$work/devlink"
-cp "$plugin"/*.qml "$plugin"/*.js "$plugin"/qmldir "$plugin"/manifest.json "$devplugin/"
-cp "$here/fake-omarchy-broadcast" "$work/devrepo/target/release/omarchy-broadcast"
-chmod +x "$work/devrepo/target/release/omarchy-broadcast"
-ln -s "$devplugin" "$work/devlink/br.com.dias.omarchy-broadcast"
-# Names with a newline: a repository dir, and a PATH entry holding a CLI.
+# A PATH entry whose name holds a newline, with a CLI in it.
 nl='
 '
-nlrepo="$work/nl/repo${nl}x"
-mkdir -p "$nlrepo/clients/omarchy-bar/br.com.dias.omarchy-broadcast" "$nlrepo/target/release" "$work/nl/bin${nl}y"
-cp "$here/fake-omarchy-broadcast" "$nlrepo/target/release/omarchy-broadcast"
+mkdir -p "$work/nl/bin${nl}y"
 cp "$here/fake-omarchy-broadcast" "$work/nl/bin${nl}y/omarchy-broadcast"
-chmod +x "$nlrepo/target/release/omarchy-broadcast" "$work/nl/bin${nl}y/omarchy-broadcast"
-# The resolver cases' PATH: only the external tools RESOLVER_SCRIPT runs
-# (command, printf, [ and case are sh builtins), from the system directories,
-# never an omarchy-broadcast. sh needs no link: Quickshell finds a command's
-# argv[0] on its own PATH, not the child's.
+chmod +x "$work/nl/bin${nl}y/omarchy-broadcast"
+# The resolver cases' PATH: an empty directory (command, printf, [ and case
+# are sh builtins), never an omarchy-broadcast. sh needs no link: Quickshell
+# finds a command's argv[0] on its own PATH, not the child's.
 mkdir -p "$work/rbin"
-readlink_bin=""
-for d in /usr/bin /bin; do
-  [ -x "$d/readlink" ] && { readlink_bin=$d/readlink; break; }
-done
-[ -n "$readlink_bin" ] || { echo "harness: readlink not found in /usr/bin or /bin" >&2; exit 1; }
-ln -s "$readlink_bin" "$work/rbin/readlink"
-# The real CLI in the same layout, for one resolver case (mock): a symlink the
-# resolver follows (readlink -f), so its answer is the real binary's path.
-reallink=""
+# The real CLI, for one resolver case (mock): a symlink in a directory of its
+# own, put on that case's PATH. Its answer is the link's path.
 realcli=""
 if [ "$mode" = mock ] && [ -n "$real_cli" ]; then
-  realplugin=$work/realrepo/clients/omarchy-bar/br.com.dias.omarchy-broadcast
-  mkdir -p "$realplugin" "$work/realrepo/target/release" "$work/reallink"
-  cp "$plugin"/*.qml "$plugin"/*.js "$plugin"/qmldir "$plugin"/manifest.json "$realplugin/"
-  ln -s "$real_cli" "$work/realrepo/target/release/omarchy-broadcast"
-  ln -s "$realplugin" "$work/reallink/br.com.dias.omarchy-broadcast"
-  reallink=$work/reallink/br.com.dias.omarchy-broadcast
-  realcli=$(readlink -f -- "$real_cli")
+  mkdir -p "$work/realbin"
+  ln -s "$real_cli" "$work/realbin/omarchy-broadcast"
+  realcli=$work/realbin/omarchy-broadcast
+fi
+# Hermetic PATH of a mock run: the fake, then the system tools without any
+# omarchy-broadcast*. Anything but the fake answering is fatal, before the
+# shell starts (a real CLI on the user's PATH must never be run by a mock test).
+run_path="$work/bin:/usr/bin:/bin"
+if [ "$mode" = mock ]; then
+  mkdir -p "$work/sysbin"
+  for d in /usr/bin /bin; do
+    [ -d "$d" ] || continue
+    find "$d" -mindepth 1 -maxdepth 1 ! -name 'omarchy-broadcast*' -print0 \
+      | xargs -0 -r ln -sf -t "$work/sysbin" --
+  done
+  run_path="$work/bin:$work/sysbin"
+  found=$(PATH="$run_path" command -v omarchy-broadcast || true)
+  [ "$found" = "$work/bin/omarchy-broadcast" ] || {
+    echo "harness: the mock PATH resolves omarchy-broadcast to '$found', not the fake $work/bin/omarchy-broadcast" >&2
+    exit 1
+  }
+  [ -x "$work/sysbin/sh" ] || { echo "harness: no sh among the system tools" >&2; exit 1; }
+  echo "harness: mock PATH resolves omarchy-broadcast to the fake ($found)"
 fi
 
 if [ "$mode" = live ]; then
@@ -220,20 +228,17 @@ log=$work/harness-$mode.log
 (
   # Offscreen: no session needed. Omarchy's gtk3 platform theme opens a GTK
   # display of its own even offscreen, so it is dropped too. PATH holds the
-  # fake first, so the "no cliPath" case resolves it from PATH.
+  # fake first (mock: and no other omarchy-broadcast at all), so the "no
+  # cliPath" case resolves the fake from PATH.
   unset WAYLAND_DISPLAY DISPLAY QT_QPA_PLATFORMTHEME
   export QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime"
-  export PATH="$work/bin:/usr/bin:/bin"
+  export PATH="$run_path"
   export FAKE_OB_DIR="$work/fake"
   export OBH_MODE="$mode" OBH_PLUGIN="$plugin" OBH_PLUGIN_COPY="$work/reload/br.com.dias.omarchy-broadcast" OBH_CLI="$cli" OBH_FAKE="$work/fake" \
-         OBH_SCREENS="$screens" OBH_LINKED="$work/plugins/br.com.dias.omarchy-broadcast" \
-         OBH_NOREPO="$work/norepo/a/b/br.com.dias.omarchy-broadcast" \
+         OBH_SCREENS="$screens" \
          OBH_DAEMON="$daemon" OBH_LIVE="$work/live" \
-         OBH_DEVLINK="$work/devlink/br.com.dias.omarchy-broadcast" \
-         OBH_DEVCLI="$work/devrepo/target/release/omarchy-broadcast" \
-         OBH_NLPLUGIN="$nlrepo/clients/omarchy-bar/br.com.dias.omarchy-broadcast" \
          OBH_NLBIN="$work/nl/bin${nl}y" OBH_RESOLVER_PATH="$work/rbin" \
-         OBH_REALLINK="$reallink" OBH_REALCLI="$realcli"
+         OBH_REALCLI="$realcli"
   exec quickshell -p "$work/qs"
 ) > "$log" 2>&1 &
 qs_pid=$!
@@ -259,7 +264,6 @@ wait "$qs_pid" 2>/dev/null || true
 # Paths are regex-escaped: pgrep -f takes a regular expression.
 escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
 left=$(pgrep -f "$marker_prefix$(escape "$cli") " || true)
-left="$left $(pgrep -f "^/bin/sh $(escape "$work/devrepo/target/release/omarchy-broadcast") " || true)"
 if [ "$mode" = live ]; then
   left="$left $(pgrep -f "^$(escape "$daemon") --config $(escape "$work/live/config.toml")" || true)"
 fi

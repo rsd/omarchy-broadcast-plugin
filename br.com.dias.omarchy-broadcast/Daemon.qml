@@ -47,14 +47,13 @@ Singleton {
   property var cliSetting: null
   property bool configured: false
   property string cliPath: ""
-  // "setting", "path", "development", or "" (none).
+  // "setting", "path", or "" (none).
   property string cliSource: ""
   property bool resolving: false
   property bool resolvePending: false
   property bool resolveScheduled: false
   property string resolverFirst: ""
   property int resolverLines: 0
-  readonly property string pluginDir: Model.localPathFromUrl(Qt.resolvedUrl("."))
 
   // ---- watch process -------------------------------------------------------
   property bool backingOff: false
@@ -180,7 +179,7 @@ Singleton {
     resolverLines = 0
     resolving = true
     resolverRuns++
-    resolverProc.command = Model.resolverArgv(pluginDir)
+    resolverProc.command = Model.resolverArgv()
     resolverProc.running = true
   }
 
@@ -195,10 +194,10 @@ Singleton {
     if (Model.cliPlan(cliSetting, Quickshell.env("HOME")).mode !== "search") return
     var answer = Model.resolverAnswer(resolverFirst, resolverLines)
     if (answer !== "") {
-      useCli(answer, answer.indexOf("/target/release/") !== -1 ? "development" : "path")
+      useCli(answer, "path")
     } else {
       useCli("", "")
-      record = Model.withLink("cli-missing", Model.resolverMissText(pluginDir))
+      record = Model.withLink("cli-missing", Model.resolverMissText())
     }
   }
 
@@ -392,6 +391,12 @@ Singleton {
   // per move, and one id never has more than one write in flight.
   function request(intent) {
     if (!Model.intentArgv(intent, cliPath, record)) return false
+    // A press of an action row has no draft to keep, so the queue never
+    // refuses it for room (Model.ACTION_QUEUE_CAP): marked by the row's type.
+    if (intent.verb === "setting") {
+      var arow = Model.findSetting(record, intent.id)
+      if (arow && arow.type === "action") intent = Object.assign({}, intent, { action: true })
+    }
     if (commandProc.running || commandArmed) {
       // Only a setting write is ever refused here (a full queue, see
       // Model.queueTakes); flushSettings keeps the draft of one for later.
@@ -444,7 +449,9 @@ Singleton {
     var ok = started && commandExitCode === 0
     if (intent && intent.verb === "setting") settingEnded(intent, ok)
     // A write that went through owes the change after its mark.
-    if (ok && Model.isSettingIntent(intent)) settingLinesDue = Math.max(settingLinesDue, commandLineMark + 1)
+    // (None for a value already in force: the daemon prints no change then.)
+    if (ok && Model.isSettingIntent(intent) && !Model.settingNoop(record, intent, settingLines, settingLinesDue))
+      settingLinesDue = Math.max(settingLinesDue, commandLineMark + 1)
     commandBusy = pendingIntents.length > 0
     // The retry is deferred to the next turn, never a same-turn re-arm.
     if (pendingIntents.length > 0) Qt.callLater(root.flushPending)
@@ -466,7 +473,9 @@ Singleton {
   function settingEnded(intent, ok) {
     var id = intent.id
     if (Model.queuedSetting(pendingIntents, id) || Model.ownValue(settingDrafts, id) !== intent.value) return
-    if (Model.settingWriteEnd(ok, settingLines, commandLineMark) === "drop") {
+    // A write of the value already in force gets no change line: its exit
+    // settles the draft (else it would wait for a line that never comes).
+    if (Model.settingWriteEnd(ok, settingLines, commandLineMark) === "drop" || (ok && Model.settingNoop(record, intent, settingLines, settingLinesDue))) {
       settingDrafts = Model.withSetting(settingDrafts, id, undefined)
       settingSent = Model.withSetting(settingSent, id, undefined)
     } else {
@@ -530,22 +539,26 @@ Singleton {
   // Each draft not written yet becomes a setting intent, bound to the camera
   // of the set the row showed; the queue keeps one per id behind a running
   // command. A draft the queue cannot take now (Model.SETTING_QUEUE_CAP
-  // writes are waiting, none for its id) stays a draft, unsent: it is not
-  // dropped and not marked sent, and commandEnded calls this again. Walks
-  // only the drafts (at most Model.SETTINGS_ROW_CAP ids).
+  // slider writes or Model.QUICK_QUEUE_CAP quick ones are waiting, none for
+  // its id) stays a draft, unsent: it is not dropped and not marked sent, and
+  // commandEnded calls this again. Walks only the drafts (at most
+  // Model.SETTINGS_ROW_CAP ids).
   function flushSettings() {
     var drafts = Model.withSetting(settingDrafts, "", undefined)
     var camera = record.settings ? record.settings.camera : ""
     for (var id in drafts) {
       var v = drafts[id]
       if (v === Model.ownValue(settingSent, id)) continue
-      if ((commandProc.running || commandArmed) && !Model.queueTakes(pendingIntents, { verb: "setting", id: id })) {
-        settingsDeferred = true
-        continue
-      }
       var row = Model.findSetting(record, id)
       var intent = { verb: "setting", id: id, value: v, camera: camera }
       if (row && row.scope === "global") intent.scope = "global"
+      // A switch or a choice is one click, not a drag: it does not wait
+      // behind queued slider writes (Model.enqueueIntent).
+      if (row && (row.type === "bool" || row.type === "enum")) intent.quick = true
+      if ((commandProc.running || commandArmed) && !Model.queueTakes(pendingIntents, intent)) {
+        settingsDeferred = true
+        continue
+      }
       if (request(intent)) {
         settingSent = Model.withSetting(settingSent, id, v)
       } else {
@@ -559,7 +572,7 @@ Singleton {
   function runSettingAction(id) {
     var row = Model.settingsSupported(record) ? Model.findSetting(record, id) : null
     if (!row || row.type !== "action" || !row.enabled) return false
-    return request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera })
+    return request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera, quick: true })
   }
 
   // Every setting of the camera back to its default; what the user had not

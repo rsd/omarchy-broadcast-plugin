@@ -1393,11 +1393,22 @@ var SEGMENTED_MAX_CHARS = 28
 // A slider (or a key) writes this long after its last move, and at once on
 // release; a switch, a choice or an action writes at once.
 var CONTROLS_DEBOUNCE_MS = 150
-// Commands waiting behind a running one (see enqueueIntent): at most one
-// other ask, one reset and SETTING_QUEUE_CAP setting writes (one per id), so
-// never more than INTENT_QUEUE_CAP.
+// Commands waiting behind a running one (see enqueueIntent). Every kind the
+// queue can hold, and its most:
+//   other ask (effect, denoise, select, next, enable ...)   1
+//   reset                                                    1
+//   slider write (setting, no quick), one per id             SETTING_QUEUE_CAP
+//   quick write (setting, quick, not action), one per id     QUICK_QUEUE_CAP
+//   settings action (setting, action:true), one per id       ACTION_QUEUE_CAP
+// An action has no draft to keep for later, so a refusal would lose the
+// click: it is never refused for room. Its bound is SETTINGS_ROW_CAP, the most
+// rows (so action ids) a record can show, so no press of a real row is ever
+// refused. The kinds add up to INTENT_QUEUE_CAP: the trim to it never cuts
+// what this module queued.
 var SETTING_QUEUE_CAP = 8
-var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + 2
+var QUICK_QUEUE_CAP = 4
+var ACTION_QUEUE_CAP = SETTINGS_ROW_CAP
+var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + QUICK_QUEUE_CAP + ACTION_QUEUE_CAP + 2
 var SETTINGS_TITLE = "SETTINGS"
 var SETTINGS_RESET_LABEL = "Reset to defaults"
 var SETTINGS_RESET_TOOLTIP = "Set every setting of this camera back to its default and forget the stored values"
@@ -2191,22 +2202,33 @@ function isSettingIntent(intent) {
 }
 
 // Whether the queue takes `intent`: anything but a setting write always; a
-// write when one for the same id is queued (it replaces that one) or fewer
-// than SETTING_QUEUE_CAP writes are. A write the queue does not take is not
-// lost: the Daemon keeps its draft unsent and writes it once a queued
-// command has run (Daemon.flushSettings). Nothing is ever evicted to make
-// room, so no other ask is dropped and no draft is left waiting on a write
-// that will never run.
+// write when, counting the queued writes of other ids (a queued write for the
+// same id is replaced, so it does not count), fewer than the cap of its own
+// kind are queued: SETTING_QUEUE_CAP slider writes, QUICK_QUEUE_CAP quick
+// writes or ACTION_QUEUE_CAP actions (an action is never refused for quick
+// writes: it has no draft to keep). A write the queue does not take is not
+// lost: the Daemon keeps its draft unsent and writes it once a queued command
+// has run (Daemon.flushSettings). Nothing is ever evicted to make room, so no
+// other ask is dropped and no draft is left waiting on a write that will
+// never run.
 function queueTakes(queue, intent) {
   if (!isPlainObject(intent) || intent.verb !== "setting") return true
   var q = Array.isArray(queue) ? queue : []
-  var writes = 0
+  var count = { slider: 0, quick: 0, action: 0 }
   for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++) {
     if (!isPlainObject(q[i]) || q[i].verb !== "setting") continue
-    if (q[i].id === intent.id) return true
-    writes++
+    if (q[i].id === intent.id) continue
+    count[queueKind(q[i])]++
   }
-  return writes < SETTING_QUEUE_CAP
+  var kind = queueKind(intent)
+  var cap = kind === "action" ? ACTION_QUEUE_CAP : (kind === "quick" ? QUICK_QUEUE_CAP : SETTING_QUEUE_CAP)
+  return count[kind] < cap
+}
+
+// Which bound a queued setting write counts against.
+function queueKind(intent) {
+  if (intent.action === true) return "action"
+  return isQuickIntent(intent) ? "quick" : "slider"
 }
 
 // The command queue behind a running command, as a pure step: `intent`
@@ -2216,11 +2238,13 @@ function queueTakes(queue, intent) {
 // queues more than one command per setting. Any other ask replaces the
 // other ask queued before it (the latest wins). The new intent goes last, so
 // the order of what the user did is kept, except an on/off ask: it goes
-// first, so turning the camera off never waits behind slider writes. A
+// first, so turning the camera off never waits behind slider writes, and a
+// discrete ask (isQuickIntent) goes ahead of the queued slider writes. A
 // write queueTakes refuses leaves the queue as it was. So the queue holds at
-// most one other ask, one reset and SETTING_QUEUE_CAP writes: the input is
-// cut to INTENT_QUEUE_CAP as a backstop only, and nothing is ever cut from a
-// queue this function made.
+// most one other ask, one reset, SETTING_QUEUE_CAP slider writes,
+// QUICK_QUEUE_CAP quick writes and ACTION_QUEUE_CAP actions, which is
+// INTENT_QUEUE_CAP (the table above SETTING_QUEUE_CAP): the input is cut to it
+// as a backstop only, and nothing is ever cut from a queue this function made.
 function enqueueIntent(queue, intent) {
   var q = Array.isArray(queue) ? queue.slice(0, INTENT_QUEUE_CAP) : []
   if (!isPlainObject(intent) || !queueTakes(q, intent)) return q
@@ -2239,9 +2263,33 @@ function enqueueIntent(queue, intent) {
     }
     out.push(p)
   }
-  if (intent.verb === "enable") out.unshift(intent)
-  else out.push(intent)
+  if (intent.verb === "enable") {
+    out.unshift(intent)
+  } else if (isQuickIntent(intent)) {
+    // A discrete ask (an effect, noise removal, a switch, a choice, a
+    // button) goes ahead of the queued slider writes, but never ahead of a
+    // reset (it came after it) and never past a write of its own id (that
+    // one was replaced above, so none is queued). The sliders' coalesced
+    // latest values stay queued and run after it.
+    var pos = out.length
+    for (var j = out.length - 1; j >= 0; j--) {
+      if (out[j].verb === "reset-settings") break
+      if (out[j].verb === "setting" && !isQuickIntent(out[j])) pos = j
+    }
+    out.splice(pos, 0, intent)
+  } else {
+    out.push(intent)
+  }
   return out
+}
+
+// An ask that is a discrete user action, not a stream of values: an effect or
+// noise removal, a switch, a choice or a button (the Daemon marks a setting
+// write `quick` by its row's type). Such an ask does not wait behind
+// queued slider writes (Model.enqueueIntent).
+function isQuickIntent(intent) {
+  return isPlainObject(intent)
+    && (intent.verb === "effect" || intent.verb === "denoise" || (intent.verb === "setting" && intent.quick === true))
 }
 
 // A queued write of a global setting (made with its row's scope).
@@ -2348,6 +2396,21 @@ function settingLineMark(lines, due) {
 function settingWriteEnd(ok, lines, mark) {
   if (ok !== true) return "drop"
   return typeof lines === "number" && typeof mark === "number" && lines > mark ? "drop" : "settle"
+}
+
+// A setting write whose value is already the one the daemon reports: it was
+// in force before the write (or its change has been read), so the daemon
+// publishes no change line for it and none is due. The write's command
+// exiting 0 is what settles its draft, not a line. Only when the value is
+// also stored (a write of the shown but unstored value does print a line,
+// flipping `stored`), and only when no earlier write's line is still owed
+// (`due` > `lines`): the record may then be stale. Without `lines` and `due`
+// the owed-line check is skipped.
+function settingNoop(record, intent, lines, due) {
+  if (!isPlainObject(intent) || intent.verb !== "setting") return false
+  if (typeof lines === "number" && typeof due === "number" && due > lines) return false
+  var row = findSetting(record, intent.id)
+  return !!row && row.type !== "action" && row.stored === true && row.value === intent.value
 }
 
 // After a change: `settling` maps an id to { value, line }, a write that
@@ -2537,41 +2600,22 @@ function cliPlan(setting, home) {
   return { mode: "setting", path: s }
 }
 
-// The resolver: (1) `omarchy-broadcast` on PATH, else (2) the repository's release
-// build, found from the plugin's real directory (the plugin dir is meant to be
-// a symlink into the repo). The plugin dir is a positional argument, never
-// interpolated into the script; an empty one skips (2). A path holding a
-// newline is never printed (it would read as two answers).
+// The resolver: `omarchy-broadcast` on PATH. A cliPath setting never comes
+// here (Model.cliPlan). A path holding a newline is never printed (it would
+// read as two answers).
 var RESOLVER_SCRIPT = ""
   + "nl='\n'; "
   + "p=$(command -v omarchy-broadcast 2>/dev/null) && case $p in *\"$nl\"*) ;; /*) printf '%s\\n' \"$p\"; exit 0;; esac; "
-  + "[ -n \"$1\" ] || exit 1; "
-  + "d=$(readlink -f -- \"$1\" 2>/dev/null) || exit 1; "
-  + "c=$(readlink -f -- \"$d/../../../target/release/omarchy-broadcast\" 2>/dev/null) || exit 1; "
-  + "case $c in *\"$nl\"*) exit 1;; esac; "
-  + "[ -f \"$c\" ] && [ -x \"$c\" ] && { printf '%s\\n' \"$c\"; exit 0; }; "
   + "exit 1"
 
-// A plugin directory the development-build search may use: a local absolute
-// path without control characters (a newline would make the answer ambiguous).
-function resolverDirUsable(pluginDir) {
-  return typeof pluginDir === "string" && pluginDir.charAt(0) === "/" && pluginDir.length <= PATH_CAP
-    && !hasControl(pluginDir)
-}
-
-// Always an argv: PATH is searched even when the plugin directory is unusable
-// (it is then passed as "", which skips the development-build search).
-function resolverArgv(pluginDir) {
-  var dir = resolverDirUsable(pluginDir) ? pluginDir : ""
-  return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir]
+// Always an argv.
+function resolverArgv() {
+  return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve"]
 }
 
 // What the resolver searched, for the panel when it found nothing.
-function resolverMissText(pluginDir) {
-  if (!resolverDirUsable(pluginDir))
-    return "omarchy-broadcast is not on PATH (no development build was searched: the plugin directory is not a usable local path)"
-  return "omarchy-broadcast is not on PATH, and there is no development build at "
-    + pluginDir + "/../../../target/release/omarchy-broadcast"
+function resolverMissText() {
+  return "omarchy-broadcast is not on PATH"
 }
 
 // One stdout line of the resolver -> an absolute path, or "".
