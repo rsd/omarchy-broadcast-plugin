@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
-  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace), a noise removal switch and live stream figures.",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace), a noise removal switch, camera image controls (brightness, contrast, saturation, sharpness; need omarchy-broadcast 0.19.0), a live preview and live stream figures.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,14 +14,15 @@
   },
   "barWidget": {
     "displayName": "Omarchy Broadcast",
-    "description": "Shows the virtual camera's state; left click turns it on or off, right click opens the panel with cameras and live figures.",
+    "description": "Shows the virtual camera's state; left click opens the panel with the live preview, effects, cameras and status, right click turns the camera on or off.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "cliPath": "",
       "previewEnabled": false,
-      "previewFps": 15
+      "previewFps": 15,
+      "panelTab": "effect"
     },
     "schema": [
       {
@@ -47,6 +48,14 @@
         "step": 15,
         "defaultValue": 15,
         "description": "15 or 30 frames per second; any other value reads as 15."
+      },
+      {
+        "key": "panelTab",
+        "type": "enum",
+        "label": "Panel tab",
+        "options": ["effect", "camera", "status"],
+        "defaultValue": "effect",
+        "description": "The tab the panel shows under the preview; the panel remembers the last one chosen. Any other value reads as effect."
       }
     ]
   }

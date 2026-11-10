@@ -32,7 +32,28 @@ widget would hide.
     Qt.callLater; the Image is never cached and its source comes from
     Model.previewSource (the validated path); no video device and no D-Bus
     tool named anywhere; preview preferences written only from the panel's
-    two user actions, through Model.settingsEntry.
+    two user actions, through Model.settingsEntry;
+  - the camera image controls: a name reaches the command line only as a
+    word of Model.CONTROL_NAMES and a value only as a checked integer,
+    through an intent (Daemon.flushControls -> Model.controlArgv), and a
+    reset as the constant `controls reset`; each bound to the camera whose
+    controls the panel showed (Model.controlIntentBound) and dropped from
+    the queue when the controls change camera; queued writes coalesce through
+    Model.enqueueIntent; the write debounce is the Daemon's one one-shot
+    Timer, restarted only by a user's move, and the panel has no Timer; the
+    slider rows have the constant model Model.CONTROL_NAMES (a controls line
+    never rebuilds the row being dragged), use the shell's PanelSlider, and
+    the Flickable lets go of a held slider;
+  - the bar clicks: right click turns the camera on or off through
+    Model.rightClickAction (its guards, with Daemon.toggleBusy: slider writes
+    never hold it), every other click opens and closes the panel;
+  - the panel tab: a stored `panelTab` is read only through
+    Model.panelTabValue (anything but a word of Model.PANEL_TABS reads as the
+    default), written only by the panel's chooseTab as a word of
+    Model.PANEL_TABS through Model.settingsEntry, and the manifest's enum
+    options are exactly Model.PANEL_TABS; each tab page is drawn only for its
+    own word; the card is 520 wide and as tall as its content (the screen's
+    available height is the only cap; past it the Flickable scrolls).
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -110,7 +131,8 @@ check("entry point is BarWidget.qml", manifest.get("entryPoints", {}).get("barWi
 check("allowMultiple is false", manifest.get("barWidget", {}).get("allowMultiple") is False)
 schema = manifest.get("barWidget", {}).get("schema", [])
 schema_keys = [s.get("key") for s in schema]
-check("settings: cliPath, previewEnabled, previewFps", schema_keys == ["cliPath", "previewEnabled", "previewFps"], str(schema_keys))
+check("settings: cliPath, previewEnabled, previewFps, panelTab",
+      schema_keys == ["cliPath", "previewEnabled", "previewFps", "panelTab"], str(schema_keys))
 by_key = {s.get("key"): s for s in schema}
 defaults = manifest.get("barWidget", {}).get("defaults", {})
 check("previewEnabled is a boolean, default false",
@@ -122,6 +144,16 @@ check("previewFps is an integer 15..30 in steps of 15, default 15",
       and fps_schema.get("step") == 15 and fps_schema.get("defaultValue") == 15 and defaults.get("previewFps") == 15,
       str(fps_schema))
 check("defaults hold exactly the schema keys", sorted(defaults) == sorted(schema_keys), str(sorted(defaults)))
+tab_schema = by_key.get("panelTab", {})
+model_src = (PLUGIN / "Model.js").read_text(encoding="utf-8")
+tabs_match = re.search(r'^var PANEL_TABS = (\[[^\]]*\])$', model_src, re.M)
+model_tabs = json.loads(tabs_match.group(1)) if tabs_match else None
+default_match = re.search(r'^var PANEL_TAB_DEFAULT = "(\w+)"$', model_src, re.M)
+check("panelTab is an enum of exactly Model.PANEL_TABS, default Model.PANEL_TAB_DEFAULT (the first)",
+      tab_schema.get("type") == "enum" and model_tabs is not None and tab_schema.get("options") == model_tabs
+      and default_match is not None and default_match.group(1) == model_tabs[0]
+      and tab_schema.get("defaultValue") == model_tabs[0] and defaults.get("panelTab") == model_tabs[0],
+      f"{tab_schema} vs {model_tabs}")
 
 # ---- Component.onDestruction bodies -----------------------------------------
 def destruction_bodies(src):
@@ -211,9 +243,14 @@ check("denoiseArgv only passes on/off from a strict boolean",
 check("a denoise intent runs only while the daemon reports it",
       'case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null' in model)
 check("queued commands are intents re-checked when armed",
-      "pendingIntent" in daemon and "pendingArgv" not in daemon and "Model.intentArgv(intent, cliPath, record)" in block(daemon, "function armCommand"))
+      "pendingIntents" in daemon and "pendingArgv" not in daemon and "Model.intentArgv(intent, cliPath, record)" in block(daemon, "function armCommand"))
+check("the queue changes only through Model.enqueueIntent (coalescing) and flushPending",
+      re.findall(r"pendingIntents\s*=\s*([^\n]*)", daemon)
+      == ["Model.dropControlIntents(pendingIntents)", "Model.enqueueIntent(pendingIntents, intent)", "pendingIntents.slice(1)"]
+      and ".push(" not in block(daemon, "function request"), str(re.findall(r"pendingIntents\s*=\s*([^\n]*)", daemon)))
 
 panel = sources[PLUGIN / "BroadcastPanel.qml"]
+bar_src = sources[PLUGIN / "BarWidget.qml"]
 for name, src in ((p.name, sources[p]) for p in plugin_qml):
     check(f"{name}: no containsMouse-driven colour",
           re.search(r"(color|border\.color|fill)\s*:[^\n]*containsMouse", src) is None)
@@ -235,9 +272,11 @@ check("effect chips fade from Model's `faded`, not a local rule",
 hint_at = panel.find('objectName: "effectHintBlock"')
 hint_column = panel.rfind("Column {", 0, hint_at) if hint_at >= 0 else -1
 hint_block = block(panel[hint_column:], "Column {") if hint_column >= 0 else ""
+# The Column's own spacing: the indentation of its objectName line.
+hint_indent = re.search(r'^( *)objectName:\s*"effectHintBlock"', hint_block, re.M)
 check("effect hint and its command share one Column at Style.space(6)",
-      re.match(r'\{\s*objectName:\s*"effectHintBlock"', hint_block) is not None
-      and re.search(r"^ {12}spacing: Style\.space\(6\)$", hint_block, re.M) is not None
+      re.match(r'\{\s*objectName:\s*"effectHintBlock"', hint_block) is not None and hint_indent is not None
+      and re.search(r"^" + hint_indent.group(1) + r"spacing: Style\.space\(6\)$", hint_block, re.M) is not None
       and 'objectName: "effectHint"' in hint_block and 'objectName: "effectHintCommand"' in hint_block,
       hint_block[:200])
 check("the image path is isolated (LRI U+2066 ... PDI U+2069) after sanitising",
@@ -246,10 +285,67 @@ check("the Replace gate reads the raw field, not the display copy",
       re.search(r"function hasBackgroundImage\(record\)\s*\{\s*return !!record && record\.backgroundImageSet === true\s*\}", model) is not None)
 check("camera rows are CursorSurfaces", re.search(r"delegate:\s*CursorSurface\s*\{", panel) is not None)
 check("the panel scrolls (Flickable)", "Flickable {" in panel)
-check("the panel height is capped at Style.space(560)",
-      "fittedContentHeight(panel.loadedContentHeight, Style.space(560))" in sources[PLUGIN / "BarWidget.qml"])
+check("the card is 520 wide and as tall as its content (the screen is the only cap)",
+      "contentWidth: panel.fittedContentWidth(Style.space(520))" in sources[PLUGIN / "BarWidget.qml"]
+      and "contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)" in sources[PLUGIN / "BarWidget.qml"])
 check("no stale reference to check-source.sh (comments included)",
       all("check-source.sh" not in p.read_text(encoding="utf-8") for p in list(everything) + [PLUGIN / "manifest.json"]))
+
+# ---- camera image controls ---------------------------------------------------
+check("controlArgv only passes a word of Model.CONTROL_NAMES and a checked integer",
+      re.search(r'function controlArgv\(cli, name, value\)\s*\{\s*if \(!cliUsable\(cli\) \|\| CONTROL_NAMES\.indexOf\(name\) < 0 \|\| controlInt\(value\) === null\) return null\s*'
+                r'return \[cli, "controls", "set", name, String\(value\)\]', model) is not None
+      and 'var CONTROL_NAMES = ["brightness", "contrast", "saturation", "sharpness"]' in model)
+check("a reset is the constant `controls reset`",
+      re.search(r'function resetControlsArgv\(cli\)\s*\{\s*return cliUsable\(cli\) \? \[cli, "controls", "reset"\] : null\s*\}', model) is not None)
+check("control intents run only while the daemon offers the control, on its grid",
+      'case "control": return controlIntentBound(intent, record) ? controlIntentArgv(cli, record, intent.name, intent.value) : null' in model
+      and 'case "reset-controls": return controlsSupported(record) && controlIntentBound(intent, record) ? resetControlsArgv(cli) : null' in model
+      and "intent.camera === record.controlsCameraId" in block(model, "function controlIntentBound")
+      and "var v = snapControl(findControl(record, name), value)" in block(model, "function controlIntentArgv"))
+check("a camera change drops the queued control writes; the change is seen on the raw id",
+      "var otherCamera = record.controlsCameraId !== camera" in block(daemon, "function ingest")
+      and "if (otherCamera) dropQueuedControls()" in block(daemon, "function ingest")
+      and "var camera = record.controlsCameraId" in block(daemon, "function ingest"))
+check("Daemon requests controls only as intents from flushControls and resetControls",
+      re.findall(r'request\(\{ verb: "(control|reset-controls)"[^)]*\)', daemon) == ["control", "reset-controls"]
+      and 'request({ verb: "control", name: name, value: v, camera: record.controlsCameraId })' in block(daemon, "function flushControls")
+      and 'request({ verb: "reset-controls", camera: record.controlsCameraId })' in block(daemon, "function resetControls"))
+check("flushControls walks only Model.CONTROL_NAMES",
+      "for (var i = 0; i < Model.CONTROL_NAMES.length; i++)" in block(daemon, "function flushControls"))
+timers = re.findall(r"property Timer (\w+): Timer \{", daemon)
+check("the Daemon's timers are the backoff and the controls debounce", sorted(timers) == ["backoffTimer", "controlTimer"], str(timers))
+control_timer = block(daemon, "property Timer controlTimer")
+check("the controls debounce is a one-shot of Model.CONTROLS_DEBOUNCE_MS",
+      re.search(r"^\s*repeat:\s*false\s*$", control_timer, re.M) is not None
+      and "interval: Model.CONTROLS_DEBOUNCE_MS" in control_timer and "running:" not in control_timer
+      and "triggeredOnStart" not in control_timer, control_timer[:200])
+check("the controls debounce is (re)started only by moveControl, a user's move",
+      re.findall(r"controlTimer\.(start|restart)\(\)", daemon) == ["restart"]
+      and "controlTimer.restart()" in block(daemon, "function moveControl"))
+check("the panel moves a control only through the Daemon, by a name of Model.CONTROL_NAMES",
+      re.findall(r"Daemon\.(?:moveControl|commitControl)\(([^,]*),", panel)
+      == ["name", "controlRow.modelData", "controlRow.modelData"]
+      and "var name = Model.CONTROL_NAMES[index]" in block(panel, "function nudgeControl"),
+      str(re.findall(r"Daemon\.(?:moveControl|commitControl)\(([^,]*),", panel)))
+check("the panel resets the controls only from resetControls",
+      panel.count("Daemon.resetControls()") == 1 and "Daemon.resetControls()" in block(panel, "function resetControls"))
+# The delegate's block, and the Repeater's own lines before it.
+control_rows = block(panel, "id: controlRepeater")
+rows_at = panel.find("id: controlRepeater")
+rows_head = panel[rows_at:panel.find("delegate:", rows_at)] if rows_at >= 0 else ""
+check("the slider rows have the constant model Model.CONTROL_NAMES",
+      re.search(r"^\s*model:\s*Model\.CONTROL_NAMES\s*$", rows_head, re.M) is not None, rows_head[:200])
+check("the sliders are the shell's PanelSlider, integer, only in those rows",
+      len(re.findall(r"\bPanelSlider\s*\{", panel)) == 1 and "PanelSlider {" in control_rows
+      and re.search(r"^\s*integer:\s*true\s*$", control_rows, re.M) is not None)
+check("a held slider keeps the Flickable from taking the drag",
+      "interactive: contentHeight > height && root.slidersHeld === 0" in panel)
+check("the Camera image section is drawn only from Model.controlsSection",
+      "readonly property var controlsView: Model.controlsSection(record)" in panel
+      and re.search(r'objectName: "controlsBlock"[^}]*visible: root\.controlsView\.visible', panel) is not None)
+check("the controls list is capped before it is walked",
+      "var n = Math.min(src.length, CONTROLS_CAP)" in block(model, "function controlList"))
 
 # ---- every Process is in a singleton -----------------------------------------
 for path, src in sources.items():
@@ -295,12 +391,33 @@ for path, src in everything.items():
 check("preview holders are registered only by the widget, on open/close",
       re.findall(r"Preview\.(hold|release)\(([^)]*)\)", "\n".join(s for p, s in sources.items() if p.parent == PLUGIN))
       == [("hold", "root"), ("release", "root"), ("release", "root")])
-check("preview preferences are requested only by togglePreview and chooseFps",
+check("panel preferences are requested only by togglePreview, chooseFps and chooseTab",
       re.findall(r"root\.settingsRequested\(([^)]*\))", panel)
-      == ["{ previewEnabled: !Preview.switchOn })", "{ previewFps: option.value })"]
-      and "root.settingsRequested(" not in panel.replace(block(panel, "function togglePreview"), "").replace(block(panel, "function chooseFps"), ""),
+      == ["{ previewEnabled: !Preview.switchOn })", "{ previewFps: option.value })", "{ panelTab: value })"]
+      and "root.settingsRequested(" not in panel.replace(block(panel, "function togglePreview"), "")
+      .replace(block(panel, "function chooseFps"), "").replace(block(panel, "function chooseTab"), ""),
       str(re.findall(r"root\.settingsRequested\(([^)]*\))", panel)))
-bar_src = sources[PLUGIN / "BarWidget.qml"]
+check("chooseTab writes only a word of Model.PANEL_TABS",
+      "var value = Model.PANEL_TABS[index]" in block(panel, "function chooseTab")
+      and "if (value === undefined || !root.available) return false" in block(panel, "function chooseTab"))
+check("settingsEntry writes panelTab only as a word of PANEL_TABS",
+      "if (PANEL_TABS.indexOf(values.panelTab) < 0) return null" in block(model, "function settingsEntry"))
+check("a stored tab is read only through Model.panelTabValue",
+      re.search(r'function panelTabValue\(value\)\s*\{\s*return typeof value === "string" && PANEL_TABS\.indexOf\(value\) >= 0 \? value : PANEL_TAB_DEFAULT\s*\}', model) is not None
+      and 'readonly property string storedTab: Model.panelTabValue(Model.settingValue(settings, "panelTab"))' in bar_src
+      and "var next = Model.panelTabValue(value)" in block(panel, "function showTab")
+      and re.findall(r"root\.tab = ([^\n]*)", panel) == ["next"])
+for word, name in (("effect", "effectTab"), ("camera", "cameraTab"), ("status", "statusTab")):
+    check(f"the {word} tab is drawn only while it is the tab shown",
+          re.search(r'objectName: "' + name + r'"[^}]*visible: root\.tab === "' + word + r'"', panel) is not None)
+check("the right click toggles through Model.rightClickAction; other clicks open and close the panel",
+      re.search(r"function press\(buttonCode\)\s*\{\s*if \(buttonCode === Qt\.RightButton\) root\.toggleCamera\(\)\s*else root\.toggle\(\)\s*\}", bar_src) is not None
+      and "var action = Model.rightClickAction(root.record, Daemon.toggleBusy)" in block(bar_src, "function toggleCamera")
+      and "Model.rightClickAction(record, toggleBusy) !== \"toggle\"" in block(daemon, "function toggleEnabled")
+      and "readonly property bool toggleBusy: Model.toggleBlocked(runningIntent, pendingIntents)" in daemon
+      and "if (!root.available || Daemon.toggleBusy) return false" in block(panel, "function toggleSwitch")
+      and re.search(r'objectName: "enableSwitch"[^}]*busy: Daemon\.toggleBusy', panel) is not None
+      and "leftClickAction" not in model)
 check("settings are written only through Model.settingsEntry, by persistSettings",
       bar_src.count("updateEntryInline(") == 1 and "var entry = Model.settingsEntry(root.moduleName, root.settings, values)"
       in block(bar_src, "function persistSettings") and "updateEntryInline" in block(bar_src, "function persistSettings"))

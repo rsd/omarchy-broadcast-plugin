@@ -35,6 +35,8 @@ var ID_CAP = 96
 var USB_CAP = 16
 var ERROR_CAP = 512
 var MODE_CAP = 64
+// The PipeWire output's state word (docs/cli-json.md bounds it to 32 bytes).
+var PIPEWIRE_CAP = 32
 var EFFECT_CAP = 32
 // The background image path, display only; it is never sent back as an
 // argument. The producer clips it to 256 bytes and keeps the end of the path
@@ -236,6 +238,10 @@ function emptyRecord(link, linkText) {
     // lease (interface revision 5) is in `consumers` but in neither of these.
     loopbackConsumers: -1,
     pipewireConsumers: -1,
+    // Preview leases (interface revision 5), in `consumers` too; -1 unknown.
+    previewConsumers: -1,
+    // The PipeWire output's state word, display copy; "" when not reported.
+    pipewireOutput: "",
     outputMode: "",
     effect: "",
     effectKey: "",
@@ -251,7 +257,20 @@ function emptyRecord(link, linkText) {
     camerasTotal: 0,
     camerasTruncated: false,
     camerasCapped: false,
-    stats: null
+    stats: null,
+    // The camera image controls (snapshot `camera_controls`, `controls`
+    // lines): "absent" when the snapshot has no such field (a CLI that
+    // predates them), "null" when it is null or not an object (a daemon
+    // below CONTROLS_REVISION), "object" when it was reported.
+    controlsField: "absent",
+    // The camera the controls belong to, display copy only (never an argv).
+    controlsCamera: "",
+    // The same id unsanitised (see rawId), for comparison only: what tells
+    // one camera's controls from another's, and binds a control write to the
+    // camera its slider showed.
+    controlsCameraId: "",
+    // Validated entries (see controlList), at most CONTROL_NAMES.length.
+    controls: []
   }
 }
 
@@ -270,7 +289,7 @@ function linked(record) {
 // The daemon can be shown and controlled: linked, and in a state this plugin
 // knows. An unknown state string (only an off-contract producer sends one; a
 // new state would bump the schema) is unavailable everywhere: the icon, the
-// controls, the left click and the panel all treat it so.
+// controls, the right click and the panel all treat it so.
 function available(record) {
   return linked(record) && STATES.indexOf(record.state) >= 0
 }
@@ -289,6 +308,8 @@ function applyScalars(r, m) {
   r.consumers = count(m.consumers)
   r.loopbackConsumers = count(m.loopback_consumers)
   r.pipewireConsumers = count(m.pipewire_consumers)
+  r.previewConsumers = count(m.preview_consumers)
+  r.pipewireOutput = sanitize(m.pipewire_output, PIPEWIRE_CAP)
   r.outputMode = sanitize(m.output_mode, MODE_CAP)
   r.effect = sanitize(m.effect, EFFECT_CAP)
   r.effectKey = effectKey(m.effect)
@@ -392,7 +413,7 @@ function parseLine(text) {
 
 // Apply one raw line to a record. Returns { record, outcome }; `record` is the
 // same object when nothing changed. Outcomes: snapshot, state, cameras,
-// stats, error, ignored (an unknown type, or a line that cannot apply in the
+// stats, controls, error, ignored (an unknown type, or a line that cannot apply in the
 // current link state), dropped, invalid, unsupported.
 function reduce(record, text) {
   var base = record || emptyRecord("connecting")
@@ -416,6 +437,7 @@ function applyMessage(record, m) {
     r = emptyRecord("ok")
     applyScalars(r, m)
     applyCameras(r, m)
+    applyCameraControls(r, m.camera_controls)
     return { record: r, outcome: "snapshot" }
   case "state":
     // Unavailable until the next snapshot (docs/cli-json.md, "Writing a client").
@@ -439,6 +461,12 @@ function applyMessage(record, m) {
       gpuPercent: statNumber(m.gpu_percent)
     }
     return { record: r, outcome: "stats" }
+  case "controls":
+    // Replaces the controls whole; only a CLI that knows them prints one.
+    if (!linked(record)) return { record: record, outcome: "ignored" }
+    r = copyRecord(record)
+    applyCameraControls(r, { camera: m.camera, controls: m.controls })
+    return { record: r, outcome: "controls" }
   case "error":
     // An unknown code is treated like dbus-error, as the contract asks.
     r = emptyRecord(m.code === "daemon-not-running" ? "not-running" : "unreachable",
@@ -867,7 +895,7 @@ function enableArgv(cli, on) {
   return cliUsable(cli) ? [cli, on ? "on" : "off"] : null
 }
 
-// Left click: flips the persisted switch, only when the daemon's state is
+// Right click: flips the persisted switch, only when the daemon's state is
 // known. Privacy fails closed: an `off` the user could not see is never
 // flipped, and `on` would D-Bus-activate a stopped daemon.
 function toggleArgv(cli, record) {
@@ -904,10 +932,10 @@ function denoiseArgv(cli, on) {
   return [cli, "denoise", on ? DENOISE_WORDS.on : DENOISE_WORDS.off]
 }
 
-// A control request is kept as an intent, { verb, on, id, effect }, and turned into an
-// argv when it runs: with the CLI path and the availability of that moment,
+// A control request is kept as an intent, { verb, on, id, effect, name, value },
+// and turned into an argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera`/`effect`/`denoise` would D-Bus-activate it) or
+// gone meanwhile (`on`/`off`/`camera`/`effect`/`denoise`/`controls` would D-Bus-activate it) or
 // with a CLI path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
@@ -917,17 +945,28 @@ function intentArgv(intent, cli, record) {
   case "next": return canNext(record) ? nextArgv(cli) : null
   case "effect": return effectSelectable(record, intent.effect) ? effectArgv(cli, intent.effect) : null
   case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null
+  case "control": return controlIntentBound(intent, record) ? controlIntentArgv(cli, record, intent.name, intent.value) : null
+  case "reset-controls": return controlsSupported(record) && controlIntentBound(intent, record) ? resetControlsArgv(cli) : null
   default: return null
   }
 }
 
-// Left click on the bar icon: "toggle", "open-panel" (unavailable: never
-// flip a state the user cannot see) or "ignore" (a command is in flight or
-// queued: its result has not arrived, so the target of a toggle is unknown;
-// the panel switch follows the same rule through its `busy`).
-function leftClickAction(record, busy) {
+// Right click on the bar icon: "toggle", "open-panel" (unavailable: never
+// flip a state the user cannot see) or "ignore" (`busy`: a command other
+// than a camera image write is in flight or queued, see toggleBlocked; its
+// result has not arrived, so the target of a toggle is unknown; the panel
+// switch follows the same rule through its `busy`). Any other click opens
+// and closes the panel.
+function rightClickAction(record, busy) {
   if (!available(record)) return "open-panel"
   return busy === true ? "ignore" : "toggle"
+}
+
+// What the bar icon's clicks do, for its accessible description: constants
+// only, worded for the state the right click would act on.
+function barClickHelp(record) {
+  if (!available(record)) return "Click or right click: open the panel."
+  return "Click: open the panel. Right click: " + (record.enabled ? "turn the camera off." : "turn the camera on.")
 }
 
 // The watch runs only while it has readers, a CLI is known and no respawn
@@ -1099,9 +1138,9 @@ function previewUnsaved(current, stored) {
 }
 
 // The layout entry to write for a user's change: { id, ...the settings as the
-// bar gave them, ...values }. Only previewEnabled (a boolean) and previewFps
-// (15 or 30) may be written; anything else, or nothing to write, is null.
-// The settings given are not modified.
+// bar gave them, ...values }. Only previewEnabled (a boolean), previewFps
+// (15 or 30) and panelTab (a word of PANEL_TABS) may be written; anything
+// else, or nothing to write, is null. The settings given are not modified.
 function settingsEntry(moduleName, settings, values) {
   if (typeof moduleName !== "string" || moduleName === "" || !isPlainObject(values)) return null
   var entry = { id: moduleName }
@@ -1120,6 +1159,11 @@ function settingsEntry(moduleName, settings, values) {
   if (values.previewFps !== undefined) {
     if (PREVIEW_FPS_CHOICES.indexOf(values.previewFps) < 0) return null
     entry.previewFps = values.previewFps
+    wrote = true
+  }
+  if (values.panelTab !== undefined) {
+    if (PANEL_TABS.indexOf(values.panelTab) < 0) return null
+    entry.panelTab = values.panelTab
     wrote = true
   }
   return wrote ? entry : null
@@ -1255,31 +1299,469 @@ function fpsOptions(fps) {
   return out
 }
 
+// ---------------------------------------------------------------- camera image
+
+// The camera's own image controls (UVC brightness, contrast, saturation,
+// sharpness), as the daemon reports them (docs/cli-json.md: the snapshot's
+// `camera_controls`, and a `controls` line on every change). The daemon keeps
+// each camera's values and applies them at every open; a change applies live
+// while the daemon has the camera open (state `starting` or `active`) and is
+// stored for the next open otherwise.
+
+// The daemon interface revision that added the controls (obc-ipc
+// INTERFACE_REVISION 6).
+var CONTROLS_REVISION = 6
+// The controls the panel offers, in panel order: the only names ever passed
+// to `omarchy-broadcast controls set`. The daemon may report others (its
+// allowlist also has backlight_compensation); they are not shown.
+var CONTROL_NAMES = ["brightness", "contrast", "saturation", "sharpness"]
+var CONTROL_LABELS = { brightness: "Brightness", contrast: "Contrast", saturation: "Saturation", sharpness: "Sharpness" }
+// Entries of one list ever looked at; the daemon reports at most five.
+var CONTROLS_CAP = 16
+// V4L2 control values are signed 32-bit integers.
+var CONTROL_INT_MIN = -2147483648
+var CONTROL_INT_MAX = 2147483647
+// A slider writes this long after its last move, and at once on release.
+var CONTROLS_DEBOUNCE_MS = 150
+// Commands waiting behind a running one (see enqueueIntent): one other ask,
+// one per control, one reset; the cap is a backstop.
+var INTENT_QUEUE_CAP = 8
+var CONTROLS_TITLE = "CAMERA IMAGE"
+var CONTROLS_RESET_LABEL = "Reset to defaults"
+var CONTROLS_RESET_TOOLTIP = "Set the controls back to the camera's defaults and forget the stored values"
+var CONTROLS_IDLE_TEXT = "The camera is not in use: changes are saved and apply when an app next uses it."
+var CONTROLS_LIVE_TEXT = "Changes apply live."
+// The states in which the daemon has the camera open and writes a control
+// to it at once (docs/cli-json.md, "Where a change applies").
+var CONTROLS_LIVE_STATES = ["starting", "active"]
+var CONTROLS_EMPTY_TEXT = "This camera has no brightness, contrast, saturation or sharpness control."
+// Said instead of the sliders: the CLI predates the controls (its snapshot
+// has no camera_controls field), or the CLI knows them but the running daemon
+// does not (null, or an interface revision below CONTROLS_REVISION).
+var CLI_NO_CONTROLS = "The omarchy-broadcast CLI needs updating for the camera image controls (0.19 or newer)."
+var DAEMON_NO_CONTROLS = "The daemon needs updating for the camera image controls (omarchy-broadcastd 0.19 or newer)."
+
+// A control's number: an integer in the V4L2 range, else null.
+function controlInt(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= CONTROL_INT_MIN && value <= CONTROL_INT_MAX ? value : null
+}
+
+// One entry -> { name, label, min, max, step, defaultValue, value, stored },
+// or null: a name of CONTROL_NAMES, integers for every number, min <= max,
+// step >= 1, the default and the value within [min, max].
+function controlEntry(c) {
+  if (!isPlainObject(c) || typeof c.name !== "string" || CONTROL_NAMES.indexOf(c.name) < 0) return null
+  var min = controlInt(c.min)
+  var max = controlInt(c.max)
+  var step = controlInt(c.step)
+  var def = controlInt(c["default"])
+  var value = controlInt(c.value)
+  if (min === null || max === null || step === null || def === null || value === null) return null
+  if (min > max || step < 1) return null
+  if (def < min || def > max || value < min || value > max) return null
+  return { name: c.name, label: CONTROL_LABELS[c.name], min: min, max: max, step: step,
+           defaultValue: def, value: value, stored: c.stored === true }
+}
+
+// Reads at most CONTROLS_CAP entries of whatever arrived (the traversal is
+// bounded, not just what is kept); a repeated name keeps its first entry.
+// The daemon's order is kept.
+function controlList(value) {
+  var src = Array.isArray(value) ? value : []
+  var n = Math.min(src.length, CONTROLS_CAP)
+  var out = []
+  var seen = {}
+  for (var i = 0; i < n; i++) {
+    var e = controlEntry(src[i])
+    if (!e || seen[e.name] === true) continue
+    seen[e.name] = true
+    out.push(e)
+  }
+  return out
+}
+
+// The snapshot's `camera_controls` (undefined: the field is absent), or a
+// `controls` line's { camera, controls }.
+function applyCameraControls(r, value) {
+  if (value === undefined) {
+    r.controlsField = "absent"
+    r.controlsCamera = ""
+    r.controlsCameraId = ""
+    r.controls = []
+  } else if (!isPlainObject(value)) {
+    r.controlsField = "null"
+    r.controlsCamera = ""
+    r.controlsCameraId = ""
+    r.controls = []
+  } else {
+    r.controlsField = "object"
+    r.controlsCamera = sanitize(value.camera, ID_CAP)
+    r.controlsCameraId = rawId(value.camera)
+    r.controls = controlList(value.controls)
+  }
+}
+
+// Whether the controls can be read and set: an available daemon whose
+// interface revision is at least CONTROLS_REVISION, through a CLI that
+// reports them (the field present as an object). An unknown revision counts
+// as no.
+function controlsSupported(record) {
+  return available(record) && record.controlsField === "object"
+    && typeof record.interfaceRevision === "number" && record.interfaceRevision >= CONTROLS_REVISION
+}
+
+// Why the controls cannot be set while the daemon is available: the CLI
+// line, or the daemon line once the CLI reports the field. "" otherwise.
+function controlsMissingText(record) {
+  if (!available(record) || controlsSupported(record)) return ""
+  return record.controlsField === "absent" ? CLI_NO_CONTROLS : DAEMON_NO_CONTROLS
+}
+
+// A control of the record by name, or null.
+function findControl(record, name) {
+  var list = record && Array.isArray(record.controls) ? record.controls : []
+  for (var i = 0; i < list.length && i < CONTROLS_CAP; i++) if (list[i].name === name) return list[i]
+  return null
+}
+
+// Whether the daemon has the camera open, so a control it is given is
+// written to the camera at once: `starting` as well as `active`.
+function controlsLive(record) {
+  return available(record) && CONTROLS_LIVE_STATES.indexOf(record.state) >= 0
+}
+
+// The panel's section: { visible, hint, note, controls, reset }.
+// `controls` are the sliders drawn (the record's, in CONTROL_NAMES order);
+// `hint` replaces them when the CLI or the daemon predates them, or the
+// camera has none; `note` says which case holds: a change applies live, or
+// waits for the next open.
+function controlsSection(record) {
+  if (!available(record)) return { visible: false, hint: "", note: "", controls: [], reset: false }
+  if (!controlsSupported(record))
+    return { visible: true, hint: controlsMissingText(record), note: "", controls: [], reset: false }
+  var list = []
+  for (var i = 0; i < CONTROL_NAMES.length; i++) {
+    var c = findControl(record, CONTROL_NAMES[i])
+    if (c) list.push(c)
+  }
+  if (list.length === 0) return { visible: true, hint: CONTROLS_EMPTY_TEXT, note: "", controls: [], reset: false }
+  return { visible: true, hint: "", note: controlsLive(record) ? CONTROLS_LIVE_TEXT : CONTROLS_IDLE_TEXT,
+           controls: list, reset: true }
+}
+
+// A section's control by name (what a slider row draws), or null.
+function sectionControl(section, name) {
+  var list = section && Array.isArray(section.controls) ? section.controls : []
+  for (var i = 0; i < list.length && i < CONTROL_NAMES.length; i++) if (list[i].name === name) return list[i]
+  return null
+}
+
+// A value on the control's grid: min + k * step, rounded to the nearest k
+// and kept within [min, max]. null for a value that is not a finite number
+// within [min, max].
+function snapControl(control, value) {
+  if (!control || typeof value !== "number" || !isFinite(value)) return null
+  if (value < control.min || value > control.max) return null
+  var kmax = Math.floor((control.max - control.min) / control.step)
+  var k = Math.max(0, Math.min(kmax, Math.round((value - control.min) / control.step)))
+  return control.min + k * control.step
+}
+
+// As snapControl, for what a slider or a key produces: clamped into range
+// first. null for a value that is not a finite number.
+function clampControl(control, value) {
+  if (!control || typeof value !== "number" || !isFinite(value)) return null
+  return snapControl(control, Math.max(control.min, Math.min(control.max, value)))
+}
+
+// One Left/Right press: about a twentieth of the range, on the step grid,
+// at least one step.
+function controlKeyStep(control) {
+  if (!control) return 0
+  return Math.max(control.step, Math.round((control.max - control.min) / 20 / control.step) * control.step)
+}
+
+function controlNudge(control, current, direction) {
+  if (!control || typeof current !== "number" || !isFinite(current) || !(direction === 1 || direction === -1)) return null
+  return clampControl(control, current + direction * controlKeyStep(control))
+}
+
+// The value a slider shows: the user's draft while one is unconfirmed (see
+// Daemon.controlDrafts), else what the daemon reports.
+function shownControlValue(control, drafts) {
+  if (!control) return 0
+  var d = isPlainObject(drafts) ? drafts[control.name] : undefined
+  var v = clampControl(control, d)
+  return v === null ? control.value : v
+}
+
+// The drafts still unconfirmed under `record`: a draft goes once the daemon
+// reports that very value, or once its control is no longer offered.
+// Only names of CONTROL_NAMES are looked at.
+function settleDrafts(drafts, record) {
+  var out = {}
+  if (!isPlainObject(drafts)) return out
+  var supported = controlsSupported(record)
+  for (var i = 0; i < CONTROL_NAMES.length; i++) {
+    var name = CONTROL_NAMES[i]
+    if (drafts[name] === undefined) continue
+    var c = supported ? findControl(record, name) : null
+    if (c && c.value !== drafts[name]) out[name] = drafts[name]
+  }
+  return out
+}
+
+// A copy of `map` with `name` set to `value` (undefined: removed).
+function withKey(map, name, value) {
+  var out = {}
+  if (isPlainObject(map)) for (var i = 0; i < CONTROL_NAMES.length; i++) {
+    var k = CONTROL_NAMES[i]
+    if (map[k] !== undefined) out[k] = map[k]
+  }
+  if (CONTROL_NAMES.indexOf(name) < 0) return out
+  if (value === undefined) delete out[name]
+  else out[name] = value
+  return out
+}
+
+// Only a name of CONTROL_NAMES and a decimal integer are ever passed, each
+// as its own argv element.
+function controlArgv(cli, name, value) {
+  if (!cliUsable(cli) || CONTROL_NAMES.indexOf(name) < 0 || controlInt(value) === null) return null
+  return [cli, "controls", "set", name, String(value)]
+}
+
+function resetControlsArgv(cli) {
+  return cliUsable(cli) ? [cli, "controls", "reset"] : null
+}
+
+// The argv for a control intent under `record`: the control must be offered
+// now, and the value is put on its grid; null otherwise.
+function controlIntentArgv(cli, record, name, value) {
+  if (!controlsSupported(record) || CONTROL_NAMES.indexOf(name) < 0) return null
+  var v = snapControl(findControl(record, name), value)
+  return v === null ? null : controlArgv(cli, name, v)
+}
+
+// The command queue behind a running command, as a pure step: `intent`
+// added to `queue` (a new array; neither is modified). A queued control for
+// the same name is replaced by the newer one, and a reset replaces every
+// queued control and reset (it supersedes them), so a slider drag never
+// queues more than one command per control. Any other ask replaces the
+// other ask queued before it (the latest wins, as before the controls). The
+// new intent goes last, so the order of what the user did is kept, except
+// an on/off ask: it goes first, so turning the camera off never waits
+// behind slider writes.
+function isControlIntent(intent) {
+  return isPlainObject(intent) && (intent.verb === "control" || intent.verb === "reset-controls")
+}
+
+function enqueueIntent(queue, intent) {
+  var q = Array.isArray(queue) ? queue.slice(0, INTENT_QUEUE_CAP) : []
+  if (!isPlainObject(intent)) return q
+  var out = []
+  for (var i = 0; i < q.length; i++) {
+    var p = q[i]
+    if (!isPlainObject(p)) continue
+    if (intent.verb === "control") {
+      if (p.verb === "control" && p.name === intent.name) continue
+    } else if (intent.verb === "reset-controls") {
+      if (isControlIntent(p)) continue
+    } else if (!isControlIntent(p)) {
+      continue
+    }
+    out.push(p)
+  }
+  if (intent.verb === "enable") out.unshift(intent)
+  else out.push(intent)
+  return out.length > INTENT_QUEUE_CAP ? out.slice(out.length - INTENT_QUEUE_CAP) : out
+}
+
+// A control or reset intent runs only against the camera whose controls the
+// panel showed when it was made (`camera`, the record's controlsCameraId):
+// the CLI writes to whatever camera is active when it runs.
+function controlIntentBound(intent, record) {
+  return isPlainObject(intent) && isPlainObject(record) && typeof intent.camera === "string"
+    && intent.camera === record.controlsCameraId
+}
+
+// The queue without its control and reset intents (a new array): what is
+// left once the controls belong to another camera.
+function dropControlIntents(queue) {
+  var q = Array.isArray(queue) ? queue.slice(0, INTENT_QUEUE_CAP) : []
+  return q.filter(function(p) { return isPlainObject(p) && !isControlIntent(p) })
+}
+
+// Whether an on/off toggle must wait: a command other than a camera image
+// write is running or queued, so its result (and with it the target of the
+// toggle) has not arrived. Slider writes never hold the switch.
+function toggleBlocked(running, queue) {
+  if (isPlainObject(running) && !isControlIntent(running)) return true
+  var q = Array.isArray(queue) ? queue : []
+  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
+    if (isPlainObject(q[i]) && !isControlIntent(q[i])) return true
+  return false
+}
+
+// Which controls line belongs to which write. The daemon prints one
+// `controls` line after each set or reset that changes something, in the
+// order of the writes, but a line can reach the watch after the next write
+// has started. A command armed when `lines` lines have been read, while the
+// lines of finished writes are due up to `due`, owns the line numbered
+// mark + 1 (mark = controlLineMark(lines, due)); an earlier write's late
+// line never counts as its own.
+function controlLineMark(lines, due) {
+  var l = typeof lines === "number" && isFinite(lines) ? lines : 0
+  var d = typeof due === "number" && isFinite(due) ? due : 0
+  return Math.max(l, d)
+}
+
+// A control write is over and its draft is still the value it wrote, with
+// no newer write for that control queued: "drop" the draft now (it failed,
+// or its own controls line has been read: the slider shows what the camera
+// took), or "settle" it on its own line, still to come.
+function controlWriteEnd(ok, lines, mark) {
+  if (ok !== true) return "drop"
+  return typeof lines === "number" && typeof mark === "number" && lines > mark ? "drop" : "settle"
+}
+
+// After a controls line: `settling` maps a name to { value, line }, a write
+// that ended well and the number of the line it owns. A draft still at that
+// value goes once `lines` reaches that line, whatever the daemon reported;
+// an entry whose draft has moved on (or gone) is dropped. Returns
+// { drafts, settling }, new objects.
+function settleWritten(drafts, settling, lines) {
+  var d = withKey(drafts, "", undefined)
+  var out = {}
+  var s = isPlainObject(settling) ? settling : {}
+  for (var i = 0; i < CONTROL_NAMES.length; i++) {
+    var name = CONTROL_NAMES[i]
+    var entry = s[name]
+    if (!isPlainObject(entry) || d[name] === undefined || d[name] !== entry.value) continue
+    if (typeof lines === "number" && lines >= entry.line) delete d[name]
+    else out[name] = entry
+  }
+  return { drafts: d, settling: out }
+}
+
+// Whether a queued intent sets control `name`.
+function queuedControl(queue, name) {
+  var q = Array.isArray(queue) ? queue : []
+  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
+    if (isPlainObject(q[i]) && q[i].verb === "control" && q[i].name === name) return true
+  return false
+}
+
+// ---------------------------------------------------------------- panel tabs
+
+// The panel's three tabs, in order, under the preview: the words are the
+// stored `panelTab` setting's values (manifest schema `options`, same order),
+// and the only ones ever written. The first is the default.
+var PANEL_TABS = ["effect", "camera", "status"]
+var PANEL_TAB_DEFAULT = "effect"
+var PANEL_TAB_LABELS = { effect: "Effect", camera: "Camera", status: "Status" }
+var PANEL_TAB_DESCRIPTIONS = {
+  effect: "Background effect and noise removal",
+  camera: "Camera choice and camera image controls",
+  status: "State, consumers, outputs and live figures"
+}
+
+// The stored tab, read back: a word of PANEL_TABS exactly, else the default.
+// Nothing is ever written back from here.
+function panelTabValue(value) {
+  return typeof value === "string" && PANEL_TABS.indexOf(value) >= 0 ? value : PANEL_TAB_DEFAULT
+}
+
+// The tab row: { value, label, description, selected }, constants only.
+function panelTabOptions(tab) {
+  var current = panelTabValue(tab)
+  var out = []
+  for (var i = 0; i < PANEL_TABS.length; i++) {
+    var v = PANEL_TABS[i]
+    out.push({ value: v, label: PANEL_TAB_LABELS[v], description: PANEL_TAB_DESCRIPTIONS[v], selected: v === current })
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- status tab
+
+var PIPEWIRE_OFF = "off"
+
+// The consumers split by kind, as one phrase: Apps (apps holding the
+// virtual camera device), PipeWire links and Preview leases. Shown only while
+// the PipeWire output is reported and not "off" (docs/cli-json.md: a client
+// shows the split only then); "" otherwise, or while any part is unknown.
+function consumersByKind(record) {
+  if (!available(record) || record.pipewireOutput === "" || record.pipewireOutput === PIPEWIRE_OFF) return ""
+  if (record.loopbackConsumers < 0 || record.pipewireConsumers < 0) return ""
+  var parts = ["Apps " + record.loopbackConsumers, "PipeWire " + record.pipewireConsumers]
+  if (record.previewConsumers >= 0) parts.push("Preview " + record.previewConsumers)
+  return parts.join(" \u00b7 ")
+}
+
+// The Status tab's rows: { label, value }, every value a display copy. The
+// daemon reports its interface revision, not a version number, so that is
+// what is shown.
+function statusRows(record) {
+  if (!available(record)) return []
+  var camera = activeCameraLabel(record)
+  var rows = [
+    { label: "State", value: record.state },
+    { label: "Camera", value: camera !== "" ? camera : "none" },
+    { label: "Consumers", value: record.consumers >= 0 ? String(record.consumers) : UNKNOWN }
+  ]
+  var split = consumersByKind(record)
+  if (split !== "") rows.push({ label: "Used by", value: split })
+  rows.push({ label: "Output", value: record.outputMode !== "" ? record.outputMode : UNKNOWN })
+  rows.push({ label: "PipeWire", value: record.pipewireOutput !== "" ? record.pipewireOutput : UNKNOWN })
+  rows.push({ label: "D-Bus API",
+              value: record.interfaceRevision >= 0 ? "revision " + record.interfaceRevision : UNKNOWN })
+  return rows
+}
+
 // ---------------------------------------------------------------- keyboard cursor
 
-// The panel's keyboard stops, top to bottom: the on/off switch, the Preview
-// switch and the frame-rate choices (one stop for the row, as the effect row;
-// only when `previewControls`, see previewControlsShown), the effect
-// choices (one stop for the row; Left/Right walk its choices, as in the
-// shell's button groups), the noise removal switch, one per rendered camera
-// row (`cameraCount` is the count the panel draws, so the cursor and the rows
-// always agree), then Next camera when it is shown. Nothing is a stop while
-// the daemon is unavailable: no control is drawn. The effect row is no stop
-// either when the CLI or the daemon predates effects (none of its choices can
-// be requested), nor the noise removal switch when the daemon does not
-// report it (it is not drawn).
-function cursorStops(record, cameraCount, previewControls) {
+// The panel's keyboard stops, top to bottom, as the panel lays them out: the
+// on/off switch, the Preview switch and the frame-rate choices (one stop for
+// the row; only when `previewControls`, see previewControlsShown), the tab
+// row (one stop; Left/Right change the tab), then only the stops of the tab
+// shown (`tab`, read through panelTabValue):
+//   effect  the effect choices (one stop for the row; Left/Right walk its
+//           choices, as in the shell's button groups) and the noise removal
+//           switch;
+//   camera  one per rendered camera row (`cameraCount` is the count the
+//           panel draws, so the cursor and the rows always agree), Next
+//           camera when it is shown, the camera image sliders, one stop each
+//           (index: the position in CONTROL_NAMES), and Reset to defaults:
+//           exactly the ones controlsSection draws, which is what the panel
+//           draws them from;
+//   status  nothing (it only shows figures).
+// Nothing is a stop while the daemon is unavailable: no control is drawn. The
+// effect row is no stop either when the CLI or the daemon predates effects
+// (none of its choices can be requested), nor the noise removal switch when
+// the daemon does not report it (it is not drawn).
+function cursorStops(record, cameraCount, previewControls, tab) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (previewControls === true) {
     stops.push({ kind: "preview", index: -1 })
     stops.push({ kind: "fps", index: -1 })
   }
-  if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
-  if (denoiseSupported(record)) stops.push({ kind: "denoise", index: -1 })
-  var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
-  for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
-  if (canNext(record)) stops.push({ kind: "next", index: -1 })
+  stops.push({ kind: "tabs", index: -1 })
+  var shown = panelTabValue(tab)
+  if (shown === "effect") {
+    if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
+    if (denoiseSupported(record)) stops.push({ kind: "denoise", index: -1 })
+  } else if (shown === "camera") {
+    var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
+    for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
+    if (canNext(record)) stops.push({ kind: "next", index: -1 })
+    var section = controlsSection(record)
+    for (var c = 0; c < section.controls.length; c++)
+      stops.push({ kind: "control", index: CONTROL_NAMES.indexOf(section.controls[c].name) })
+    if (section.reset) stops.push({ kind: "reset", index: -1 })
+  }
   return stops
 }
 
@@ -1289,9 +1771,14 @@ function clampCursor(index, length) {
   return Math.max(0, Math.min(length - 1, i))
 }
 
+// Rows that are one stop each (cameras, controls) are told apart by index.
+function stopHasIndex(kind) {
+  return kind === "camera" || kind === "control"
+}
+
 function stopIndex(stops, kind, index) {
   for (var i = 0; i < stops.length; i++)
-    if (stops[i].kind === kind && (kind !== "camera" || stops[i].index === index)) return i
+    if (stops[i].kind === kind && (!stopHasIndex(kind) || stops[i].index === index)) return i
   return -1
 }
 

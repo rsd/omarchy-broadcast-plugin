@@ -54,6 +54,10 @@ ShellRoot {
   readonly property string fakeDir: Quickshell.env("OBH_FAKE") || ""
   readonly property string screens: Quickshell.env("OBH_SCREENS") || ""
   readonly property string moduleName: "br.com.dias.omarchy-broadcast"
+  // The card's room on a 1080-pixel screen, as KeyboardPanel computes it
+  // (screen height - bar - gap - margin), less the 4 px of card border this
+  // stub does not draw: "fits at the normal size" means below this.
+  readonly property real card1080: 1080 - Commons.Style.bar.sizeHorizontal - 2 * Commons.Style.gapsOut - 4
 
   PluginBarApi {
     id: barA
@@ -106,8 +110,8 @@ ShellRoot {
 
   FloatingWindow {
     id: window
-    implicitWidth: 520
-    implicitHeight: 900
+    implicitWidth: 620
+    implicitHeight: 1200
     color: Commons.Color.background
 
     Rectangle {
@@ -235,6 +239,7 @@ ShellRoot {
       w.bar = bar
       w.moduleName = shellRoot.moduleName
       w.settings = settings
+      if (w.popup) w.popup.availableCardHeight = shellRoot.card1080
       return w
     }
 
@@ -250,6 +255,28 @@ ShellRoot {
     }
 
     function content(w) { return w && w.popup ? w.popup.loadedContent : null }
+    // Shows a tab of w's panel as a stored value would, without writing
+    // anything (the tab checks below drive the user's paths).
+    function tab(w, id) { var c = content(w); if (c) c.showTab(id) }
+    // Shows tab `id` of w's panel, lets the layout settle, then runs
+    // `checks` (a Column lays out on the next frame, not in the same turn).
+    function tabStep(w, id, label, checks) {
+      step("show the " + id + " tab: " + label, function() { h.tab(w(), id) })
+      wait(250)
+      step(id + " tab: " + label, function() { checks() })
+    }
+    // The open panel shows all of the tab in force without the scroll
+    // fallback, and the card stays below a 1080-pixel screen's room. Only
+    // after the layout settled (see tabStep).
+    function fits(w, label) {
+      var flick = find(w, "panelFlick")
+      check(label + ": no scroll (content " + (flick ? Math.round(flick.contentHeight) : "?") + " in "
+            + (flick ? Math.round(flick.height) : "?") + ")",
+            !!flick && !flick.interactive && flick.contentHeight <= flick.height + 0.5,
+            flick ? flick.contentHeight + " in " + flick.height + ", interactive " + flick.interactive : "no flick")
+      check(label + ": card below the 1080 screen's room (" + w.popup.contentHeight + " < " + Math.round(w.popup.availableCardHeight) + ")",
+            w.popup.contentHeight < w.popup.availableCardHeight, w.popup.contentHeight + " vs " + w.popup.availableCardHeight)
+    }
     // A chip of the preview-rate ButtonGroup (its delegates have no name).
     function fpsChip(w, value) {
       var group = find(w, "fpsChoices")
@@ -585,10 +612,14 @@ ShellRoot {
     h.wait(300)
     h.step("panel idle", function() {
       h.eq("unavailable block hidden", h.find(A(), "unavailableBlock").visible, false)
-      h.eq("cameras block shown", h.find(A(), "camerasBlock").visible, true)
+      h.eq("opens on the Effect tab (the default)", h.content(A()).tab, "effect")
+      h.eq("tab row shown", h.find(A(), "tabRow").visible, true)
+      h.eq("Effect chip selected", h.find(A(), "tab-effect").selected, true)
+      h.eq("Effect tab shown", h.find(A(), "effectTab").visible, true)
+      h.eq("Camera tab hidden", h.find(A(), "cameraTab").visible, false)
+      h.eq("Status tab hidden", h.find(A(), "statusTab").visible, false)
+      h.eq("tab labels", ["effect", "camera", "status"].map(function(t) { return h.find(A(), "tab-" + t).text }).join(","), "Effect,Camera,Status")
       h.eq("camera rows", h.find(A(), "cameraRepeater").count, 3)
-      h.eq("stats hidden while idle", h.find(A(), "statsBlock").visible, false)
-      h.eq("next camera shown", h.find(A(), "nextCameraButton").visible, true)
       h.eq("switch shown", h.find(A(), "enableSwitch").visible, true)
       h.eq("noise removal row shown", h.find(A(), "denoiseRow").visible, true)
       h.eq("noise removal off", h.find(A(), "denoiseToggle").checked, false)
@@ -598,8 +629,22 @@ ShellRoot {
       h.check("active row painted as current", h.row(A(), 0).current && !h.row(A(), 1).current)
       h.eq("no cursor before a key", h.content(A()).cursorActive, false)
       h.check("panel took the keyboard focus", h.catcher(A()) && h.catcher(A()).activeFocus)
+      h.fits(A(), "Effect tab, idle")
     })
     h.grabStep(function() { return A().popup }, "panel-idle.png")
+    h.tabStep(A, "camera", "idle", function() {
+      h.eq("cameras block shown on the Camera tab", h.find(A(), "camerasBlock").visible, true)
+      h.eq("next camera shown", h.find(A(), "nextCameraButton").visible, true)
+      h.eq("noise removal on the Effect tab only", h.find(A(), "denoiseRow").visible, false)
+      h.fits(A(), "Camera tab, idle")
+    })
+    h.tabStep(A, "status", "idle", function() {
+      h.eq("stats hidden while idle", h.find(A(), "statsBlock").visible, false)
+      h.eq("status rows", h.find(A(), "statusRepeater").count, 6)
+      h.fits(A(), "Status tab, idle")
+      h.tab(A(), "effect")
+      h.eq("nothing written by showing a tab", fakeShell.calls.length, 0)
+    })
 
     // camera selection by clicking a row
     h.step("select FHD by its row", function() {
@@ -640,7 +685,15 @@ ShellRoot {
       var c = h.content(A())
       h.eq("stop", c.currentStop.kind, "switch")
       h.eq("switch has the cursor", h.find(A(), "enableSwitch").hasCursor, true)
-      h.eq("stops = switch + effect + noise removal + rendered rows + next", c.stops.length, h.find(A(), "cameraRepeater").count + 4)
+      h.eq("stops = switch + tab row + effect + noise removal (the Effect tab)", c.stops.length, 4)
+      h.key(Qt.Key_Down)
+    })
+    h.step("Down: the tab row, on the tab shown", function() {
+      var c = h.content(A())
+      h.eq("stop", c.currentStop.kind, "tabs")
+      h.eq("tab cursor on Effect", c.tabCursor, 0)
+      h.eq("Effect chip has the cursor", h.find(A(), "tab-effect").hasCursor, true)
+      h.eq("the other chips have none", h.find(A(), "tab-camera").hasCursor || h.find(A(), "tab-status").hasCursor, false)
       h.key(Qt.Key_Down)
     })
     // the effect row: one stop; Left/Right walk its choices
@@ -744,7 +797,41 @@ ShellRoot {
       h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers")
       h.content(A()).setCursor("denoise", -1)
     })
-    h.step("Down from the noise removal switch", function() { h.key(Qt.Key_Down) })
+    h.step("Down from the noise removal switch: the last stop of the tab; Up twice: the tab row", function() {
+      var c = h.content(A())
+      h.key(Qt.Key_Down)
+      h.eq("still on noise removal", c.currentStop.kind, "denoise")
+      h.key("k")
+      h.key("k")
+      h.eq("the tab row", c.currentStop.kind, "tabs")
+      h.eq("on the tab shown", c.tabCursor, 0)
+      h.notes.calls = fakeShell.calls.length
+      h.markLog()
+      h.key(Qt.Key_Right)
+    })
+    h.step("Right on the tab row: the Camera tab at once, remembered", function() {
+      var c = h.content(A())
+      h.eq("tab", c.tab, "camera")
+      h.eq("Camera tab shown", h.find(A(), "cameraTab").visible, true)
+      h.eq("Effect tab hidden", h.find(A(), "effectTab").visible, false)
+      h.eq("Camera chip selected", h.find(A(), "tab-camera").selected, true)
+      h.eq("Effect chip no longer selected", h.find(A(), "tab-effect").selected, false)
+      h.eq("the cursor stays on the tab row", c.currentStop.kind, "tabs")
+      h.eq("Camera chip has the cursor", h.find(A(), "tab-camera").hasCursor, true)
+      h.eq("one write", fakeShell.calls.length, h.notes.calls + 1)
+      h.eq("entry", JSON.stringify(fakeShell.calls[fakeShell.calls.length - 1].entry),
+           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, panelTab: "camera" }))
+      h.eq("both widgets hold the stored tab", A().storedTab + "," + B().storedTab, "camera,camera")
+      h.eq("no command ran", h.newLogArgs().length, 0)
+      h.eq("stops = switch + tab row + rendered rows + next (the Camera tab)", c.stops.length, h.find(A(), "cameraRepeater").count + 3)
+      h.key(Qt.Key_Right)
+      h.key(Qt.Key_Right)
+      h.eq("Right twice: Status, and no further", c.tab, "status")
+      h.key(Qt.Key_Left)
+      h.eq("Left: Camera again", c.tab, "camera")
+      h.eq("a write per change", fakeShell.calls.length, h.notes.calls + 3)
+      h.key(Qt.Key_Down)
+    })
     h.step("Down: first camera row", function() {
       h.eq("row 0 has the cursor", h.row(A(), 0).hasCursor, true)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
@@ -803,19 +890,112 @@ ShellRoot {
     }, function() { return A().opened })
     h.step("reopened: no cursor until a key", function() {
       h.eq("cursor reset", h.content(A()).cursorActive, false)
+      h.eq("reopened on the tab last shown", h.content(A()).tab, "camera")
+    })
+
+    // ---- the tabs: number keys, mouse, hover, persistence, an invalid value
+    h.step("tabs: number keys", function() {
+      var c = h.content(A())
+      h.notes.calls = fakeShell.calls.length
+      h.key("3")
+      h.eq("3: Status", c.tab, "status")
+      h.eq("a number key shows no cursor", c.cursorActive, false)
+      h.key("1")
+      h.eq("1: Effect", c.tab, "effect")
+      h.key("2")
+      h.eq("2: Camera", c.tab, "camera")
+      h.key("4")
+      h.key("0")
+      h.key("9")
+      h.eq("other digits do nothing", c.tab, "camera")
+      h.key("2")
+      h.eq("a write per change, none for the tab shown", fakeShell.calls.length, h.notes.calls + 3)
+    })
+    h.step("tabs: a click on a chip", function() {
+      var chip = h.find(A(), "tab-status")
+      keys.mouseClick(chip, chip.width / 2, chip.height / 2)
+    }, function() { return h.content(A()).tab === "status" })
+    h.step("tabs: hovering moves the cursor, not the tab; Enter shows the tab under it", function() {
+      var c = h.content(A())
+      h.eq("written", JSON.stringify(fakeShell.calls[fakeShell.calls.length - 1].entry.panelTab), JSON.stringify("status"))
+      c.setTabCursor(0)
+      h.eq("Effect chip has the cursor", h.find(A(), "tab-effect").hasCursor, true)
+      h.eq("Status still shown", c.tab, "status")
+      h.eq("Status still selected", h.find(A(), "tab-status").selected, true)
+      h.key(Qt.Key_Return)
+      h.eq("Enter: Effect", c.tab, "effect")
+      c.setCursor("denoise", -1)
+      h.key("2")
+      h.eq("a number key from inside a tab: Camera", c.tab, "camera")
+      h.eq("the cursor left the hidden rows for the tab row", c.currentStop.kind, "tabs")
+      h.eq("stored", A().settings.panelTab, "camera")
+      A().close()
+      h.notes.widgetC = h.makeWidget(barB, JSON.parse(JSON.stringify(A().settings)))
+      h.notes.calls = fakeShell.calls.length
+      h.notes.widgetC.open()
+    }, function() { return h.content(h.notes.widgetC) !== null })
+    h.step("tabs: a new widget with the stored entry opens on its tab", function() {
+      var w = h.notes.widgetC
+      h.eq("tab", h.content(w).tab, "camera")
+      h.eq("Camera tab shown", h.find(w, "cameraTab").visible, true)
+      h.eq("Camera chip selected", h.find(w, "tab-camera").selected, true)
+      h.eq("nothing written on open", fakeShell.calls.length, h.notes.calls)
+      w.close()
+      w.destroy()
+      // stored values that are no tab
+      h.notes.widgetC = h.makeWidget(barB, { cliPath: shellRoot.cli, panelTab: "Camera; $(id)" })
+      h.notes.widgetC.open()
+    }, function() { return h.content(h.notes.widgetC) !== null })
+    h.step("tabs: an invalid stored tab falls back to Effect", function() {
+      var w = h.notes.widgetC
+      h.eq("read as the default", w.storedTab, "effect")
+      h.eq("tab", h.content(w).tab, "effect")
+      h.eq("Effect tab shown", h.find(w, "effectTab").visible, true)
+      w.settings = { cliPath: shellRoot.cli, panelTab: 2 }
+      h.eq("a number reads as the default", h.content(w).tab, "effect")
+      w.settings = { cliPath: shellRoot.cli, panelTab: ["status"] }
+      h.eq("an array reads as the default", h.content(w).tab, "effect")
+      w.settings = { cliPath: shellRoot.cli, panelTab: "status" }
+      h.eq("a valid stored change is followed", h.content(w).tab, "status")
+      h.eq("nothing written back", fakeShell.calls.length, h.notes.calls)
+      w.close()
+      w.destroy()
+      h.notes.widgetC = null
+      // a write the shell refuses: the tab holds for the session
+      fakeShell.refuse = true
+      A().open()
+    }, function() { return A().opened })
+    h.step("tabs: a refused write holds for the session", function() {
+      var c = h.content(A())
+      h.check("chosen", c.chooseTab(2))
+      h.eq("one refused write", fakeShell.refused.length, 1)
+      h.eq("the refused entry", JSON.stringify(fakeShell.refused[0].entry),
+           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, panelTab: "status" }))
+      h.eq("shown", c.tab, "status")
+      h.eq("the settings stay as the bar gave them", A().settings.panelTab, "camera")
+      A().settings = JSON.parse(JSON.stringify(A().settings))
+      h.eq("re-injected stale settings do not undo it", c.tab, "status")
+      h.eq("the preview's note does not claim it", h.find(A(), "previewUnsaved").visible, false)
+      fakeShell.refuse = false
+      fakeShell.refused = []
+      // back to a widget entry without a tab, and no writes on record
+      A().settings = { cliPath: shellRoot.cli }
+      B().settings = { cliPath: shellRoot.cli }
+      fakeShell.calls = []
+      h.eq("a changed stored tab is followed", c.tab, "effect")
       A().close()
     })
 
     // left click: off, then on from the other monitor; a second click while
     // the first runs is ignored
     h.step("slow commands for the double click", function() { h.writeFile("delay", ["0.6"]) }, function() { return h.writerIdle() })
-    h.step("left click turns off; a second one in flight is ignored", function() {
+    h.step("right click turns off; a second one in flight is ignored", function() {
       A().close()
       h.markLog()
-      A().iconButton.triggerPress(Qt.LeftButton)
+      A().iconButton.triggerPress(Qt.RightButton)
       h.check("busy after the first click", S().commandBusy)
-      A().iconButton.triggerPress(Qt.LeftButton)
-      B().iconButton.triggerPress(Qt.LeftButton)
+      A().iconButton.triggerPress(Qt.RightButton)
+      B().iconButton.triggerPress(Qt.RightButton)
     }, function() { return h.newLogArgs().length >= 1 })
     h.wait(900)
     h.step("off argv, once", function() {
@@ -823,7 +1003,8 @@ ShellRoot {
       h.eq("runs", got.length, 1)
       h.eq("argv", JSON.stringify(got[0]), JSON.stringify(["off"]))
       h.eq("no optimistic change", S().record.enabled, true)
-      h.eq("left click does not open the panel", A().opened, false)
+      h.eq("right click does not open the panel", A().opened, false)
+      h.eq("nor on the other monitor", B().opened, false)
       h.removeFile("delay")
       h.feed([stateLine({ state: "off", enabled: false, active_camera: fhdId, active_camera_name: "FHD Camera" })])
     }, function() { return S().record.state === "off" && !S().commandBusy })
@@ -834,14 +1015,34 @@ ShellRoot {
       h.eq("off tooltip", B().iconButton.tooltipText, "Omarchy Broadcast: off")
     })
     h.grabStep(function() { return strip }, "bar-off.png")
-    h.step("left click on the other monitor turns on", function() {
+    h.step("accessible text names the clicks", function() {
+      h.eq("role", A().iconButton.Accessible.role, Accessible.Button)
+      h.eq("name: the tooltip's state", A().iconButton.Accessible.name, "Omarchy Broadcast: off")
+      h.eq("description", A().iconButton.Accessible.description, "Click: open the panel. Right click: turn the camera on.")
+    })
+    h.step("right click on the other monitor turns on", function() {
       h.markLog()
-      B().iconButton.triggerPress(Qt.LeftButton)
+      B().iconButton.triggerPress(Qt.RightButton)
     }, function() { return h.newLogArgs().length >= 1 })
     h.step("on argv", function() {
       h.eq("argv", JSON.stringify(h.newLogArgs()[0]), JSON.stringify(["on"]))
       h.feed([stateLine({ state: "idle", enabled: true, active_camera: fhdId, active_camera_name: "FHD Camera" })])
     }, function() { return S().record.state === "idle" && S().record.enabled })
+    h.step("left click opens and closes the panel, middle click too", function() {
+      h.markLog()
+      A().iconButton.triggerPress(Qt.LeftButton)
+      h.eq("left click opens it", A().opened, true)
+      A().iconButton.triggerPress(Qt.LeftButton)
+      h.eq("a second left click closes it", A().opened, false)
+      A().iconButton.triggerPress(Qt.MiddleButton)
+      h.eq("middle click opens it", A().opened, true)
+      A().iconButton.triggerPress(Qt.MiddleButton)
+      h.eq("and closes it", A().opened, false)
+      h.eq("the other monitor's panel stays closed", B().opened, false)
+      h.eq("description once on", A().iconButton.Accessible.description, "Click: open the panel. Right click: turn the camera off.")
+    })
+    h.wait(400)
+    h.step("the panel clicks run nothing", function() { h.eq("commands run", h.newLogArgs().length, 0) })
 
     // starting, active, stats
     h.step("starting", function() {
@@ -862,6 +1063,8 @@ ShellRoot {
       A().open()
     }, function() { return S().record.state === "active" && S().record.stats !== null })
     h.wait(300)
+    h.step("the Status tab", function() { h.tab(A(), "status") })
+    h.wait(250)
     h.step("active icon and panel", function() {
       h.eq("active glyph", A().iconButton.text, glyphOf("active"))
       h.eq("active accent", A().iconButton.active, true)
@@ -873,6 +1076,8 @@ ShellRoot {
       h.eq("latency", rows[1].value, "41.2 ms")
       h.eq("cpu", rows[2].value, "6.5 %")
       h.eq("gpu -1 is unknown", rows[3].value, "—")
+      h.eq("Status tab shown", h.find(A(), "statusTab").visible, true)
+      h.fits(A(), "Status tab, active with figures")
     })
     h.grabStep(function() { return strip }, "bar-active.png")
     h.grabStep(function() { return A().popup }, "panel-active.png")
@@ -973,10 +1178,13 @@ ShellRoot {
       h.eq("cameras hidden", h.find(A(), "camerasBlock").visible, false)
       h.check("panel says so", h.find(A(), "unavailableTitle").text.indexOf("dancing") !== -1, h.find(A(), "unavailableTitle").text)
       h.eq("no cursor stops", h.content(A()).stops.length, 0)
+      h.eq("no tab row", h.find(A(), "tabRow").visible, false)
+      h.check("no tab chosen while unavailable", !h.content(A()).chooseTab(2))
       A().close()
       h.markLog()
-      A().iconButton.triggerPress(Qt.LeftButton)
-      h.eq("left click opens the panel", A().opened, true)
+      A().iconButton.triggerPress(Qt.RightButton)
+      h.eq("right click opens the panel instead", A().opened, true)
+      h.eq("description", A().iconButton.Accessible.description, "Click or right click: open the panel.")
     })
     h.wait(400)
     h.step("no command for an unknown state", function() {
@@ -1000,8 +1208,8 @@ ShellRoot {
       h.eq("cameras hidden", h.find(A(), "camerasBlock").visible, false)
       A().close()
       h.markLog()
-      A().iconButton.triggerPress(Qt.LeftButton)
-      h.eq("left click opens the panel instead", A().opened, true)
+      A().iconButton.triggerPress(Qt.RightButton)
+      h.eq("right click opens the panel instead", A().opened, true)
       h.feed([stateLine({ state: "idle" })])
     })
     h.wait(500)
@@ -1017,6 +1225,7 @@ ShellRoot {
     // a CLI that predates effects: no blur_strength on its lines (JSON drops
     // undefined), and no `effect` command; the row offers nothing
     h.step("snapshot from a CLI without effects", function() {
+      h.tab(A(), "effect")
       h.feed([snapshotLine({ blur_strength: undefined, background_image: undefined, denoise: undefined })])
     }, function() { return S().record.link === "ok" && S().record.cliEffects === false })
     h.step("the effect row is faded and names the CLI", function() {
@@ -1277,8 +1486,8 @@ ShellRoot {
       h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: omarchy-broadcast CLI not found")
       h.eq("unavailable glyph", A().iconButton.text, glyphOf("unavailable"))
       A().close()
-      A().iconButton.triggerPress(Qt.LeftButton)
-      h.eq("left click opens the panel", A().opened, true)
+      A().iconButton.triggerPress(Qt.RightButton)
+      h.eq("right click opens the panel", A().opened, true)
     })
     h.countStep(0, "with a missing CLI")
     h.step("the path is on a line of its own, never wrapped at a slash", function() {
@@ -1356,26 +1565,31 @@ ShellRoot {
     }, function() { return S().record.link === "ok" }, 8000)
     h.countStep(1, "after the setting is restored")
 
-    // 12 cameras (the producer's maximum) and a truncation flag: the panel
-    // caps its height, scrolls, and keeps the cursor row in view
+    // 12 cameras (the producer's maximum) and a truncation flag on a screen
+    // too short for the card: the screen caps its height, the content scrolls
+    // (the fallback), and the cursor row is kept in view
     h.step("12 cameras", function() {
       h.feed([manyCamerasLine(12, true)])
       A().open()
     }, function() { return S().record.cameras.length === 12 && h.content(A()) !== null })
+    h.step("on a short screen", function() {
+      h.tab(A(), "camera")
+      A().popup.availableCardHeight = 600
+    })
     h.wait(400)
     h.step("panel capped and scrollable", function() {
       var flick = h.find(A(), "panelFlick")
       h.eq("rows", h.find(A(), "cameraRepeater").count, 12)
-      h.check("card height capped at Style.space(560)", A().popup.height <= Commons.Style.space(560), A().popup.height + " > " + Commons.Style.space(560))
+      h.check("card height capped by the screen", A().popup.height <= 600, A().popup.height + " > 600")
       h.check("content taller than the card", flick.contentHeight > flick.height, flick.contentHeight + " vs " + flick.height)
       h.eq("scrolls", flick.interactive, true)
       h.eq("truncation row", h.find(A(), "camerasTruncated").text, "More cameras are connected; they are not shown")
-      h.eq("stops", h.content(A()).stops.length, 16)
+      h.eq("stops", h.content(A()).stops.length, 15)
     })
     h.grabStep(function() { return A().popup }, "panel-12-cameras.png")
     h.step("cursor to the last camera row", function() {
       h.key(Qt.Key_Down)
-      for (var i = 0; i < 14; i++) h.key(Qt.Key_Down)
+      for (var i = 0; i < 13; i++) h.key(Qt.Key_Down)
     })
     h.wait(400)
     h.step("cursor row kept in view", function() {
@@ -1389,10 +1603,13 @@ ShellRoot {
     h.grabStep(function() { return A().popup }, "panel-12-cameras-cursor.png")
     h.step("back to three cameras", function() {
       A().close()
+      A().popup.availableCardHeight = shellRoot.card1080
+      h.tab(A(), "effect")
       h.feed([snapshotLine({})])
     }, function() { return S().record.cameras.length === 3 })
 
     previewScenario()
+    controlsScenario()
 
     // the resolver itself: PATH first, then the development build behind a
     // symlink (in the scratch development tree, not the plugin's checkout)
@@ -1580,8 +1797,9 @@ ShellRoot {
       h.eq("not wanted", P().wanted, false)
       h.eq("never started", P().starts, 0)
       h.eq("note", h.find(A(), "previewNote").text, "Camera idle; turn on Preview to start it")
-      h.eq("note shown, one line instead of the frame area", h.find(A(), "previewNote").visible, true)
-      h.eq("no empty frame area", h.find(A(), "previewFrame").visible, false)
+      h.eq("note shown", h.find(A(), "previewNote").visible, true)
+      h.eq("in the 16:9 frame area, which keeps its place", h.find(A(), "previewFrame").visible
+           && h.find(A(), "previewNote").parent === h.find(A(), "previewFrame"), true)
       h.eq("image hidden", h.find(A(), "previewImage").visible, false)
       h.eq("note in the dim colour", h.find(A(), "previewNote").color, h.content(A()).dim)
       h.eq("switch shown, off", h.find(A(), "previewToggle").visible && !h.find(A(), "previewToggle").checked, true)
@@ -1593,10 +1811,14 @@ ShellRoot {
       var block = h.find(A(), "previewBlock")
       var kids = block.parent.children
       var at = function(name) { for (var i = 0; i < kids.length; i++) if (kids[i].objectName === name) return i; return -1 }
-      h.check("the preview section follows the error blocks, before STATUS",
+      h.check("the preview follows the header and the error blocks, before the tabs",
               at("previewBlock") > at("daemonError") && at("previewBlock") > at("commandErrorBlock")
-              && at("daemonError") > at("hero") && at("previewBlock") < at("effectBlock"),
-              [at("hero"), at("daemonError"), at("commandErrorBlock"), at("previewBlock"), at("effectBlock")].join(","))
+              && at("daemonError") > at("hero") && at("previewBlock") < at("tabBlock"),
+              [at("hero"), at("daemonError"), at("commandErrorBlock"), at("previewBlock"), at("tabBlock")].join(","))
+      var row = h.find(A(), "previewControls")
+      h.check("the switch and the rate share one row under the frame",
+              row.visible && h.find(A(), "previewRow").parent === row && h.find(A(), "fpsRow").parent === row
+              && row.y > h.find(A(), "previewFrame").y, String(row.y))
     })
     h.previewCountStep(0, "panel open, idle, switch off")
     h.grabStep(function() { return A().popup }, "v1-preview-off.png")
@@ -1609,7 +1831,7 @@ ShellRoot {
       h.eq("not wanted", P().wanted, false)
       h.eq("never started", P().starts, 0)
       h.eq("note", h.find(A(), "previewNote").text, "Preview off")
-      h.eq("no empty frame area", h.find(A(), "previewFrame").visible, false)
+      h.eq("the frame area keeps its place", h.find(A(), "previewFrame").visible, true)
     })
     h.previewCountStep(0, "active for preview leases only")
 
@@ -1796,8 +2018,8 @@ ShellRoot {
     }, function() { return h.content(A()).currentStop.kind === "preview" })
     h.step("preview: the switch has the cursor; Down to the frame rate", function() {
       h.eq("preview switch has the cursor", h.find(A(), "previewToggle").hasCursor, true)
-      h.eq("stops = switch + preview + fps + effect + noise removal + rows + next",
-           h.content(A()).stops.length, h.find(A(), "cameraRepeater").count + 6)
+      h.eq("stops = switch + preview + fps + tab row + effect + noise removal (the Effect tab)",
+           h.content(A()).stops.length, 6)
       h.key(Qt.Key_Down)
     }, function() { return h.content(A()).currentStop.kind === "fps" })
     h.step("preview: lands on the current rate; Left, Enter: 15 fps", function() {
@@ -1811,7 +2033,7 @@ ShellRoot {
       h.eq("third write", fakeShell.calls.length, 3)
       h.eq("fifth start", P().starts, 5)
       h.key(Qt.Key_Down)
-      h.eq("then the effect row", h.content(A()).currentStop.kind, "effect")
+      h.eq("then the tab row", h.content(A()).currentStop.kind, "tabs")
       h.key(Qt.Key_Up)
       h.key(Qt.Key_Up)
       h.eq("back on the Preview switch", h.content(A()).currentStop.kind, "preview")
@@ -1840,7 +2062,7 @@ ShellRoot {
       var t = h.find(A(), "previewNote").text
       h.check("the reason", t.indexOf("stopped by signal 9") !== -1 && t.indexOf("Reopen the panel to retry.") !== -1, t)
       h.eq("drawn as an error", h.find(A(), "previewNote").color, Commons.Color.urgent)
-      h.eq("a line, no frame area", h.find(A(), "previewFrame").visible, false)
+      h.eq("in the frame area", h.find(A(), "previewFrame").visible, true)
     })
     h.previewCountStep(0, "after the crash")
     h.step("preview: the next start exits on its own", function() { h.writeFile("preview-exit", ["1"]) },
@@ -1976,7 +2198,7 @@ ShellRoot {
     h.step("preview: needs 0.18", function() {
       h.eq("note", h.find(A(), "previewNote").text, "Preview needs omarchy-broadcast 0.18 or newer")
       h.eq("note shown", h.find(A(), "previewNote").visible, true)
-      h.eq("frame area hidden", h.find(A(), "previewFrame").visible, false)
+      h.eq("the frame area keeps its place", h.find(A(), "previewFrame").visible, true)
       h.eq("switch hidden", h.find(A(), "previewRow").visible, false)
       h.eq("rate hidden", h.find(A(), "fpsRow").visible, false)
       h.eq("not supported", P().supported, false)
@@ -1994,6 +2216,397 @@ ShellRoot {
     }, function() { return S().record.interfaceRevision === 4 && !P().running && P().switchOn === false
                            && S().attachedCount === 1 && h.writerIdle() })
     h.previewCountStep(0, "at the end of the preview checks")
+  }
+
+  // ---- the layout screenshots: each tab of A's open panel, checked to fit -------
+  //
+  // c1-layout-<tab>-<kind>.png; `back`: the tab shown again afterwards.
+  function layoutGrabs(kind, back) {
+    var A = function() { return h.widgetA }
+    var tabs = ["effect", "camera", "status"]
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i]
+      h.step("layout: the " + t + " tab, " + kind, (function(t) { return function() { h.tab(A(), t) } })(t))
+      h.wait(250)
+      h.step("layout: the " + t + " tab fits, " + kind, (function(t) { return function() {
+        h.eq(t + " tab shown", h.find(A(), t + "Tab").visible, true)
+        h.fits(A(), t + " tab, " + kind)
+        h.note("layout " + t + " " + kind + ": card " + A().popup.contentWidth + "x" + A().popup.contentHeight)
+      } })(t))
+      h.grabStep(function() { return A().popup }, "c1-layout-" + t + "-" + kind + ".png")
+    }
+    h.step("layout: back to the " + back + " tab", function() { h.tab(A(), back) })
+  }
+
+  // ---- camera image controls (mock): capability, sliders, writes, reset ----------
+  //
+  // The fake adds camera_controls to every snapshot it prints, from its
+  // controls-mode and controls-state files, and answers `controls set|reset`
+  // by updating controls-state and printing the `controls` line on the feed.
+  function controlsScenario() {
+    var A = function() { return h.widgetA }
+    var S = function() { return h.widgetA.service }
+    var P = function() { return h.widgetA.previewService }
+    var C = function() { return h.content(A()) }
+    var full = ["brightness 0 255 1 128 128 0", "contrast 0 255 1 32 32 0", "saturation 0 255 1 128 179 0",
+                "sharpness 0 255 1 128 255 0", "backlight_compensation 0 1 1 0 0 0"]
+    var rev6 = function(o) {
+      var m = { interface_revision: 6, loopback_consumers: 0, pipewire_consumers: 0, preview_consumers: 0, pipewire_output: "ready" }
+      for (var k in o) m[k] = o[k]
+      return m
+    }
+    var value = function(name) { var c = h.model.findControl(S().record, name); return c ? c.value : null }
+    var setArgs = function() { return h.newLogArgs().filter(function(a) { return a[0] === "controls" }) }
+    var rowShown = function(name) { var r = h.find(A(), "controlRow-" + name); return !!r && r.visible }
+    var shown = function(name) { var t = h.find(A(), "controlValue-" + name); return t ? t.text : "" }
+    var kinds = function() { return C().stops.map(function(st) { return st.kind + (st.kind === "control" ? st.index : "") }).join(",") }
+    // The section's bottom in view, for a grab: only moves anything on a
+    // screen too short for the card (at the normal size nothing scrolls).
+    var showControls = function() {
+      var flick = h.find(A(), "panelFlick")
+      var block = h.find(A(), "controlsBlock")
+      var bottom = block.y + block.height + 8
+      flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height, bottom - flick.height))
+    }
+    var slider = function(name) { return h.find(A(), "controlSlider-" + name) }
+
+    h.step("controls: a revision-6 daemon, four controls and backlight compensation", function() {
+      h.writeFile("controls-state", full)
+      h.writeFile("controls-camera", [brioId])
+      h.writeFile("controls-mode", ["list"])
+      h.removeFile("delay")
+      h.removeFile("stderr")
+      h.writeFile("exit", ["0"])
+      h.feed([snapshotLine(rev6({}))])
+    }, function() { return S().record.controlsField === "object" && S().record.controls.length === 4 && h.writerIdle() })
+    h.step("controls: open the panel on the Camera tab", function() { A().open(); h.tab(A(), "camera") }, function() { return C() !== null })
+    h.wait(300)
+    h.step("controls: idle, four sliders and the note", function() {
+      h.eq("section shown", h.find(A(), "controlsBlock").visible, true)
+      h.eq("brightness row", rowShown("brightness"), true)
+      h.eq("contrast row", rowShown("contrast"), true)
+      h.eq("saturation row", rowShown("saturation"), true)
+      h.eq("sharpness row", rowShown("sharpness"), true)
+      h.eq("no backlight compensation row", h.find(A(), "controlRow-backlight_compensation"), null)
+      h.eq("labels", h.find(A(), "controlLabel-brightness").text + "," + h.find(A(), "controlLabel-sharpness").text, "Brightness,Sharpness")
+      h.eq("values shown", [shown("brightness"), shown("contrast"), shown("saturation"), shown("sharpness")].join(","), "128,32,179,255")
+      h.eq("slider at the reported value", slider("saturation").value, 179)
+      h.eq("slider range", slider("sharpness").minimum + ".." + slider("sharpness").maximum, "0..255")
+      h.eq("idle note", h.find(A(), "controlsNote").text, "The camera is not in use: changes are saved and apply when an app next uses it.")
+      h.eq("idle note shown", h.find(A(), "controlsNote").visible, true)
+      var noteKids = h.find(A(), "controlsBlock").children
+      var noteAt = function(name) { for (var i = 0; i < noteKids.length; i++) if (noteKids[i].objectName === name) return i; return -1 }
+      h.check("the note sits right under the header", noteAt("controlsNote") === 2 && h.find(A(), "controlsNote").y
+              < h.find(A(), "controlRow-brightness").mapToItem(h.find(A(), "controlsBlock"), 0, 0).y, noteAt("controlsNote"))
+      h.eq("no hint", h.find(A(), "controlsHint").visible, false)
+      h.eq("reset shown", h.find(A(), "controlsReset").visible, true)
+      h.eq("reset label", h.find(A(), "controlsReset").text, "Reset to defaults")
+      h.eq("cursor stops", kinds(), "switch,preview,fps,tabs,camera,camera,camera,next,control0,control1,control2,control3,reset")
+      var block = h.find(A(), "controlsBlock")
+      var kids = block.parent.children
+      var at = function(name) { for (var i = 0; i < kids.length; i++) if (kids[i].objectName === name) return i; return -1 }
+      h.check("on the Camera tab, after the cameras and Next camera", block.parent.objectName === "cameraTab"
+              && at("controlsBlock") > at("camerasBlock") && at("controlsBlock") > at("nextCameraButton"),
+              block.parent.objectName + ": " + at("camerasBlock") + "," + at("nextCameraButton") + "," + at("controlsBlock"))
+      h.fits(A(), "Camera tab, preview off")
+      showControls()
+    })
+    h.grabStep(function() { return A().popup }, "c1-idle-note.png")
+    layoutGrabs("nopreview", "camera")
+
+    // the keyboard walks the rows that are drawn; Left/Right move a slider
+    h.step("controls: the keyboard reaches the contrast slider", function() {
+      h.find(A(), "panelFlick").contentY = 0
+      h.markLog()
+      h.key(Qt.Key_Down)                              // shows the cursor
+      // preview, fps, the tab row, three cameras, Next camera, brightness, contrast
+      for (var i = 0; i < 9; i++) h.key(Qt.Key_Down)
+    }, function() { return C().currentStop && C().currentStop.kind === "control" })
+    h.step("controls: Right nudges contrast, written once after the debounce", function() {
+      h.eq("cursor on contrast", JSON.stringify(C().currentStop), JSON.stringify({ kind: "control", index: 1 }))
+      h.eq("contrast row has the cursor", h.find(A(), "controlRow-contrast").hasCursor, true)
+      h.key(Qt.Key_Right)
+      h.key("l")
+      h.eq("shown at once (a draft)", shown("contrast"), "58")
+      h.eq("nothing written yet", setArgs().length, 0)
+    }, function() { return setArgs().length >= 1 && value("contrast") === 58 }, 3000)
+    h.step("controls: one write for two presses, confirmed by the stream", function() {
+      h.eq("writes", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "contrast", "58"]]))
+      h.eq("draft settled", JSON.stringify(S().controlDrafts), "{}")
+      h.eq("shown", shown("contrast"), "58")
+      h.eq("stored by the fake", h.model.findControl(S().record, "contrast").stored, true)
+    })
+
+    // starting: the daemon has the camera open and writes a change at once
+    h.step("controls: starting", function() {
+      h.feed([stateLine(rev6({ state: "starting", consumers: 1, loopback_consumers: 1 }))])
+    }, function() { return S().record.state === "starting" })
+    h.step("controls: live while starting", function() {
+      h.eq("live note", h.find(A(), "controlsNote").text, "Changes apply live.")
+      h.eq("shown", h.find(A(), "controlsNote").visible, true)
+    })
+
+    // live: another app uses the camera, so the preview runs too
+    h.step("controls: active", function() {
+      h.feed([stateLine(rev6({ state: "active", consumers: 1, loopback_consumers: 1 }))])
+    }, function() { return S().record.state === "active" && P().running && P().frames >= 2 }, 8000)
+    h.step("controls: live, the live note", function() {
+      h.eq("live note", h.find(A(), "controlsNote").text, "Changes apply live.")
+      h.eq("live note shown", h.find(A(), "controlsNote").visible, true)
+      h.eq("sliders kept", rowShown("brightness") && rowShown("sharpness"), true)
+      h.eq("controls kept through the state line", S().record.controls.length, 4)
+      h.eq("the frame shows", h.find(A(), "previewImage").visible, true)
+      h.fits(A(), "Camera tab, preview on")
+      showControls()
+    })
+    h.grabStep(function() { return A().popup }, "c1-live-four-sliders.png")
+    h.step("controls: live figures for the Status tab", function() {
+      h.feed(['{"v":1,"type":"stats","fps":30.0,"latency_p50_ms":38.4,"cpu_percent":5.2,"gpu_percent":11.0}'])
+    }, function() { return S().record.stats !== null })
+    layoutGrabs("preview", "camera")
+    h.step("controls: the Status rows in plain words", function() {
+      var rows = C().statusRows.map(function(r) { return r.label + "=" + r.value })
+      h.check("consumers by kind", rows.indexOf("Used by=Apps 1 \u00b7 PipeWire 0 \u00b7 Preview 0") >= 0, JSON.stringify(rows))
+      h.check("the D-Bus API revision", rows.indexOf("D-Bus API=revision 6") >= 0, JSON.stringify(rows))
+    })
+
+    // a drag: one write for the whole move, at its end
+    h.step("controls: drag saturation", function() {
+      showControls()
+      h.markLog()
+      var sl = slider("saturation")
+      var y = sl.height / 2
+      keys.mousePress(sl, sl.width * 0.2, y)
+      for (var i = 3; i <= 8; i++) keys.mouseMove(sl, sl.width * i / 10, y, -1, Qt.LeftButton)
+    }, function() { return slider("saturation").dragging })
+    h.step("controls: release", function() {
+      var sl = slider("saturation")
+      h.notes.dragged = h.model.clampControl(h.model.findControl(S().record, "saturation"), sl.liveValue)
+      h.eq("the panel does not scroll under a held slider", h.find(A(), "panelFlick").interactive, false)
+      keys.mouseRelease(sl, sl.width * 0.8, sl.height / 2)
+    }, function() { return value("saturation") === h.notes.dragged }, 3000)
+    h.wait(400)
+    h.step("controls: the drag wrote one command", function() {
+      h.check("moved", h.notes.dragged !== 179, h.notes.dragged)
+      h.eq("one write, the end of the drag", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "saturation", String(h.notes.dragged)]]))
+      h.eq("slider shows it", slider("saturation").value, h.notes.dragged)
+      h.eq("value text", shown("saturation"), String(h.notes.dragged))
+      h.eq("not dragging", slider("saturation").dragging, false)
+      h.eq("the panel scrolls again", h.find(A(), "panelFlick").interactive, h.find(A(), "panelFlick").contentHeight > h.find(A(), "panelFlick").height)
+    })
+
+    // held: the debounce writes the value while the hand stays on it, and a
+    // controls line about another value does not move the knob
+    h.step("controls: hold brightness", function() {
+      h.markLog()
+      var sl = slider("brightness")
+      keys.mousePress(sl, sl.width * 0.9, sl.height / 2)
+      keys.mouseMove(sl, sl.width * 0.85, sl.height / 2, -1, Qt.LeftButton)
+      h.notes.held = Math.round(sl.liveValue)
+    }, function() { return value("brightness") === h.notes.held }, 3000)
+    h.step("controls: written while held, 150 ms after the last move", function() {
+      h.eq("one write", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "brightness", String(h.notes.held)]]))
+      h.eq("still held", slider("brightness").dragging, true)
+      h.feed([JSON.stringify({ v: 1, type: "controls", camera: brioId, controls: [
+        { name: "brightness", min: 0, max: 255, step: 1, "default": 128, value: 3, stored: true },
+        { name: "contrast", min: 0, max: 255, step: 1, "default": 32, value: 58, stored: true },
+        { name: "saturation", min: 0, max: 255, step: 1, "default": 128, value: h.notes.dragged, stored: true },
+        { name: "sharpness", min: 0, max: 255, step: 1, "default": 128, value: 255, stored: false }] })])
+    }, function() { return value("brightness") === 3 })
+    h.wait(200)
+    h.step("controls: not yanked back while held", function() {
+      var sl = slider("brightness")
+      h.eq("still held", sl.dragging, true)
+      h.eq("knob where the user holds it", Math.round(sl.liveValue), h.notes.held)
+      h.eq("value text follows the hand", shown("brightness"), String(h.notes.held))
+      keys.mouseRelease(sl, sl.width * 0.85, sl.height / 2)
+    }, function() { return value("brightness") === h.notes.held }, 3000)
+    h.step("controls: the release writes the held value again", function() {
+      var args = setArgs()
+      h.eq("writes", JSON.stringify(args), JSON.stringify([["controls", "set", "brightness", String(h.notes.held)],
+                                                         ["controls", "set", "brightness", String(h.notes.held)]]))
+      h.eq("slider at it", slider("brightness").value, h.notes.held)
+      h.eq("no draft left", JSON.stringify(S().controlDrafts), "{}")
+    })
+
+    // a slow command: moves behind it coalesce into one queued write
+    h.step("controls: a slow CLI", function() { h.writeFile("delay", ["0.8"]) }, function() { return h.writerIdle() })
+    h.step("controls: three nudges while the first write runs", function() {
+      h.markLog()
+      h.notes.maxQueue = 0
+      C().setCursor("control", 3)
+      h.key(Qt.Key_Left)                                // 255 -> 242, written after 150 ms
+      h.mark = Date.now()
+    }, function() { return S().commandBusy && Date.now() - h.mark > 300 })
+    h.step("controls: a second", function() {
+      h.key(Qt.Key_Left)                                // 229, queued
+      h.mark = Date.now()
+    }, function() { h.notes.maxQueue = Math.max(h.notes.maxQueue, S().pendingIntents.length); return Date.now() - h.mark > 300 })
+    h.step("controls: and the last", function() {
+      h.key(Qt.Key_Left)                                // 216 replaces 229
+      h.mark = Date.now()
+    }, function() {
+      h.notes.maxQueue = Math.max(h.notes.maxQueue, S().pendingIntents.length)
+      return !S().commandBusy && value("sharpness") === 216
+    }, 6000)
+    h.step("controls: the queued write was replaced, not added", function() {
+      h.eq("writes", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "sharpness", "242"], ["controls", "set", "sharpness", "216"]]))
+      h.eq("at most one queued", h.notes.maxQueue, 1)
+      h.eq("shown", shown("sharpness"), "216")
+      h.removeFile("delay")
+    }, function() { return h.writerIdle() })
+
+    // a refused write: the slider goes back to what the daemon reports
+    h.step("controls: the daemon refuses", function() {
+      h.writeFile("exit", ["1"])
+      h.writeFile("stderr", ["omarchy-broadcast: the camera refused the value"])
+    }, function() { return h.writerIdle() })
+    h.step("controls: nudge", function() { h.markLog(); h.key(Qt.Key_Left) },
+           function() { return setArgs().length === 1 && !S().commandBusy && JSON.stringify(S().controlDrafts) === "{}" }, 3000)
+    h.step("controls: back to the reported value, error shown", function() {
+      h.eq("argv", JSON.stringify(setArgs()[0]), JSON.stringify(["controls", "set", "sharpness", "203"]))
+      h.eq("shown", shown("sharpness"), "216")
+      h.check("error", S().commandError.indexOf("The daemon refused the request: the camera refused the value") === 0, S().commandError)
+      h.writeFile("exit", ["0"])
+      h.removeFile("stderr")
+    }, function() { return h.writerIdle() })
+
+    // a camera switch behind a slow CLI: a write made for the camera shown
+    // never lands on the next one (the CLI writes to the active camera)
+    h.step("controls: a slow camera switch", function() { h.writeFile("delay", ["0.8"]) }, function() { return h.writerIdle() })
+    h.step("controls: switch to FHD, then move brightness while it runs", function() {
+      h.markLog()
+      h.check("switch asked", S().selectCamera(fhdId))
+      h.check("move taken", S().commitControl("brightness", 40))
+      h.eq("queued, bound to the Brio", JSON.stringify(S().pendingIntents.map(function(i) { return i.verb + ":" + i.camera })),
+           JSON.stringify(["control:" + brioId]))
+      // the switch lands: the daemon's controls line names the FHD camera
+      h.writeFile("controls-camera", [fhdId])
+      h.feed([JSON.stringify({ v: 1, type: "controls", camera: fhdId, controls: [
+        { name: "brightness", min: 0, max: 255, step: 1, "default": 128, value: 128, stored: false }] })])
+    }, function() { return S().record.controlsCameraId === fhdId && !S().commandBusy }, 6000)
+    h.wait(400)
+    h.step("controls: the queued write was dropped, not run on the FHD camera", function() {
+      h.eq("no controls command", JSON.stringify(setArgs()), "[]")
+      h.check("the switch ran", h.newLogArgs().some(function(a) { return a[0] === "camera" }), JSON.stringify(h.newLogArgs()))
+      h.eq("queue empty", S().pendingIntents.length, 0)
+      h.eq("no draft", JSON.stringify(S().controlDrafts), "{}")
+      h.eq("FHD brightness untouched", value("brightness"), 128)
+      // back to the Brio
+      h.writeFile("controls-camera", [brioId])
+      h.feed([snapshotLine(rev6({ state: "active", consumers: 1, loopback_consumers: 1 }))])
+    }, function() { return S().record.controlsCameraId === brioId && S().record.controls.length === 4 && h.writerIdle() })
+
+    // slider writes never hold the on/off switch: off goes ahead of them
+    h.step("controls: slider writes behind a slow CLI", function() {
+      h.markLog()
+      S().commitControl("contrast", 70)               // runs
+      S().commitControl("saturation", 90)             // queued
+    }, function() { return S().pendingIntents.length === 1 })
+    h.step("controls: the right click is not held by them", function() {
+      h.eq("a command runs", S().commandBusy, true)
+      h.eq("the switch is free", S().toggleBusy, false)
+      h.eq("the panel switch is not busy", h.find(A(), "enableSwitch").busy, false)
+      A().toggleCamera()
+      h.eq("off goes first", JSON.stringify(S().pendingIntents.map(function(i) { return i.verb + (i.on === undefined ? "" : ":" + i.on) })),
+           JSON.stringify(["enable:false", "control"]))
+      h.eq("now held", S().toggleBusy, true)
+      A().toggleCamera()
+      h.eq("a second right click waits for the first", S().pendingIntents.length, 2)
+    }, function() { return !S().commandBusy }, 8000)
+    h.wait(300)
+    h.step("controls: off ran before the queued write", function() {
+      var args = h.newLogArgs().filter(function(a) { return a[0] === "controls" || a[0] === "on" || a[0] === "off" })
+      h.eq("order", JSON.stringify(args), JSON.stringify([["controls", "set", "contrast", "70"], ["off"], ["controls", "set", "saturation", "90"]]))
+      h.removeFile("delay")
+    }, function() { return h.writerIdle() })
+
+    // reset to defaults, by the button
+    h.step("controls: Reset to defaults", function() {
+      h.markLog()
+      var b = h.find(A(), "controlsReset")
+      showControls()
+      keys.mouseClick(b, b.width / 2, b.height / 2)
+    }, function() { return value("sharpness") === 128 && value("saturation") === 128 }, 3000)
+    h.step("controls: reset ran and came back on the stream", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([["controls", "reset"]]))
+      h.eq("values shown", [shown("brightness"), shown("contrast"), shown("saturation"), shown("sharpness")].join(","), "128,32,128,128")
+      h.eq("nothing stored", S().record.controls.filter(function(c) { return c.stored }).length, 0)
+      h.eq("no error", S().commandError, "")
+    })
+
+    // a camera lacking sharpness: no row, no stop
+    h.step("controls: a camera without sharpness", function() {
+      h.writeFile("controls-state", [full[0], full[1], full[2], full[4]])
+      h.feed([snapshotLine(rev6({ state: "active", consumers: 1, loopback_consumers: 1 }))])
+    }, function() { return S().record.controls.length === 3 && h.writerIdle() })
+    h.wait(300)
+    h.step("controls: three sliders", function() {
+      h.eq("sharpness row hidden", rowShown("sharpness"), false)
+      h.eq("the others", rowShown("brightness") && rowShown("contrast") && rowShown("saturation"), true)
+      h.check("no sharpness stop", kinds().indexOf("control3") === -1 && kinds().indexOf("control2,reset") !== -1, kinds())
+      h.eq("a write for it is refused", S().moveControl("sharpness", 10), false)
+      showControls()
+    })
+    h.grabStep(function() { return A().popup }, "c1-no-sharpness.png")
+
+    h.step("controls: a camera with none of them", function() {
+      h.writeFile("controls-state", [full[4]])
+      h.feed([snapshotLine(rev6({}))])
+    }, function() { return S().record.controls.length === 0 && S().record.state === "idle" && h.writerIdle() })
+    h.wait(300)
+    h.step("controls: says so, no reset", function() {
+      h.eq("hint", h.find(A(), "controlsHint").text, "This camera has no brightness, contrast, saturation or sharpness control.")
+      h.eq("reset hidden", h.find(A(), "controlsReset").visible, false)
+      h.eq("no note", h.find(A(), "controlsNote").visible, false)
+      h.eq("no control stops", kinds().indexOf("control") === -1 && kinds().indexOf("reset") === -1, true)
+    })
+
+    // an old daemon (null), then an old CLI (no field)
+    h.step("controls: a daemon below revision 6", function() {
+      h.writeFile("controls-state", full)
+      h.writeFile("controls-mode", ["null"])
+      h.feed([snapshotLine({ interface_revision: 5, loopback_consumers: 0, pipewire_consumers: 0 })])
+    }, function() { return S().record.controlsField === "null" && S().record.interfaceRevision === 5 && h.writerIdle() })
+    h.wait(300)
+    h.step("controls: the daemon needs updating", function() {
+      h.eq("section shown", h.find(A(), "controlsBlock").visible, true)
+      h.eq("hint", h.find(A(), "controlsHint").text, "The daemon needs updating for the camera image controls (omarchy-broadcastd 0.19 or newer).")
+      h.eq("no sliders", rowShown("brightness") || rowShown("contrast"), false)
+      h.eq("no reset", h.find(A(), "controlsReset").visible, false)
+      h.eq("no control stops", kinds().indexOf("control") === -1 && kinds().indexOf("reset") === -1, true)
+      h.eq("a write is refused", S().moveControl("brightness", 10), false)
+      h.eq("a reset is refused", S().resetControls(), false)
+      showControls()
+    })
+    h.grabStep(function() { return A().popup }, "c1-old-daemon.png")
+    h.step("controls: an old CLI", function() {
+      h.writeFile("controls-mode", ["absent"])
+      h.feed([snapshotLine({ interface_revision: 6 })])
+    }, function() { return S().record.controlsField === "absent" && S().record.interfaceRevision === 6 && h.writerIdle() })
+    h.wait(300)
+    h.step("controls: the CLI needs updating", function() {
+      h.eq("hint", h.find(A(), "controlsHint").text, "The omarchy-broadcast CLI needs updating for the camera image controls (0.19 or newer).")
+      h.eq("no sliders", rowShown("brightness"), false)
+    })
+    h.grabStep(function() { return A().popup }, "c1-old-cli.png")
+
+    // closed: nothing runs, nothing is written
+    h.step("controls: close", function() {
+      A().close()
+      h.markLog()
+      h.removeFile("controls-mode")
+      h.removeFile("controls-state")
+      h.removeFile("controls-camera")
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.interfaceRevision === 4 && !P().running && h.writerIdle() })
+    h.wait(1000)
+    h.step("controls: nothing while closed", function() {
+      h.eq("no command", setArgs().length, 0)
+      h.eq("debounce idle", S().controlTimer.running, false)
+      h.eq("no draft", JSON.stringify(S().controlDrafts), "{}")
+      h.eq("queue empty", S().pendingIntents.length, 0)
+    })
   }
 
   // ---- live scenario (real daemon, real CLI) --------------------------------------
@@ -2064,16 +2677,16 @@ ShellRoot {
     }, function() { return S().record.activeCamera !== h.notes.before && !S().commandBusy }, 15000)
     h.step("next camera result", function() { h.note("after next: " + S().record.activeCameraName) })
 
-    h.step("left click: off", function() {
+    h.step("right click: off", function() {
       A().close()
-      A().iconButton.triggerPress(Qt.LeftButton)
+      A().iconButton.triggerPress(Qt.RightButton)
     }, function() { return S().record.state === "off" && !S().commandBusy }, 15000)
     h.step("off icon", function() {
       h.eq("off glyph", A().iconButton.text, glyphOf("off"))
       h.eq("enabled false", S().record.enabled, false)
     })
     h.grabStep(function() { return strip }, "live-bar-off.png")
-    h.step("left click: on", function() { A().iconButton.triggerPress(Qt.LeftButton) },
+    h.step("right click: on", function() { A().iconButton.triggerPress(Qt.RightButton) },
            function() { return S().record.state === "idle" && S().record.enabled }, 15000)
 
     h.step("a consumer opens the virtual camera", function() {
@@ -2087,6 +2700,7 @@ ShellRoot {
     }, 15000)
     h.wait(2500)
     h.step("live figures", function() {
+      h.tab(A(), "status")
       var rows = h.model.statsRows(S().record)
       h.note("stats: " + JSON.stringify(rows))
       h.note("consumers " + S().record.consumers + ", tooltip: " + A().iconButton.tooltipText)

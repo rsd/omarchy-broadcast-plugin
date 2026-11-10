@@ -10,11 +10,12 @@ import "Model.js" as Model
 // Preview singleton, which owns the only preview process: an open panel holds
 // the preview (Preview.hold), a closed one releases it.
 //
-// Left click turns the camera on or off, but only while the daemon's state is
-// known: unavailable, it opens the panel instead, so a persisted `off` the
-// user cannot see is never flipped (and `on` never D-Bus-activates a stopped
-// daemon). While a command is running or queued it does nothing. Right or
-// middle click opens and closes the panel.
+// Left (or middle) click opens and closes the panel, as the shell's keyboard
+// summon does (it calls open()). Right click turns the camera on or off, but
+// only while the daemon's state is known: unavailable, it opens the panel
+// instead, so a persisted `off` the user cannot see is never flipped (and
+// `on` never D-Bus-activates a stopped daemon). While a command is running or
+// queued it does nothing.
 BarWidget {
   id: root
   moduleName: "br.com.dias.omarchy-broadcast"
@@ -22,6 +23,9 @@ BarWidget {
   readonly property var record: Daemon.record
   readonly property var visual: Model.visualFor(Model.visualKey(record))
   readonly property var cliSetting: Model.settingValue(settings, "cliPath")
+  // The panel tab the settings hold, validated (anything else reads as the
+  // default); the panel follows it when it changes.
+  readonly property string storedTab: Model.panelTabValue(Model.settingValue(settings, "panelTab"))
   readonly property color urgentColor: bar ? bar.urgent : Commons.Color.urgent
 
   property bool opened: false
@@ -48,20 +52,23 @@ BarWidget {
     return bar && typeof bar.switchPanelFrom === "function" ? bar.switchPanelFrom(root, direction) : false
   }
 
-  // "ignore": a command is running or queued, so the result of the last
-  // click has not arrived and the target of a toggle is unknown.
-  function activate() {
-    var action = Model.leftClickAction(root.record, Daemon.commandBusy)
+  // The right click. "ignore": an on/off or other non-control command is
+  // running or queued (Daemon.toggleBusy), so the result of the last click
+  // has not arrived and the target of a toggle is unknown. Slider writes do
+  // not hold it.
+  function toggleCamera() {
+    var action = Model.rightClickAction(root.record, Daemon.toggleBusy)
     if (action === "toggle") Daemon.toggleEnabled()
     else if (action === "open-panel") root.open()
   }
 
   function press(buttonCode) {
-    if (buttonCode === Qt.LeftButton) root.activate()
+    if (buttonCode === Qt.RightButton) root.toggleCamera()
     else root.toggle()
   }
 
-  // A user's change in the panel: in force at once (Preview.choose), then
+  // A user's change in the panel (a preview preference or the tab): in force
+  // at once (Preview.choose; the panel holds its own tab), then
   // written to this widget's layout entry, merged over the settings the bar
   // gave it (a write replaces the entry), as the shell's own panels do. Once
   // stored, this widget takes the entry at once (the shell's write comes back
@@ -115,6 +122,12 @@ BarWidget {
     dimmed: root.visual.dimmed
     tooltipText: Model.tooltipText(root.record)
     onPressed: function(buttonCode) { root.press(buttonCode) }
+
+    // The shell's kit sets no accessible text; the state is the tooltip's,
+    // the description says what each click does.
+    Accessible.role: Accessible.Button
+    Accessible.name: Model.tooltipText(root.record)
+    Accessible.description: Model.barClickHelp(root.record)
   }
 
   KeyboardPanel {
@@ -124,15 +137,24 @@ BarWidget {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent ? panel.loadedContent.keyCatcher : null
-    contentWidth: panel.fittedContentWidth(Style.space(340))
-    // Capped as the shell's own panels are; the content scrolls past it.
-    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(560))
+    // 520: wider than the shell's widest panel (weather, 480) because the
+    // preview spans the card. With the card's padding (popup-padding 14 a
+    // side) and border taken off, the 16:9 frame is about 484x272, so the
+    // preview's 480x270 frames show at their own size instead of being scaled
+    // down to a blur, and the tab row and the slider rows get room to breathe.
+    contentWidth: panel.fittedContentWidth(Style.space(520))
+    // Not capped below the screen: the preview, the tab row and the tallest
+    // tab fit on a 1080-pixel screen. The card's own limit is the screen's
+    // available height (KeyboardPanel.availableCardHeight); only past it does
+    // the content scroll.
+    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
 
     // Built on first open, not on every monitor at startup.
     content: Component {
       BroadcastPanel {
         bar: root.bar
         opened: root.opened
+        storedTab: root.storedTab
         onCloseRequested: root.close()
         onSettingsRequested: function(values) { root.persistSettings(values) }
         onSwitchRequested: function(direction) { root.switchPanel(direction) }

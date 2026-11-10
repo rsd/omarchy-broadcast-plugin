@@ -18,6 +18,10 @@ Item {
   property int padding: 14
   property int contentWidth: 340
   property int contentHeight: 200
+  // The screen's room for the card, as the real one computes it from the
+  // screen, the bar and the gaps; 0: no screen, no cap (the real one's
+  // fallback too). The harness sets it to stand for a given screen.
+  property real availableCardHeight: 0
 
   property Component content: null
   property bool contentRequested: false
@@ -38,7 +42,9 @@ Item {
   }
   function fittedContentHeight(implicitHeight, cap) {
     var desired = Math.max(padding * 2, (Number(implicitHeight) || 0) + padding * 2)
-    return Math.round(cap !== undefined && Number(cap) > 0 ? Math.min(desired, Number(cap)) : desired)
+    var maxHeight = availableCardHeight > 0 ? availableCardHeight : desired
+    if (cap !== undefined && Number(cap) > 0) maxHeight = Math.min(maxHeight, Number(cap))
+    return Math.round(Math.min(desired, maxHeight))
   }
 
   // As the real one: the content is built on open and its focus target

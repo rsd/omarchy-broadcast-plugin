@@ -17,8 +17,9 @@ import "Model.js" as Model
 // not a function there), so a reload from the same URL keeps this instance and
 // the rebuilt widgets attach to it again; a reload from another URL makes a
 // new instance and strands this one, which then has no readers and stays
-// silent. Nothing here polls: the stream is event-driven, and the only timer
-// is the one-shot respawn backoff after the watch exits on its own.
+// silent. Nothing here polls: the stream is event-driven, and the only timers
+// are one-shots: the respawn backoff after the watch exits on its own, and
+// the camera image sliders' write debounce, started only by a user's move.
 //
 // Settings. allowMultiple is false, so the widgets attached here are the same
 // layout entry drawn once per monitor and carry the same `cliPath`; the most
@@ -37,6 +38,10 @@ Singleton {
   property string commandError: ""
   // A command is running or queued: its result has not arrived yet.
   property bool commandBusy: false
+  // An on/off toggle waits (the bar's right click, the panel switch): a
+  // command other than a camera image write is running or queued. Slider
+  // writes never hold it; an on/off ask goes ahead of them in the queue.
+  readonly property bool toggleBusy: Model.toggleBlocked(runningIntent, pendingIntents)
 
   // ---- CLI resolution ------------------------------------------------------
   property var cliSetting: null
@@ -76,11 +81,34 @@ Singleton {
   property var lastCommand: null
 
   // ---- command process -----------------------------------------------------
-  property var pendingIntent: null
+  // Intents waiting behind the running command, oldest first; see
+  // Model.enqueueIntent (bounded by Model.INTENT_QUEUE_CAP).
+  property var pendingIntents: []
+  // The intent of the running command.
+  property var runningIntent: null
   property bool commandArmed: false
   property bool commandStarted: false
   property int commandExitCode: 0
   property var commandStderr: Model.firstLineStart()
+
+  // ---- camera image controls -------------------------------------------------
+  // name -> the value a slider (or a key) moved to that the daemon has not
+  // confirmed yet. The panel shows it instead of the reported value, so a
+  // slider is not pulled back by a controls line about an earlier write.
+  // Names of Model.CONTROL_NAMES only. Replaced whole on every change.
+  property var controlDrafts: ({})
+  // name -> the value last requested for it, so a write is never repeated.
+  property var controlSent: ({})
+  // name -> { value, line }: its last write succeeded and owns controls
+  // line number `line`, still to come; that line settles a draft still at
+  // the value, whatever the daemon reports (Model.settleWritten).
+  property var controlSettling: ({})
+  // Controls lines read; the number up to which the lines of finished
+  // writes are due; the mark of the running command (Model.controlLineMark):
+  // it owns line mark + 1, so an earlier write's late line is not its own.
+  property int controlLines: 0
+  property int controlLinesDue: 0
+  property int commandLineMark: 0
 
   onWatchWantedChanged: Qt.callLater(root.syncWatch)
 
@@ -265,18 +293,82 @@ Singleton {
     var result = Model.reduce(record, line)
     if (result.outcome === "dropped") droppedLines++
     else if (result.outcome === "invalid" || result.outcome === "ignored") ignoredLines++
+    // Compared raw: two ids that differ only in what sanitising strips are
+    // still two cameras.
+    var camera = record.controlsCameraId
     if (result.record !== record) record = result.record
     if (result.outcome === "snapshot") commandError = ""
+    var otherCamera = record.controlsCameraId !== camera
+    // The controls are another camera's: no queued write or reset made for
+    // the one shown before runs against it.
+    if (otherCamera) dropQueuedControls()
+    if (result.outcome === "snapshot" || (result.outcome === "controls" && otherCamera)) {
+      // A fresh picture of the daemon, or another camera: nothing of the
+      // user's pending moves applies to it, and no line is still due.
+      clearControlDrafts()
+      controlLinesDue = controlLines
+    } else if (result.outcome === "controls") {
+      controlLines++
+      var settled = Model.settleWritten(controlDrafts, controlSettling, controlLines)
+      controlSettling = settled.settling
+      settleControlDrafts(settled.drafts)
+      // Nothing written is still unconfirmed: no line is due any more (the
+      // daemon prints none for a write that changed nothing).
+      if (Object.keys(controlDrafts).length === 0 && !controlWritePending()) controlLinesDue = controlLines
+    } else if (result.outcome === "error") {
+      // Unavailable: no control is offered until the next snapshot.
+      clearControlDrafts()
+      controlLinesDue = controlLines
+    }
+  }
+
+  // A control or reset write is running or queued.
+  function controlWritePending() {
+    if (runningIntent && Model.isControlIntent(runningIntent)) return true
+    for (var i = 0; i < pendingIntents.length; i++) if (Model.isControlIntent(pendingIntents[i])) return true
+    return false
+  }
+
+  function dropQueuedControls() {
+    var before = pendingIntents.length
+    pendingIntents = Model.dropControlIntents(pendingIntents)
+    droppedIntents += before - pendingIntents.length
+    commandBusy = commandProc.running || commandArmed || pendingIntents.length > 0
+  }
+
+  // Drafts the record confirms (or no longer offers) go, with what was sent
+  // for them.
+  function settleControlDrafts(drafts) {
+    var next = Model.settleDrafts(drafts, record)
+    var sent = controlSent
+    for (var i = 0; i < Model.CONTROL_NAMES.length; i++) {
+      var name = Model.CONTROL_NAMES[i]
+      if (next[name] === undefined && !Model.queuedControl(pendingIntents, name)
+          && !(runningIntent && runningIntent.verb === "control" && runningIntent.name === name))
+        sent = Model.withKey(sent, name, undefined)
+    }
+    controlDrafts = next
+    controlSent = sent
+  }
+
+  function clearControlDrafts() {
+    controlTimer.stop()
+    controlDrafts = ({})
+    controlSent = ({})
+    controlSettling = ({})
   }
 
   // ---- commands --------------------------------------------------------------
 
-  // An intent ({ verb, on, id, effect }) becomes an argv only when it runs: see
-  // Model.intentArgv. Only the latest queued ask is kept.
+  // An intent ({ verb, on, id, effect, name, value }) becomes an argv only
+  // when it runs: see Model.intentArgv. Behind a running command the queue
+  // keeps the latest other ask, the latest value per control and the latest
+  // reset (Model.enqueueIntent): a slider drag never queues a process per
+  // move.
   function request(intent) {
     if (!Model.intentArgv(intent, cliPath, record)) return false
     if (commandProc.running || commandArmed) {
-      pendingIntent = intent
+      pendingIntents = Model.enqueueIntent(pendingIntents, intent)
       commandBusy = true
       return true
     }
@@ -290,6 +382,8 @@ Singleton {
     commandStarted = false
     commandArmed = true
     commandBusy = true
+    runningIntent = intent
+    commandLineMark = Model.controlLineMark(controlLines, controlLinesDue)
     lastCommand = argv
     commandProc.command = argv
     commandProc.running = true
@@ -297,31 +391,59 @@ Singleton {
   }
 
   function flushPending() {
-    if (commandProc.running || commandArmed || !pendingIntent) return
-    var intent = pendingIntent
-    pendingIntent = null
+    if (commandProc.running || commandArmed || pendingIntents.length === 0) return
+    var intent = pendingIntents[0]
+    pendingIntents = pendingIntents.slice(1)
     // Re-checked now: the daemon may have gone, or the CLI path changed.
     if (!armCommand(intent)) {
       droppedIntents++
-      commandBusy = false
+      if (intent.verb === "control") controlEnded(intent, false)
+      commandBusy = pendingIntents.length > 0
+      // The next one, on the next turn (one at a time, never a same-turn loop).
+      if (pendingIntents.length > 0) Qt.callLater(root.flushPending)
     }
   }
 
   function commandEnded() {
     var started = commandStarted
+    var intent = runningIntent
     commandArmed = false
     commandStarted = false
+    runningIntent = null
     if (!started) commandError = Model.commandFailureText(-1, "", cliPath)
     else if (commandExitCode === 0) commandError = ""
     else commandError = Model.commandFailureText(commandExitCode, commandStderr.text, cliPath)
-    commandBusy = pendingIntent !== null
+    var ok = started && commandExitCode === 0
+    if (intent && intent.verb === "control") controlEnded(intent, ok)
+    // A write that went through owes the line after its mark.
+    if (ok && Model.isControlIntent(intent)) controlLinesDue = Math.max(controlLinesDue, commandLineMark + 1)
+    commandBusy = pendingIntents.length > 0
     // The retry is deferred to the next turn, never a same-turn re-arm.
-    if (pendingIntent) Qt.callLater(root.flushPending)
+    if (pendingIntents.length > 0) Qt.callLater(root.flushPending)
   }
 
-  // The bar's left click. Ignored while a command is running or queued.
+  // A control write is over. Its draft stays while a newer write for the
+  // same control is still to run, or the user has moved on from its value.
+  // Otherwise (Model.controlWriteEnd): failed, the draft goes (the slider
+  // shows the reported value again, and the panel the error); succeeded,
+  // the controls line it owns settles it, or has already (the draft goes
+  // now: the daemon reports what the camera took). A line of an earlier
+  // write never does.
+  function controlEnded(intent, ok) {
+    var name = intent.name
+    if (Model.queuedControl(pendingIntents, name) || controlDrafts[name] !== intent.value) return
+    if (Model.controlWriteEnd(ok, controlLines, commandLineMark) === "drop") {
+      controlDrafts = Model.withKey(controlDrafts, name, undefined)
+      controlSent = Model.withKey(controlSent, name, undefined)
+    } else {
+      controlSettling = Model.withKey(controlSettling, name, { value: intent.value, line: commandLineMark + 1 })
+    }
+  }
+
+  // The bar's right click. Ignored while an on/off or other non-control
+  // command is running or queued (toggleBusy); slider writes do not hold it.
   function toggleEnabled() {
-    if (Model.leftClickAction(record, commandBusy) !== "toggle") return false
+    if (Model.rightClickAction(record, toggleBusy) !== "toggle") return false
     return request({ verb: "enable", on: !record.enabled })
   }
 
@@ -348,7 +470,58 @@ Singleton {
     return request({ verb: "denoise", on: on === true })
   }
 
+  // A slider moved (or a key nudged it) to `value`: kept as a draft, put on
+  // the control's grid, and written CONTROLS_DEBOUNCE_MS after the last move.
+  // Nothing for a control the daemon does not offer now.
+  function moveControl(name, value) {
+    var v = Model.clampControl(Model.controlsSupported(record) ? Model.findControl(record, name) : null, value)
+    if (v === null) return false
+    controlDrafts = Model.withKey(controlDrafts, name, v)
+    controlTimer.restart()
+    return true
+  }
+
+  // The slider was released: the draft is written at once.
+  function commitControl(name, value) {
+    if (!moveControl(name, value)) return false
+    controlTimer.stop()
+    flushControls()
+    return true
+  }
+
+  // Each draft not written yet becomes a control intent; the queue keeps one
+  // per control behind a running command.
+  function flushControls() {
+    for (var i = 0; i < Model.CONTROL_NAMES.length; i++) {
+      var name = Model.CONTROL_NAMES[i]
+      var v = controlDrafts[name]
+      if (v === undefined || v === controlSent[name]) continue
+      // Bound to the camera the slider showed (Model.controlIntentBound).
+      if (request({ verb: "control", name: name, value: v, camera: record.controlsCameraId })) {
+        controlSent = Model.withKey(controlSent, name, v)
+      } else {
+        controlDrafts = Model.withKey(controlDrafts, name, undefined)
+        controlSent = Model.withKey(controlSent, name, undefined)
+      }
+    }
+  }
+
+  // Every control back to the camera's default; what the user had not
+  // written yet is dropped with the queued writes (Model.enqueueIntent).
+  function resetControls() {
+    if (!request({ verb: "reset-controls", camera: record.controlsCameraId })) return false
+    clearControlDrafts()
+    return true
+  }
+
   // ---- children ------------------------------------------------------------
+
+  // One-shot: started (restarted) only by moveControl, a user's move.
+  property Timer controlTimer: Timer {
+    interval: Model.CONTROLS_DEBOUNCE_MS
+    repeat: false
+    onTriggered: root.flushControls()
+  }
 
   property Timer backoffTimer: Timer {
     repeat: false

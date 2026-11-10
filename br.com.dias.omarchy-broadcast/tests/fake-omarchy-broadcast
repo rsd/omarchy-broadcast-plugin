@@ -16,6 +16,17 @@
 #     two reads (a line, or a character, cut across a read boundary);
 #   - if $FAKE_OB_DIR/watch-exit exists, the watch exits with that status
 #     right after the snapshot (a watch that dies after connecting).
+#   - camera image controls: if $FAKE_OB_DIR/controls-mode exists, every
+#     snapshot line it prints (from snapshot or feed) that has no
+#     camera_controls field gets one, by the mode's first word:
+#       absent  none (a CLI that predates the controls)
+#       null    "camera_controls":null (a daemon below interface revision 6)
+#       list    {"camera":C,"controls":[...]} from controls-state (no lines:
+#               an empty list; leave a control out: a camera lacking it)
+#     where controls-state holds one control per line,
+#     `name min max step default value stored` (stored 0 or 1), and C is the
+#     first line of controls-camera. The harness's own snapshot lines may
+#     carry the field themselves; those are printed as they are.
 #
 # `preview --json [--fps 15|30]`: as the real CLI's preview stream, without a
 # daemon. Any other fps (or argument) is a usage error, exit 2. It writes into
@@ -30,6 +41,15 @@
 #     (real JPEGs, made by run-harness.sh) to P.tmp, renames it onto P, and
 #     prints `{"v":1,"type":"frame","seq":N,"path":P}`, seq from 1.
 # On SIGTERM/SIGINT/SIGHUP it removes the frame files and exits 0.
+#
+# `controls set NAME VALUE` and `controls reset`: as the other commands below
+# (delay, stderr, exit), after a usage check (exit 2: wrong arguments, or a
+# VALUE that is not a decimal integer). When the exit status is 0 and
+# controls-state exists, it is the daemon: an unknown NAME or a VALUE out of
+# range is refused (exit 1, a message on stderr); otherwise the value is
+# stored (reset: every value back to its default, nothing stored) and the
+# new `controls` line is appended to the feed, as the daemon's signal would
+# reach a watch. Without controls-state the harness writes the reaction.
 #
 # Any other command (`on`, `off`, `camera -- <id>`, `camera next`,
 # `effect none|blur|replace`, `denoise on|off`): sleeps $FAKE_OB_DIR/delay
@@ -50,6 +70,36 @@ log=$dir/log
   printf '\n'
 } >> "$log"
 
+# The controls of controls-state as the CLI prints them:
+# {"camera":C,"controls":[...]}.
+controls_object() {
+  camera=$(head -n 1 -- "$dir/controls-camera" 2>/dev/null || true)
+  awk -v camera="$camera" '
+    BEGIN { printf "{\"camera\":\"%s\",\"controls\":[", camera; sep = "" }
+    NF == 7 {
+      printf "%s{\"name\":\"%s\",\"min\":%s,\"max\":%s,\"step\":%s,\"default\":%s,\"value\":%s,\"stored\":%s}",
+        sep, $1, $2, $3, $4, $5, $6, ($7 == 1 ? "true" : "false")
+      sep = ","
+    }
+    END { printf "]}" }' "$dir/controls-state" 2>/dev/null
+}
+
+# stdin -> stdout, adding camera_controls to snapshot lines per controls-mode.
+with_controls() {
+  mode=$(head -n 1 -- "$dir/controls-mode" 2>/dev/null || echo absent)
+  case $mode in
+    null) add=',"camera_controls":null' ;;
+    list) add=',"camera_controls":'$(controls_object) ;;
+    *) add="" ;;
+  esac
+  if [ -z "$add" ]; then
+    cat
+  else
+    # ENVIRON, not -v: awk would read backslash escapes in a -v value.
+    ADD=$add awk '/"type":"snapshot"/ && !/"camera_controls"/ { sub(/}$/, ""); $0 = $0 ENVIRON["ADD"] "}" } { print }'
+  fi
+}
+
 if [ "${1:-}" = "watch" ] && [ "${2:-}" = "--json" ]; then
   trap 'exit 0' TERM INT
   feed=$dir/feed
@@ -60,16 +110,53 @@ if [ "${1:-}" = "watch" ] && [ "${2:-}" = "--json" ]; then
     sleep 0.3
     cat "$dir/snapshot.2" 2>/dev/null
   fi
-  [ -f "$dir/snapshot" ] && cat "$dir/snapshot"
+  if [ -f "$dir/snapshot" ]; then
+    if [ -f "$dir/controls-mode" ]; then with_controls < "$dir/snapshot"; else cat "$dir/snapshot"; fi
+  fi
   [ -f "$dir/watch-exit" ] && exit "$(cat "$dir/watch-exit")"
   while :; do
     total=$(wc -l < "$feed")
     while [ "$n" -lt "$total" ]; do
       n=$((n + 1))
-      sed -n "${n}p" "$feed"
+      if [ -f "$dir/controls-mode" ]; then sed -n "${n}p" "$feed" | with_controls; else sed -n "${n}p" "$feed"; fi
     done
     sleep 0.05
   done
+fi
+
+if [ "${1:-}" = "controls" ]; then
+  case ${2:-} in
+    set)
+      [ $# -eq 4 ] || { echo "fake: usage: controls set NAME VALUE" >&2; exit 2; }
+      case $4 in
+        ''|-|*[!0-9-]*|?*-*) echo "fake: invalid value '$4' for '<VALUE>'" >&2; exit 2 ;;
+      esac ;;
+    reset)
+      [ $# -eq 2 ] || { echo "fake: usage: controls reset" >&2; exit 2; } ;;
+    *) echo "fake: usage: controls set NAME VALUE | controls reset" >&2; exit 2 ;;
+  esac
+  [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
+  [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
+  status=0
+  [ -f "$dir/exit" ] && status=$(cat "$dir/exit")
+  [ "$status" -eq 0 ] && [ -f "$dir/controls-state" ] || exit "$status"
+  state=$dir/controls-state
+  if [ "$2" = set ]; then
+    awk -v name="$3" -v value="$4" '
+      NF == 7 && $1 == name { found = 1; if (value + 0 < $2 + 0 || value + 0 > $3 + 0) bad = 1; $6 = value + 0; $7 = 1 }
+      { print }
+      END { exit (!found ? 3 : (bad ? 4 : 0)) }' "$state" > "$state.tmp"
+    case $? in
+      0) ;;
+      3) rm -f -- "$state.tmp"; echo "omarchy-broadcast: the camera has no control $3" >&2; exit 1 ;;
+      *) rm -f -- "$state.tmp"; echo "omarchy-broadcast: $4 is out of range for $3" >&2; exit 1 ;;
+    esac
+  else
+    awk 'NF == 7 { $6 = $5; $7 = 0 } { print }' "$state" > "$state.tmp"
+  fi
+  mv -f -- "$state.tmp" "$state"
+  printf '{"v":1,"type":"controls",%s\n' "$(controls_object | sed 's/^{//')" >> "$dir/feed"
+  exit 0
 fi
 
 if [ "${1:-}" = "preview" ]; then
