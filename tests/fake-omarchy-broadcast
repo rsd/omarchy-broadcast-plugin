@@ -69,8 +69,27 @@
 # daemon's signal would reach a watch: the setting written and every
 # setting whose enabled state changed with it (reset: all, 16 a line).
 #
-# Any other command (`on`, `off`, `camera -- <id>`, `camera next`,
-# `effect none|blur|replace`, `denoise on|off`): sleeps $FAKE_OB_DIR/delay
+# The setup dialog's reads (interface revisions 9 and 10): `modules list
+# --json`, `order show --json`, `config show --json` and `config files
+# --json` print $FAKE_OB_DIR/modules-list, order-show, config-show and
+# config-files (the harness writes the lines); a missing file is a daemon
+# that predates them: an `unsupported-daemon` error line and exit 1. If
+# read-exit exists, a read exits with that status after printing.
+#
+# The setup dialog's writes: `modules enable|disable ID`, `order set
+# ID,ID,...`, `order reset`, `config set -- KEY VALUE` and `config reset --
+# KEY`: a usage check first (exit 2 for any other shape), then delay, stderr
+# and exit as the commands below. When the status is 0 the fake is the
+# daemon: `modules enable|disable` flips "enabled" of the module line whose
+# module object starts {"id":"ID", ...; `order set` rewrites the order line
+# (every stage movable, but the first up and the last down); `config set`
+# replaces the "value" of the row that starts {"id":"KEY","value":...
+# (true, false and numbers as given, anything else quoted); then a
+# `modules_changed` (modules, order) or `config_changed` (config) line with
+# the next serial of $FAKE_OB_DIR/setup-serial is appended to the feed, as
+# the daemon's signal would reach a watch.
+#
+# Any other command (`on`, `off`, `camera -- <id>`, `camera next`): sleeps $FAKE_OB_DIR/delay
 # seconds if that file exists, prints $FAKE_OB_DIR/stderr to stderr if it
 # exists, and exits with the status in $FAKE_OB_DIR/exit (default 0). It
 # changes no state: the harness writes the daemon's reaction (a state line
@@ -309,6 +328,100 @@ if [ "${1:-}" = "settings" ]; then
   rm -f -- "$deltas"
   exit 0
 fi
+
+# The setup reads: the file's lines, or a daemon that predates them.
+setup_read() {
+  if [ -f "$dir/$1" ]; then
+    cat -- "$dir/$1"
+  else
+    printf '{"v":1,"type":"error","code":"unsupported-daemon","error":"the daemon does not support this (its interface revision is 8)"}\n'
+    exit 1
+  fi
+  [ -f "$dir/read-exit" ] && exit "$(cat "$dir/read-exit")"
+  exit 0
+}
+
+case "${1:-} ${2:-} ${3:-}" in
+  "modules list --json") [ $# -eq 3 ] && setup_read modules-list ;;
+  "order show --json") [ $# -eq 3 ] && setup_read order-show ;;
+  "config show --json") [ $# -eq 3 ] && setup_read config-show ;;
+  "config files --json") [ $# -eq 3 ] && setup_read config-files ;;
+esac
+
+# A setup write's reaction: the next serial, on a line of `type`.
+setup_changed() {
+  serial=$(($(setting_file setup-serial 1) + 1))
+  echo "$serial" > "$dir/setup-serial"
+  printf '{"v":1,"type":"%s","serial":%s}\n' "$1" "$serial" >> "$dir/feed"
+}
+
+setup_write=""
+case ${1:-} in
+  modules)
+    case ${2:-} in
+      enable | disable) [ $# -eq 3 ] && setup_write=$2 ;;
+    esac ;;
+  order)
+    case ${2:-} in
+      set) [ $# -eq 3 ] && setup_write=order-set ;;
+      reset) [ $# -eq 2 ] && setup_write=order-reset ;;
+    esac ;;
+  config)
+    case ${2:-} in
+      set) [ $# -eq 5 ] && [ "$3" = "--" ] && setup_write=config-set ;;
+      reset) [ $# -eq 4 ] && [ "$3" = "--" ] && setup_write=config-reset ;;
+    esac ;;
+esac
+case ${1:-} in
+  modules | order | config)
+    [ -n "$setup_write" ] || { echo "fake: usage: $*" >&2; exit 2; }
+    [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
+    [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
+    status=0
+    [ -f "$dir/exit" ] && status=$(cat "$dir/exit")
+    [ "$status" -eq 0 ] || exit "$status"
+    case $setup_write in
+      enable | disable)
+        [ -f "$dir/modules-list" ] && {
+          on=true
+          [ "$setup_write" = disable ] && on=false
+          awk -v id="$3" -v on="$on" 'index($0, "\"module\":{\"id\":\"" id "\"") { sub(/"enabled":(true|false)/, "\"enabled\":" on) } { print }' \
+            "$dir/modules-list" > "$dir/modules-list.tmp" && mv -f -- "$dir/modules-list.tmp" "$dir/modules-list"
+        }
+        setup_changed modules_changed ;;
+      order-set)
+        printf '%s\n' "$3" | awk -F, '{
+          s = ""; o = ""
+          for (i = 1; i <= NF; i++) {
+            o = o (i > 1 ? "," : "") "\"" $i "\""
+            s = s (i > 1 ? "," : "") "{\"id\":\"" $i "\",\"slot\":\"pre-matte\",\"up\":" (i > 1 ? "true" : "false") ",\"down\":" (i < NF ? "true" : "false") "}"
+          }
+          printf "{\"v\":1,\"type\":\"order\",\"order\":[%s],\"order_truncated\":false,\"stages\":[%s],\"overridden_by\":\"\"}\n", o, s
+        }' > "$dir/order-show"
+        setup_changed modules_changed ;;
+      order-reset) setup_changed modules_changed ;;
+      config-set)
+        case $5 in
+          true | false) value=$5 ;;
+          *) if printf '%s' "$5" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; then value=$5; else value="\"$5\""; fi ;;
+        esac
+        [ -f "$dir/config-show" ] && {
+          awk -v key="$4" -v value="$value" '{
+            head = "{\"id\":\"" key "\",\"value\":"
+            at = index($0, head)
+            if (at > 0) {
+              rest = substr($0, at + length(head))
+              cut = index(rest, ",\"")
+              $0 = substr($0, 1, at - 1) head value substr(rest, cut)
+            }
+            print
+          }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
+        }
+        setup_changed config_changed ;;
+      config-reset) setup_changed config_changed ;;
+    esac
+    exit 0 ;;
+esac
 
 if [ "${1:-}" = "preview" ]; then
   [ "${2:-}" = "--json" ] || { echo "fake: preview needs --json" >&2; exit 2; }

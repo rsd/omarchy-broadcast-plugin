@@ -68,31 +68,15 @@ var BACKOFF_RESET_UPTIME_MS = 30000
 
 var STATES = ["off", "idle", "starting", "active", "error"]
 
-// The video effects the daemon accepts (docs/adr/0012), in panel order. The
-// only words ever passed to `omarchy-broadcast effect`.
-var EFFECTS = ["none", "blur", "replace"]
-var EFFECT_LABELS = { none: "None", blur: "Blur", replace: "Replace" }
-// Said instead of offering effects when the CLI predates them (it prints no
-// blur_strength and has no `effect` command).
-var CLI_NO_EFFECTS = "The omarchy-broadcast CLI needs updating for effects"
-// Said instead when the CLI knows effects but the running daemon does not (an
-// interface revision below EFFECTS_REVISION, or none readable): the CLI would
-// refuse every `effect` request.
-var DAEMON_NO_EFFECTS = "The daemon needs updating for effects"
-// Video noise removal: a stage that runs before the effect, or alone with
-// `none`, switched by `omarchy-broadcast denoise on|off`. It is not an effect
-// and hides nothing, so it is a separate switch, not a choice of EFFECTS. When
-// it cannot run the stream goes on without it and the daemon's error text
-// says why. The only words ever passed to `omarchy-broadcast denoise`.
-var DENOISE_WORDS = { on: "on", off: "off" }
-var DENOISE_LABEL = "Noise removal"
-// The daemon interface revision that added effects (obc-ipc INTERFACE_REVISION
-// 2; the CLI's bus::require_effects checks the same).
-var EFFECTS_REVISION = 2
-// The daemon interface revision that added noise removal (obc-ipc
-// INTERFACE_REVISION 4; the CLI prints `denoise` only from a daemon at or
-// above it, and null below).
-var DENOISE_REVISION = 4
+// The daemon interface revision from which the effects come from loadable
+// modules and are offered as global settings (obc-ipc INTERFACE_REVISION 9):
+// the Effect tab draws them from the settings schema only, and names no
+// effect. Below it the tab says that the daemon needs updating.
+var MODULES_REVISION = 9
+var DAEMON_NO_EFFECTS = "The daemon needs updating for effects (omarchy-broadcastd 0.24 or newer)."
+// Said in the Effect tab when the daemon offers no background effect (no
+// enabled module provides the stage).
+var NO_BACKGROUND_TEXT = "No effect module provides a background effect. Right click the bar icon to set up modules."
 // The largest interface revision the producer can print (a u32).
 var REVISION_MAX = 4294967295
 
@@ -196,22 +180,6 @@ function statNumber(value) {
   return typeof value === "number" && isFinite(value) && value >= 0 && value <= STAT_MAX ? value : null
 }
 
-// An effect name from the daemon: one of EFFECTS exactly, else "" (unknown;
-// never selected in the panel and never sent back).
-function effectKey(value) {
-  return typeof value === "string" && EFFECTS.indexOf(value) >= 0 ? value : ""
-}
-
-// Whether noise removal is on: a boolean exactly, else null (unknown).
-function denoiseFlag(value) {
-  return typeof value === "boolean" ? value : null
-}
-
-// The blur strength: a finite number in 0..1, else null (unknown).
-function blurStrength(value) {
-  return typeof value === "number" && isFinite(value) && value >= 0 && value <= 1 ? value : null
-}
-
 // ---------------------------------------------------------------- the record
 
 // `link` says whether the record speaks for a live daemon:
@@ -247,15 +215,15 @@ function emptyRecord(link, linkText) {
     pipewireOutput: "",
     outputMode: "",
     effect: "",
-    effectKey: "",
-    blurStrength: null,
     backgroundImage: "",
     backgroundImageSet: false,
-    // true or false as the daemon reports it; null when the line has no
-    // boolean `denoise` (a CLI or a daemon that predates noise removal).
-    denoise: null,
-    cliEffects: false,
     interfaceRevision: -1,
+    // The daemon's ConfigSerial and ModulesSerial as the snapshot reports
+    // them (`config_serial`, `modules_serial`; 0 from a CLI or daemon that
+    // predates them), moved on by `config_changed` and `modules_changed`
+    // lines. The setup dialog reads its data again when one moves.
+    configSerial: 0,
+    modulesSerial: 0,
     cameras: [],
     camerasTotal: 0,
     camerasTruncated: false,
@@ -295,7 +263,7 @@ function linked(record) {
 // The daemon can be shown and controlled: linked, and in a state this plugin
 // knows. An unknown state string (only an off-contract producer sends one; a
 // new state would bump the schema) is unavailable everywhere: the icon, the
-// controls, the right click and the panel all treat it so.
+// controls, the clicks and the panel all treat it so.
 function available(record) {
   return linked(record) && STATES.indexOf(record.state) >= 0
 }
@@ -318,19 +286,10 @@ function applyScalars(r, m) {
   r.pipewireOutput = sanitize(m.pipewire_output, PIPEWIRE_CAP)
   r.outputMode = sanitize(m.output_mode, MODE_CAP)
   r.effect = sanitize(m.effect, EFFECT_CAP)
-  r.effectKey = effectKey(m.effect)
-  r.blurStrength = blurStrength(m.blur_strength)
   r.backgroundImage = sanitize(m.background_image, IMAGE_PATH_CAP)
   // Whether the daemon holds an image, from the raw field: the display copy
   // above may sanitise to "" and must not decide what can be chosen.
   r.backgroundImageSet = typeof m.background_image === "string" && m.background_image !== ""
-  // A CLI and daemon that know noise removal print `denoise` on every
-  // snapshot and state line; one that predates it prints no such field.
-  r.denoise = denoiseFlag(m.denoise)
-  // A CLI that knows video effects prints blur_strength as a number on every
-  // snapshot and state line. One that predates them prints no such field (and
-  // "effect":"none"), and has no `effect` command to run.
-  r.cliEffects = typeof m.blur_strength === "number"
   // The running daemon's interface revision, on the same lines: a new CLI may
   // still be talking to a daemon started before the upgrade.
   r.interfaceRevision = interfaceRevision(m.interface_revision)
@@ -420,7 +379,7 @@ function parseLine(text) {
 // Apply one raw line to a record. Returns { record, outcome }; `record` is the
 // same object when nothing changed. Outcomes: snapshot, state, cameras,
 // stats, settings_group (a part of a set kept), settings (a set committed),
-// settings_delta, settings_clear, error, ignored (an unknown type, such as
+// settings_delta, settings_clear, config_changed, modules_changed, error, ignored (an unknown type, such as
 // the `controls` line of interface revision 6, or a line that cannot apply
 // in the current link state), dropped, invalid, unsupported.
 function reduce(record, text) {
@@ -450,6 +409,8 @@ function applyMessage(record, m) {
     r.settingsField = m.settings_schema === undefined ? "absent"
       : (typeof m.settings_schema === "number" ? "number" : "null")
     r.settingsSchema = interfaceRevision(m.settings_schema)
+    r.configSerial = settingsNumber(m.config_serial)
+    r.modulesSerial = settingsNumber(m.modules_serial)
     return { record: r, outcome: "snapshot" }
   case "state":
     // Unavailable until the next snapshot (docs/cli-json.md, "Writing a client").
@@ -494,6 +455,18 @@ function applyMessage(record, m) {
     r.settingsAssembly = null
     r.settingsCleared = true
     return { record: r, outcome: "settings_clear" }
+  case "config_changed":
+  case "modules_changed":
+    // The daemon's configuration (ConfigChanged) or its modules
+    // (ModulesSerial) moved: the setup dialog reads them again. A serial
+    // that is not one a producer prints is ignored.
+    if (!linked(record)) return { record: record, outcome: "ignored" }
+    var serial = settingsNumber(m.serial)
+    if (serial === 0) return { record: record, outcome: "ignored" }
+    r = copyRecord(record)
+    if (m.type === "config_changed") r.configSerial = serial
+    else r.modulesSerial = serial
+    return { record: r, outcome: m.type }
   case "error":
     // An unknown code is treated like dbus-error, as the contract asks.
     r = emptyRecord(m.code === "daemon-not-running" ? "not-running" : "unreachable",
@@ -699,90 +672,79 @@ function statsRows(record) {
 
 // ---------------------------------------------------------------- effects
 
-// The tooltip's effect phrase: the effect ("" for none or an unknown one),
-// then noise removal when it is on, joined by a comma.
+// The background effect as the daemon's settings schema describes it: the
+// row of EFFECT_MODE_SETTING, a global enum whose options (their values and
+// labels) are the daemon's. Nothing here names an effect: the options, their
+// labels, whether the row can be changed now and why not all come from the
+// schema.
+function effectModeRow(record) {
+  var row = settingsSupported(record) ? findSetting(record, EFFECT_MODE_SETTING) : null
+  return row && row.type === "enum" && row.scope === "global" ? row : null
+}
+
+// The tooltip's effect phrase: "background: <the mode's label>" while the
+// mode is not its default (the default is no effect), else "".
 function effectSummary(record) {
-  if (!record) return ""
-  var parts = []
-  if (record.effectKey === "blur") parts.push("background blurred")
-  else if (record.effectKey === "replace") parts.push("background replaced")
-  if (record.denoise === true) parts.push("noise removal on")
-  return parts.join(", ")
+  var row = effectModeRow(record)
+  if (!row || row.value === "" || row.value === row.defaultValue) return ""
+  var at = optionIndex(row.options, row.value)
+  return at >= 0 ? "background: " + row.options[at].label : ""
 }
 
 // Whether the daemon holds a background image. Read from the raw field
-// (backgroundImageSet), never from the sanitised display copy, so what can be
-// chosen and what the panel says about it always agree.
+// (backgroundImageSet), never from the sanitised display copy.
 function hasBackgroundImage(record) {
   return !!record && record.backgroundImageSet === true
 }
 
-// Whether the running daemon knows effects: its interface revision is at
-// least EFFECTS_REVISION. An unknown revision counts as no.
-function daemonEffects(record) {
-  return !!record && typeof record.interfaceRevision === "number"
-    && record.interfaceRevision >= EFFECTS_REVISION
+// Whether the effects come from the daemon's modules: an available daemon
+// at interface revision MODULES_REVISION or later. An unknown revision
+// counts as no.
+function moduleEffects(record) {
+  return available(record) && record.interfaceRevision >= MODULES_REVISION
 }
 
-// Whether effects can be set at all: an available daemon whose interface
-// knows them, through a CLI that knows them. False for a CLI that predates
-// effects, and for a new CLI still talking to an older daemon.
-function effectsSupported(record) {
-  return available(record) && record.cliEffects === true && daemonEffects(record)
-}
-
-// Why effects cannot be set while the daemon is available: the CLI line, or
-// the daemon line once the CLI knows effects. "" when they can be set (or
-// the daemon is unavailable, where the panel shows no effect row).
-function effectsMissingText(record) {
-  if (!available(record) || effectsSupported(record)) return ""
-  return record.cliEffects === true ? DAEMON_NO_EFFECTS : CLI_NO_EFFECTS
-}
-
-// Whether `effect` may be requested now: a known effect, a daemon that can
-// be controlled through a CLI that knows `effect`, and for `replace` a
-// background image the daemon already holds (the daemon refuses `replace`
-// without one; the image is set with `omarchy-broadcast effect replace --image
-// PATH` or in its configuration).
-function effectSelectable(record, effect) {
-  if (!effectsSupported(record) || effectKey(effect) === "") return false
-  return effect !== "replace" || hasBackgroundImage(record)
-}
-
-// The panel's effect choices, in EFFECTS order: { value, label, selected,
-// selectable, faded, tooltip }. `selectable` is false for the current effect
-// (there is nothing to change) and for an effect that cannot be requested.
-// `faded` marks a choice drawn dimmed: one that cannot be requested and is
-// not the current one, or every choice when the CLI or the daemon predates
-// effects. An
-// unknown effect from the daemon selects no choice.
-function effectOptions(record) {
-  var out = []
-  var supported = effectsSupported(record)
-  for (var i = 0; i < EFFECTS.length; i++) {
-    var value = EFFECTS[i]
-    var selected = !!record && record.effectKey === value
-    var selectable = !selected && effectSelectable(record, value)
-    var missing = effectsMissingText(record)
-    var tooltip = missing !== "" ? missing
-      : (value === "none" ? "The camera image, unchanged"
-        : (value === "blur" ? "Blur the background"
-          : (hasBackgroundImage(record) ? "Replace the background with the background image"
-            : "Needs a background image: background_image under [effect] in the daemon's configuration, or --image")))
-    out.push({
-      value: value,
-      label: EFFECT_LABELS[value],
-      selected: selected,
-      selectable: selectable,
-      faded: !selectable && !(selected && supported),
-      tooltip: tooltip
-    })
+// The Effect tab's choice row, exactly as drawn:
+//   { visible, hint, id, enabled, reason, options }
+// options: { value, label, selected, faded, tooltip }, the mode row's own,
+// in its order; `selected` follows the user's draft while one is
+// unconfirmed (Daemon.settingDrafts). `visible` is false, with `hint`
+// saying why, while the daemon predates module effects (or the CLI or the
+// plugin predates its settings), and while no enabled module offers the
+// background effect. While the set is still loading neither is shown. A row
+// the daemon greys out (the camera is off, a module is loading) is drawn
+// faded with the daemon's reason under it.
+function effectModeView(record, drafts) {
+  var out = { visible: false, hint: "", id: "", enabled: false, reason: "", options: [] }
+  if (!available(record)) return out
+  if (!moduleEffects(record)) { out.hint = DAEMON_NO_EFFECTS; return out }
+  if (!settingsSupported(record)) { out.hint = settingsMissingText(record); return out }
+  if (!isPlainObject(record.settings)) return out
+  var row = effectModeRow(record)
+  if (!row) { out.hint = NO_BACKGROUND_TEXT; return out }
+  var value = shownSettingValue(row, drafts)
+  out.visible = true
+  out.id = row.id
+  out.enabled = row.enabled
+  out.reason = row.enabled ? "" : row.reason
+  for (var i = 0; i < row.options.length && i < SETTING_OPTION_CAP; i++) {
+    var o = row.options[i]
+    out.options.push({ value: o.value, label: o.label, selected: o.value === value, faded: !row.enabled,
+                       tooltip: row.enabled ? "" : row.reason })
   }
   return out
 }
 
-function effectIndex(value) {
-  return EFFECTS.indexOf(effectKey(value))
+// The index of the selected choice of an effectModeView, else -1.
+function effectModeSelected(view) {
+  var options = isPlainObject(view) && Array.isArray(view.options) ? view.options : []
+  for (var i = 0; i < options.length; i++) if (options[i].selected) return i
+  return -1
+}
+
+// Whether the Effect tab draws its choice row (a keyboard stop).
+function effectModeShown(record) {
+  return effectModeView(record, null).visible
 }
 
 // The background image path as the panel shows it: the sanitised copy inside
@@ -796,36 +758,12 @@ function imagePathText(record) {
   return "\u2066" + record.backgroundImage + "\u2069"
 }
 
-// Read-only rows under the choices: the blur strength while blurring (unless
-// `strengthShown`: the Effect tab draws the daemon's strength setting, an
-// adjustable one, instead), the background image while replacing. Empty when unavailable or when the CLI
-// or the daemon predates effects.
-function effectRows(record, strengthShown) {
-  if (!effectsSupported(record)) return []
-  // The daemon's own strength setting is drawn (adjustable) instead.
-  if (record.effectKey === "blur" && strengthShown !== true) {
-    var s = record.blurStrength
-    return [{ label: "Strength", value: s === null ? UNKNOWN : Math.round(s * 100) + " %" }]
-  }
-  if (record.effectKey === "replace")
-    return [{ label: "Image", value: imagePathText(record) }]
-  return []
-}
-
-// The line under the effect choices, { text, commandText }: that the CLI or
-// the daemon predates effects, that the daemon reports an effect this plugin does not
-// know, or, while the daemon has no background image, how to give it one.
-// `commandText` is shown to copy, never run.
-function effectHint(record) {
-  if (!available(record)) return { text: "", commandText: "" }
-  if (!effectsSupported(record)) return { text: effectsMissingText(record) + ".", commandText: "" }
-  if (record.effectKey === "")
-    return { text: "omarchy-broadcastd reports an effect this plugin does not know"
-               + (record.effect !== "" ? ": " + record.effect : "") + ". Update the plugin.",
-             commandText: "" }
-  if (!hasBackgroundImage(record))
-    return { text: "Replace needs an image:", commandText: "omarchy-broadcast effect replace --image PATH" }
-  return { text: "", commandText: "" }
+// Read-only rows under the choices: the background image the daemon holds,
+// whatever the effect. Empty when unavailable, below MODULES_REVISION or
+// with no image.
+function effectRows(record) {
+  if (!moduleEffects(record) || !hasBackgroundImage(record)) return []
+  return [{ label: "Background image", value: imagePathText(record) }]
 }
 
 // Exit status of a control command -> a short, capped message for the panel.
@@ -850,32 +788,6 @@ function commandFailureText(code, stderrLine, cliPath) {
 function watchExitText(code, crashed, delayMs) {
   var how = crashed ? "stopped by signal " + code : "exited with status " + code
   return "omarchy-broadcast watch " + how + "; restarting in " + Math.round(delayMs / 1000) + " s"
-}
-
-// ---------------------------------------------------------------- noise removal
-
-// Whether noise removal can be switched: an available daemon whose interface
-// revision is at least DENOISE_REVISION and whose line reports `denoise` as a
-// boolean. A CLI or a daemon that predates it omits the field (or reports an
-// older revision), and the panel then shows no switch (an off switch would
-// claim a state nobody reported). An unknown revision counts as no.
-function denoiseSupported(record) {
-  return available(record) && typeof record.denoise === "boolean"
-    && typeof record.interfaceRevision === "number"
-    && record.interfaceRevision >= DENOISE_REVISION
-}
-
-// The panel's noise removal row: { visible, checked, label, tooltip }, the
-// tooltip worded as the on/off switch's is.
-function denoiseRow(record) {
-  var shown = denoiseSupported(record)
-  var checked = shown && record.denoise === true
-  return {
-    visible: shown,
-    label: DENOISE_LABEL,
-    checked: checked,
-    tooltip: checked ? "Turn noise removal off" : "Turn noise removal on"
-  }
 }
 
 // ---------------------------------------------------------------- stderr framing
@@ -924,7 +836,7 @@ function enableArgv(cli, on) {
   return cliUsable(cli) ? [cli, on ? "on" : "off"] : null
 }
 
-// Right click: flips the persisted switch, only when the daemon's state is
+// Middle click: flips the persisted switch, only when the daemon's state is
 // known. Privacy fails closed: an `off` the user could not see is never
 // flipped, and `on` would D-Bus-activate a stopped daemon.
 function toggleArgv(cli, record) {
@@ -948,23 +860,10 @@ function canNext(record) {
   return available(record) && record.cameras.length >= 2
 }
 
-// Only a word of EFFECTS is ever sent, as its own argv element: nothing from
-// the daemon or the panel reaches the command line otherwise.
-function effectArgv(cli, effect) {
-  if (!cliUsable(cli) || effectKey(effect) === "") return null
-  return [cli, "effect", effect]
-}
-
-// Only `on` or `off` is ever sent, from a strict boolean.
-function denoiseArgv(cli, on) {
-  if (!cliUsable(cli) || typeof on !== "boolean") return null
-  return [cli, "denoise", on ? DENOISE_WORDS.on : DENOISE_WORDS.off]
-}
-
 // A control request is kept as an intent, { verb, on, id, effect, value, camera },
 // and turned into an argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera`/`effect`/`denoise`/`settings` would D-Bus-activate it) or
+// gone meanwhile (`on`/`off`/`camera`/`settings`/`config`/`modules`/`order` would D-Bus-activate it) or
 // with a CLI path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
@@ -972,30 +871,39 @@ function intentArgv(intent, cli, record) {
   case "enable": return available(record) ? enableArgv(cli, intent.on === true) : null
   case "select": return available(record) ? selectArgv(cli, intent.id) : null
   case "next": return canNext(record) ? nextArgv(cli) : null
-  case "effect": return effectSelectable(record, intent.effect) ? effectArgv(cli, intent.effect) : null
-  case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null
+  case "setup": return setupIntentArgv(cli, record, intent)
   case "setting": return settingIntentArgv(cli, record, intent)
   case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null
   default: return null
   }
 }
 
-// Right click on the bar icon: "toggle", "open-panel" (unavailable: never
+// Middle click on the bar icon: "toggle", "open-panel" (unavailable: never
 // flip a state the user cannot see) or "ignore" (`busy`: a command other
-// than a camera setting write is in flight or queued, see toggleBlocked; its
-// result has not arrived, so the target of a toggle is unknown; the panel
-// switch follows the same rule through its `busy`). Any other click opens
-// and closes the panel.
-function rightClickAction(record, busy) {
+// than a camera setting write or a setup write is in flight or queued, see
+// toggleBlocked; its result has not arrived, so the target of a toggle is
+// unknown; the panel switch follows the same rule through its `busy`).
+function middleClickAction(record, busy) {
   if (!available(record)) return "open-panel"
   return busy === true ? "ignore" : "toggle"
 }
 
+// What a click on the bar icon does, by button ("left", "middle" or
+// "right"): left opens and closes the panel ("panel"), middle turns the
+// camera on or off (middleClickAction), right opens the setup dialog
+// ("setup"), whatever the daemon's state: the dialog says what is wrong.
+function clickAction(button, record, busy) {
+  if (button === "middle") return middleClickAction(record, busy)
+  if (button === "right") return "setup"
+  return "panel"
+}
+
 // What the bar icon's clicks do, for its accessible description: constants
-// only, worded for the state the right click would act on.
+// only, worded for the state the middle click would act on.
 function barClickHelp(record) {
-  if (!available(record)) return "Click or right click: open the panel."
-  return "Click: open the panel. Right click: " + (record.enabled ? "turn the camera off." : "turn the camera on.")
+  if (!available(record)) return "Click or middle click: open the panel. Right click: open the setup."
+  return "Click: open the panel. Middle click: " + (record.enabled ? "turn the camera off." : "turn the camera on.")
+    + " Right click: open the setup."
 }
 
 // The watch runs only while it has readers, a CLI is known and no respawn
@@ -1395,7 +1303,8 @@ var SEGMENTED_MAX_CHARS = 28
 var CONTROLS_DEBOUNCE_MS = 150
 // Commands waiting behind a running one (see enqueueIntent). Every kind the
 // queue can hold, and its most:
-//   other ask (effect, denoise, select, next, enable ...)   1
+//   other ask (select, next, enable ...)                     1
+//   setup write (config, modules, order: the setup dialog)  SETUP_QUEUE_CAP
 //   reset                                                    1
 //   slider write (setting, no quick), one per id             SETTING_QUEUE_CAP
 //   quick write (setting, quick, not action), one per id     QUICK_QUEUE_CAP
@@ -1408,7 +1317,10 @@ var CONTROLS_DEBOUNCE_MS = 150
 var SETTING_QUEUE_CAP = 8
 var QUICK_QUEUE_CAP = 4
 var ACTION_QUEUE_CAP = SETTINGS_ROW_CAP
-var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + QUICK_QUEUE_CAP + ACTION_QUEUE_CAP + 2
+// A setup write is refused while another is running or queued
+// (setupWriteBusy), so one is ever queued.
+var SETUP_QUEUE_CAP = 1
+var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + QUICK_QUEUE_CAP + ACTION_QUEUE_CAP + SETUP_QUEUE_CAP + 2
 var SETTINGS_TITLE = "SETTINGS"
 var SETTINGS_RESET_LABEL = "Reset to defaults"
 var SETTINGS_RESET_TOOLTIP = "Set every setting of this camera back to its default and forget the stored values"
@@ -2038,12 +1950,13 @@ var EFFECT_MODE_SETTING = "effect.background.mode"
 // The Effect tab's generic section: every group of global settings, all open
 // (no accordion, no reset: the camera's reset never reaches them), without
 // the setting the dedicated row owns (a group left with nothing is not
-// drawn). No groups (`visible` false) when the daemon publishes no global
-// setting at all, and the panel then keeps its own rows.
+// drawn). No groups (`visible` false) when the daemon publishes no other
+// global setting, or predates module effects (MODULES_REVISION: the tab
+// then says it needs updating).
 function effectSettingsView(record, drafts) {
   var out = emptySettingsView()
   out.collapsible = false
-  if (!available(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out
+  if (!moduleEffects(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out
   var set = record.settings
   out.setKey = JSON.stringify([set.camera, set.serial])
   var stop = 0
@@ -2069,25 +1982,8 @@ function effectSettingsView(record, drafts) {
   return out
 }
 
-// The two settings that replace a legacy row of the Effect tab. Named only
-// to hide that row once its setting is drawn (effectSettingShown); the
-// generic renderer names no setting.
-var LEGACY_STRENGTH_SETTING = "effect.background.blur_strength"
-var LEGACY_DENOISE_SETTING = "effect.video.denoise"
-
-// Whether the Effect tab's generic view draws setting `id` as a row.
-function effectSettingShown(view, id) {
-  if (!isPlainObject(view) || !Array.isArray(view.groups)) return false
-  for (var g = 0; g < view.groups.length && g < SETTINGS_GROUP_CAP; g++) {
-    var rows = Array.isArray(view.groups[g].rows) ? view.groups[g].rows : []
-    for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) if (rows[r].id === id) return true
-  }
-  return false
-}
-
 // Whether the Effect tab draws the daemon's global settings (a daemon that
-// publishes some) in place of its own read-only strength and noise removal
-// rows.
+// publishes some besides the background effect's choice).
 function effectSettingsShown(view) {
   return isPlainObject(view) && Array.isArray(view.groups) && view.groups.length > 0
 }
@@ -2212,6 +2108,7 @@ function isSettingIntent(intent) {
 // other ask is dropped and no draft is left waiting on a write that will
 // never run.
 function queueTakes(queue, intent) {
+  if (isSetupIntent(intent)) return !setupWriteBusy(null, queue)
   if (!isPlainObject(intent) || intent.verb !== "setting") return true
   var q = Array.isArray(queue) ? queue : []
   var count = { slider: 0, quick: 0, action: 0 }
@@ -2236,13 +2133,15 @@ function queueKind(intent) {
 // the same setting id is replaced by the newer one, and a reset replaces
 // every queued write and reset (it supersedes them), so a slider drag never
 // queues more than one command per setting. Any other ask replaces the
-// other ask queued before it (the latest wins). The new intent goes last, so
+// other ask queued before it (the latest wins); a setup write (the setup
+// dialog's) is neither replaced by one nor replaces one. The new intent goes last, so
 // the order of what the user did is kept, except an on/off ask: it goes
 // first, so turning the camera off never waits behind slider writes, and a
 // discrete ask (isQuickIntent) goes ahead of the queued slider writes. A
 // write queueTakes refuses leaves the queue as it was. So the queue holds at
 // most one other ask, one reset, SETTING_QUEUE_CAP slider writes,
-// QUICK_QUEUE_CAP quick writes and ACTION_QUEUE_CAP actions, which is
+// QUICK_QUEUE_CAP quick writes, ACTION_QUEUE_CAP actions and SETUP_QUEUE_CAP
+// setup writes, which is
 // INTENT_QUEUE_CAP (the table above SETTING_QUEUE_CAP): the input is cut to it
 // as a backstop only, and nothing is ever cut from a queue this function made.
 function enqueueIntent(queue, intent) {
@@ -2258,7 +2157,11 @@ function enqueueIntent(queue, intent) {
       // The camera's reset supersedes the camera's writes only: a global
       // write (intent.scope) is not the camera's to reset.
       if (isSettingIntent(p) && !isGlobalIntent(p)) continue
-    } else if (!isSettingIntent(p)) {
+    } else if (isSetupIntent(intent)) {
+      // One setup write at a time (queueTakes); every other ask stays.
+      if (isSetupIntent(p)) continue
+    } else if (!isSettingIntent(p) && !isSetupIntent(p)) {
+      // An other ask replaces the other ask before it; a setup write stays.
       continue
     }
     out.push(p)
@@ -2289,7 +2192,7 @@ function enqueueIntent(queue, intent) {
 // queued slider writes (Model.enqueueIntent).
 function isQuickIntent(intent) {
   return isPlainObject(intent)
-    && (intent.verb === "effect" || intent.verb === "denoise" || (intent.verb === "setting" && intent.quick === true))
+    && intent.verb === "setting" && intent.quick === true
 }
 
 // A queued write of a global setting (made with its row's scope).
@@ -2322,13 +2225,16 @@ function keepGlobalSettings(map, records) {
 }
 
 // Whether an on/off toggle must wait: a command other than a camera setting
-// write is running or queued, so its result (and with it the target of the
-// toggle) has not arrived. Setting writes never hold the switch.
+// write or a setup write is running or queued, so its result (and with it
+// the target of the toggle) has not arrived. Setting writes never hold the
+// switch, and the setup dialog's writes (a module, the order, a config key)
+// are settings-type writes too: they do not either.
 function toggleBlocked(running, queue) {
-  if (isPlainObject(running) && !isSettingIntent(running)) return true
+  var holds = function(intent) { return isPlainObject(intent) && !isSettingIntent(intent) && !isSetupIntent(intent) }
+  if (holds(running)) return true
   var q = Array.isArray(queue) ? queue : []
   for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
-    if (isPlainObject(q[i]) && !isSettingIntent(q[i])) return true
+    if (holds(q[i])) return true
   return false
 }
 
@@ -2440,7 +2346,7 @@ var PANEL_TABS = ["effect", "camera", "status"]
 var PANEL_TAB_DEFAULT = "effect"
 var PANEL_TAB_LABELS = { effect: "Effect", camera: "Camera", status: "Status" }
 var PANEL_TAB_DESCRIPTIONS = {
-  effect: "Background effect and noise removal",
+  effect: "Background effect and the video effects' settings",
   camera: "Camera choice and camera settings",
   status: "State, consumers, outputs and live figures"
 }
@@ -2505,11 +2411,11 @@ function statusRows(record) {
 // the row; only when `previewControls`, see previewControlsShown), the tab
 // row (one stop; Left/Right change the tab), then only the stops of the tab
 // shown (`tab`, read through panelTabValue):
-//   effect  the effect choices (one stop for the row; Left/Right walk its
-//           choices, as in the shell's button groups), then the rows of
-//           the noise removal switch unless the generic rows hold it, then
-//           the rows of `effectSettings` (effectSettingsView: the daemon's
-//           global settings, drawn generically, no group header is a stop);
+//   effect  the background effect's choices (one stop for the row;
+//           Left/Right walk its choices, as in the shell's button groups),
+//           then the rows of `effectSettings` (effectSettingsView: the
+//           daemon's other global settings, drawn generically, no group
+//           header is a stop);
 //   camera  one per rendered camera row (`cameraCount` is the count the
 //           panel draws, so the cursor and the rows always agree), Next
 //           camera when it is shown, then from `settings` (the settingsView
@@ -2519,9 +2425,8 @@ function statusRows(record) {
 //           open group (index: the row's `stop`);
 //   status  nothing (it only shows figures).
 // Nothing is a stop while the daemon is unavailable: no control is drawn. The
-// effect row is no stop either when the CLI or the daemon predates effects
-// (none of its choices can be requested), nor the noise removal switch when
-// the daemon does not report it (it is not drawn).
+// effect row is no stop either while it is not drawn (effectModeView: the
+// daemon predates module effects, or offers no background effect).
 function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
@@ -2532,11 +2437,7 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
   stops.push({ kind: "tabs", index: -1 })
   var shown = panelTabValue(tab)
   if (shown === "effect") {
-    if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
-    // The legacy switch stands only where its setting is not drawn; it sits
-    // above the generic rows.
-    if (denoiseSupported(record) && !effectSettingShown(effectSettings, LEGACY_DENOISE_SETTING))
-      stops.push({ kind: "denoise", index: -1 })
+    if (effectModeShown(record)) stops.push({ kind: "effect", index: -1 })
     if (effectSettingsShown(effectSettings)) {
       // The generic rows' stops number from 0 in this tab's view, as the
       // camera's do in theirs (the two are never shown together).
@@ -2651,4 +2552,1028 @@ function settingValue(settings, key) {
   if (settings === null || typeof settings !== "object") return null
   var value = settings[key]
   return value === undefined ? null : value
+}
+
+// ---------------------------------------------------------------- setup dialog
+
+// The setup dialog (SetupDialog.qml, the plugin's overlay): the effect
+// modules, the order their stages run in, the backend profile and pins, the
+// daemon's configuration and a read-only diagnosis. Its data comes from four
+// one-shot reads (docs/cli-json.md): `modules list --json`, `order show
+// --json` (interface revision MODULES_REVISION), `config show --json` and
+// `config files --json` (CONFIG_REVISION), run by the Daemon singleton when
+// the dialog opens and again whenever the watch reports a change
+// (`config_changed`, `modules_changed`, a new snapshot) or a write of the
+// dialog has run. As everywhere else the daemon is the only authority: which
+// keys can be written, which file overrides one, which stage moves are
+// valid (the order line's `up`/`down`) all arrive with the data; the plugin
+// draws them, and a write is re-read, never assumed.
+
+// The interface revision of the configuration schema and its writes
+// (GetConfigSchema, SetConfig; obc-ipc INTERFACE_REVISION 10) and the
+// schema version of the config rows this plugin reads.
+var CONFIG_REVISION = 10
+var CONFIG_SCHEMA = 1
+// The sections, in the order of the list on the left (keys 1 to 5).
+var SETUP_SECTIONS = ["modules", "order", "backends", "daemon", "diagnostics"]
+var SETUP_SECTION_LABELS = {
+  modules: "Modules", order: "Order", backends: "Backends", daemon: "Daemon", diagnostics: "Diagnostics"
+}
+var SETUP_SECTION_DESCRIPTIONS = {
+  modules: "The effect modules and whether each one is enabled",
+  order: "The order the effect stages run in",
+  backends: "The backend profile and the module that provides each stage",
+  daemon: "The daemon's configuration",
+  diagnostics: "Interface revision, errors, configuration files and module problems"
+}
+// The reads behind the sections, in the order they run.
+var SETUP_READS = ["modules", "order", "config", "files"]
+var SETUP_TITLE = "Omarchy Broadcast setup"
+var SETUP_OLD_DAEMON = "The daemon needs updating for the setup dialog (omarchy-broadcastd 0.24 or newer)."
+var SETUP_OLD_CONFIG = "The daemon needs updating to show its configuration here (omarchy-broadcastd 0.25 or newer)."
+var SETUP_OLD_PLUGIN = "Update the plugin to show the daemon's configuration."
+var SETUP_LOADING = "Loading…"
+var SETUP_SAVING = "Saving…"
+// Where the daemon looks by default (modules.dirs; docs/modules.md).
+var MODULES_EMPTY_TEXT = "No effect modules installed. A module's manifest goes in ~/.local/share/omarchy-broadcast/modules.d (your own) or /usr/lib/omarchy-broadcast/modules.d (packaged)."
+var ORDER_EMPTY_TEXT = "No effect stages to order"
+var BACKENDS_EMPTY_TEXT = "No backend settings: no module offers a stage."
+var OVERRIDDEN_PREFIX = "Overridden by "
+var ORDER_RESET_LABEL = "Reset order"
+var ORDER_TRUNCATED_TEXT = "The daemon reports more stages than are shown; change the order with omarchy-broadcast order set."
+var APPLY_TEXTS = { reload: "Applies at next camera start", restart: "Needs a daemon restart" }
+var FILE_STATUS_TEXTS = { loaded: "Loaded", absent: "Not present", error: "Error" }
+var MANAGED_FILE_TEXT = "Written by this dialog and the CLI"
+// Shown in Diagnostics to copy, never run.
+var DIAGNOSTIC_COMMANDS = ["omarchy-broadcast modules", "journalctl --user -u omarchy-broadcastd"]
+
+// Caps. The producer's: a module list of at most MODULE_LINES_CAP lines
+// (the header counts the rest), 32 stages a module and in an order, 16 config
+// files; this plugin draws at most these.
+var MODULE_LINES_CAP = 64
+var SETUP_MODULE_CAP = 32
+var MODULE_STAGE_CAP = 32
+var ORDER_CAP = 32
+var CONFIG_LINES_CAP = 64
+var CONFIG_GROUP_CAP = 16
+var CONFIG_GROUP_ROW_CAP = 48
+var CONFIG_ROW_CAP = 128
+var CONFIG_OPTION_CAP = 16
+var CONFIG_FILES_CAP = 16
+var CONFIG_LIST_CAP = 16
+// Lines of one read ever looked at: the longest is a module list.
+var READ_LINES_CAP = MODULE_LINES_CAP + 2
+// Display bounds (the producer's, docs/cli-json.md).
+var MODULE_ID_CAP = 64
+var MODULE_VERSION_CAP = 32
+var MODULE_REASON_CAP = 96
+var CONFIG_KEY_CAP = 128
+var CONFIG_DESCRIPTION_CAP = 160
+var CONFIG_VALUE_CAP = 160
+var CONFIG_REASON_CAP = 160
+var CONFIG_FILE_CAP = 96
+var CONFIG_DIR_CAP = 256
+var STAGE_WORD_CAP = 32
+// The payload a summon carries: a few keys only.
+var SETUP_PAYLOAD_CAP = PATH_CAP + 256
+
+// The grammars (docs/modules.md, "Reserved names"; a config key is a dotted
+// path whose last parts may be a module id).
+var MODULE_ID_RE = /^[a-z0-9]+(\.[a-z0-9-]+)+$/
+var STAGE_ID_RE = /^[a-z][a-z0-9-]{0,31}$/
+// Any number of parts (bounded by CONFIG_KEY_CAP): a module id has as many
+// as the daemon's valid_module_id allows within its 64 bytes.
+var CONFIG_KEY_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_-]+)+$/
+// An option value of a config enum: a word, a module id, or "" (Automatic).
+var CONFIG_OPTION_RE = /^([a-z0-9][a-z0-9_.-]{0,63})?$/
+// The words a config value is written as: a decimal number, true or false,
+// an option value ("" included). Each is one argv element after `--`.
+var CONFIG_WORD_RE = /^(-?[0-9]{1,16}(\.[0-9]{1,6})?|true|false|[a-z0-9][a-z0-9_.-]{0,63}|)$/
+var CONFIG_TYPES = ["bool", "int", "float", "enum", "string", "path", "list"]
+var CONFIG_APPLY = ["live", "reload", "restart"]
+var MODULE_STATUSES = ["available", "unavailable", "disabled"]
+var FILE_STATUSES = ["loaded", "absent", "error"]
+
+// ---- payload and the panel it forwards to
+
+// The overlay's open() payload -> { view, cliSetting }: "setup" only for an
+// object whose `view` is "setup" (the right click's); anything else, the
+// empty payload of the panel hotkey and the shell's "{}" included, is the
+// bar panel ("panel"). `cliSetting` is the clicked widget's cliPath setting
+// as given (a string within PATH_CAP), else null.
+function setupPayload(json) {
+  var p = null
+  if (typeof json === "string" && json !== "" && json.length <= SETUP_PAYLOAD_CAP) {
+    try { p = JSON.parse(json) } catch (e) { p = null }
+  }
+  if (!isPlainObject(p) || p.view !== "setup") return { view: "panel", cliSetting: null }
+  var cli = p.cliPath
+  return { view: "setup", cliSetting: typeof cli === "string" && cli.length <= PATH_CAP ? cli : null }
+}
+
+// The right click's payload: the view, and the widget's cliPath setting
+// when it has one.
+function setupPayloadJson(cliSetting) {
+  var p = { view: "setup" }
+  if (typeof cliSetting === "string" && cliSetting.length <= PATH_CAP) p.cliPath = cliSetting
+  return JSON.stringify(p)
+}
+
+// Which bar widget's panel a forwarded hotkey opens: `candidates` are
+// { screenName, visible }, one per widget (one per monitor). As the shell's
+// own bar does for its panels (BarModel.pickPanelSlot): the copies on the
+// focused screen when there are any, else all of them; among those, the
+// first drawn one, else the first. -1 for none.
+function pickPanelOwner(candidates, focusedScreen) {
+  var rows = Array.isArray(candidates) ? candidates : []
+  var pool = []
+  for (var i = 0; i < rows.length; i++) if (isPlainObject(rows[i])) pool.push(i)
+  var focused = typeof focusedScreen === "string" ? focusedScreen : ""
+  if (focused !== "") {
+    var onFocused = pool.filter(function(at) { return rows[at].screenName === focused })
+    if (onFocused.length > 0) pool = onFocused
+  }
+  for (var k = 0; k < pool.length; k++) if (rows[pool[k]].visible === true) return pool[k]
+  return pool.length > 0 ? pool[0] : -1
+}
+
+// ---- field readers
+
+function moduleIdOf(value) {
+  return typeof value === "string" && value.length <= MODULE_ID_CAP && MODULE_ID_RE.test(value) ? value : ""
+}
+
+function stageIdOf(value) {
+  return typeof value === "string" && STAGE_ID_RE.test(value) && !reservedKey(value) ? value : ""
+}
+
+function configKeyOf(value) {
+  return typeof value === "string" && value.length <= CONFIG_KEY_CAP && CONFIG_KEY_RE.test(value) && !reservedKey(value) ? value : ""
+}
+
+// A file name relative to the config dir (`source`, `overridden_by`, a
+// config file's path), for the screen.
+function fileText(value) {
+  return sanitize(value, CONFIG_FILE_CAP)
+}
+
+// An integer the JavaScript number holds exactly, else null.
+function configInt(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && Math.abs(value) <= 9007199254740991 ? value : null
+}
+
+// A finite number within +-1e15 (so toFixed never gives an exponent), else null.
+function configFloat(value) {
+  return typeof value === "number" && isFinite(value) && Math.abs(value) < 1e15 ? value : null
+}
+
+// The decimals a step needs (0.05 -> 2), at most 6.
+function stepDecimals(step) {
+  for (var d = 0; d < 6; d++) {
+    var scaled = step * Math.pow(10, d)
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-9) return d
+  }
+  return 6
+}
+
+// ---- reading a command's lines
+
+// A read's raw stdout lines -> { messages, error }: the v1 objects, at most
+// READ_LINES_CAP lines looked at (an over-cap line is dropped by parseLine),
+// and the text of an `error` line (the last one) or of a newer schema.
+function setupMessages(lines) {
+  var src = Array.isArray(lines) ? lines : []
+  var out = []
+  var error = ""
+  for (var i = 0; i < src.length && i < READ_LINES_CAP; i++) {
+    var p = parseLine(src[i])
+    if (p.kind === "unsupported")
+      return { messages: [], error: "omarchy-broadcast prints output schema v" + p.version + "; this plugin reads v" + SCHEMA_VERSION + ". Update the plugin." }
+    if (p.kind !== "message") continue
+    if (p.message.type === "error") error = setupErrorText(p.message)
+    else out.push(p.message)
+  }
+  return { messages: out, error: error }
+}
+
+// An `error` line of a read, for the screen.
+function setupErrorText(m) {
+  if (m.code === "daemon-not-running") return "omarchy-broadcastd is not running"
+  var text = sanitize(m.error, DETAIL_CAP)
+  if (m.code === "unsupported-daemon") return text !== "" ? text : SETUP_OLD_DAEMON
+  return text !== "" ? text : "The daemon could not be read"
+}
+
+function readFailed(text) {
+  return { ok: false, error: text }
+}
+
+// The text a read that gave nothing usable fails with: its error line, else
+// what its exit status says (commandFailureText), else `fallback`.
+function readFailure(got, code, stderrText, fallback) {
+  if (got.error !== "") return readFailed(got.error)
+  if (typeof code === "number" && code !== 0) return readFailed(commandFailureText(code, stderrText, ""))
+  return readFailed(fallback)
+}
+
+// ---- modules list
+
+// A stage object of a `module` line -> { id, slot, device, rank, available,
+// reason, selected }, or null.
+function moduleStageEntry(o) {
+  if (!isPlainObject(o)) return null
+  var id = stageIdOf(o.id)
+  if (id === "") return null
+  return {
+    id: id, slot: sanitize(o.slot, STAGE_WORD_CAP), device: sanitize(o.device, STAGE_WORD_CAP),
+    rank: configInt(o.rank) !== null ? o.rank : 0, available: o.available === true,
+    reason: o.available === true ? "" : settingText(o.reason, MODULE_REASON_CAP), selected: o.selected === true
+  }
+}
+
+// The `module` object -> a row, or null (no id of the grammar). An unknown
+// status reads as "unavailable".
+function moduleEntry(o) {
+  if (!isPlainObject(o)) return null
+  var id = moduleIdOf(o.id)
+  if (id === "") return null
+  var name = settingText(o.name, NAME_CAP)
+  var status = MODULE_STATUSES.indexOf(o.status) >= 0 ? o.status : "unavailable"
+  var src = Array.isArray(o.stages) ? o.stages : []
+  var stages = []
+  for (var i = 0; i < src.length && i < MODULE_STAGE_CAP; i++) {
+    var st = moduleStageEntry(src[i])
+    if (st) stages.push(st)
+  }
+  return {
+    id: id, name: name !== "" ? name : id, version: settingText(o.version, MODULE_VERSION_CAP),
+    enabled: o.enabled === true, status: status,
+    reason: status === "available" ? "" : settingText(o.reason, MODULE_REASON_CAP),
+    overriddenBy: fileText(o.overridden_by), stages: stages,
+    stagesTruncated: o.stages_truncated === true || src.length > MODULE_STAGE_CAP
+  }
+}
+
+// `modules list --json` -> { ok, serial, profile, profileOverriddenBy,
+// modules, total } or { ok: false, error }. The `modules` header counts the
+// `module` lines; the list is used only when every one of them arrived (each
+// index once), as a set of settings lines is.
+function readModules(lines, code, stderrText) {
+  var got = setupMessages(lines)
+  var head = null
+  var byIndex = []
+  var received = 0
+  for (var i = 0; i < got.messages.length; i++) {
+    var m = got.messages[i]
+    if (m.type === "modules" && head === null) {
+      var count = lineIndex(m.count, 0, MODULE_LINES_CAP + 1)
+      if (count < 0) continue
+      head = { serial: settingsNumber(m.serial), count: count, profile: sanitize(m.profile, STAGE_WORD_CAP),
+               profileOverriddenBy: fileText(m.profile_overridden_by) }
+      for (var n = 0; n < count; n++) byIndex.push(null)
+    }
+  }
+  if (head === null) return readFailure(got, code, stderrText, "omarchy-broadcast printed no module list")
+  for (var j = 0; j < got.messages.length; j++) {
+    var l = got.messages[j]
+    if (l.type !== "module" || lineIndex(l.count, 0, MODULE_LINES_CAP + 1) !== head.count) continue
+    var index = lineIndex(l.index, 0, head.count)
+    if (index < 0 || byIndex[index] !== null) continue
+    byIndex[index] = { entry: moduleEntry(l.module) }
+    received++
+  }
+  if (received < head.count) return readFailed("The module list arrived incomplete")
+  var modules = []
+  var seen = Object.create(null)
+  for (var k = 0; k < byIndex.length; k++) {
+    var e = byIndex[k].entry
+    if (!e || seen[e.id] === true) continue
+    seen[e.id] = true
+    modules.push(e)
+  }
+  return { ok: true, serial: head.serial, profile: head.profile, profileOverriddenBy: head.profileOverriddenBy,
+           modules: modules.slice(0, SETUP_MODULE_CAP), total: modules.length }
+}
+
+// ---- stage order
+
+// `order show --json` -> { ok, order, stages, overriddenBy, truncated } or
+// { ok: false, error }. `stages` follows `order` (the stage ids of the
+// grammar, each once, at most ORDER_CAP): { id, slot, up, down }, where
+// up/down are the daemon's word that the swap with the previous / next
+// stage would be accepted (false when the line does not say: a daemon below
+// CONFIG_REVISION, or a stage it does not describe). A truncated order can
+// not be written back whole, so nothing in it moves.
+function readOrder(lines, code, stderrText) {
+  var got = setupMessages(lines)
+  var m = null
+  for (var i = 0; i < got.messages.length && m === null; i++) if (got.messages[i].type === "order") m = got.messages[i]
+  if (m === null || !Array.isArray(m.order)) return readFailure(got, code, stderrText, "omarchy-broadcast printed no stage order")
+  var info = Object.create(null)
+  var described = Array.isArray(m.stages) ? m.stages : []
+  for (var d = 0; d < described.length && d < ORDER_CAP; d++) {
+    var s = described[d]
+    var sid = isPlainObject(s) ? stageIdOf(s.id) : ""
+    if (sid !== "" && info[sid] === undefined) info[sid] = s
+  }
+  var truncated = m.order_truncated === true || m.order.length > ORDER_CAP
+  var order = []
+  var stages = []
+  var seen = Object.create(null)
+  for (var k = 0; k < m.order.length && k < ORDER_CAP; k++) {
+    var id = stageIdOf(m.order[k])
+    if (id === "" || seen[id] === true) { truncated = true; continue }
+    seen[id] = true
+    order.push(id)
+    var st = info[id]
+    stages.push({ id: id, slot: st ? sanitize(st.slot, STAGE_WORD_CAP) : "",
+                  up: !truncated && !!st && st.up === true, down: !truncated && !!st && st.down === true })
+  }
+  if (truncated) for (var t = 0; t < stages.length; t++) { stages[t].up = false; stages[t].down = false }
+  return { ok: true, order: order, stages: stages, overriddenBy: fileText(m.overridden_by), truncated: truncated }
+}
+
+// The order after moving stage `index` up (`direction` -1) or down (1): a
+// new array, or null when the daemon does not allow that move (its up/down),
+// the order is overridden or truncated, or there is no such stage.
+function orderAfterMove(order, index, direction) {
+  if (!isPlainObject(order) || order.ok !== true || order.truncated || order.overriddenBy !== "") return null
+  var st = order.stages[index]
+  if (!st || !(direction === -1 || direction === 1)) return null
+  if (direction === -1 ? !st.up : !st.down) return null
+  var other = index + direction
+  if (other < 0 || other >= order.order.length) return null
+  var next = order.order.slice()
+  next[index] = order.order[other]
+  next[other] = order.order[index]
+  return next
+}
+
+// ---- configuration schema
+
+// The options of a config enum: { value, label }, at most CONFIG_OPTION_CAP
+// looked at; "" is a value (a pin's "Automatic").
+function configOptions(value) {
+  var src = Array.isArray(value) ? value : []
+  var n = Math.min(src.length, CONFIG_OPTION_CAP)
+  var out = []
+  var seen = Object.create(null)
+  for (var i = 0; i < n; i++) {
+    var o = src[i]
+    if (!isPlainObject(o) || typeof o.value !== "string" || !CONFIG_OPTION_RE.test(o.value) || reservedKey(o.value)) continue
+    if (seen["=" + o.value] === true) continue
+    seen["=" + o.value] = true
+    var label = settingText(o.label, OPTION_LABEL_CAP)
+    out.push({ value: o.value, label: label !== "" ? label : (o.value !== "" ? o.value : UNKNOWN) })
+  }
+  return { options: out, total: out.length + (src.length - n) }
+}
+
+// One row of a config_group line -> a row, or null (skipped: a key not of
+// the grammar, an unknown type, a value not of its type):
+//   bool         value a boolean
+//   int, float   value a number (an int a whole one); min, max and step
+//                make it adjustable (`bounded`) when they are numbers with
+//                max > min, step > 0 and at most SETTING_STEPS_MAX steps;
+//                the value is then clamped into range
+//   enum         at least one option; a value that is not one reads as ""
+//   string, path value a string (a display copy)
+//   list         value an array of strings (display copies, at most
+//                CONFIG_LIST_CAP)
+// plus the fields every row has: label, description, editable, source,
+// overridden_by, apply, enabled and disabled_reason.
+function configEntry(s) {
+  if (!isPlainObject(s)) return null
+  var id = configKeyOf(s.id)
+  if (id === "" || typeof s.type !== "string" || CONFIG_TYPES.indexOf(s.type) < 0) return null
+  var label = settingText(s.label, SETTING_LABEL_CAP)
+  var enabled = s.enabled === true
+  var e = {
+    id: id, type: s.type, label: label !== "" ? label : id,
+    description: settingText(s.description, CONFIG_DESCRIPTION_CAP),
+    value: null, defaultValue: null, min: 0, max: 0, step: 0, bounded: false, decimals: 0,
+    unit: settingText(s.unit, SETTING_UNIT_CAP), options: [], optionsTotal: 0, itemsTotal: 0,
+    editable: s.editable === true, source: fileText(s.source), overriddenBy: fileText(s.overridden_by),
+    apply: CONFIG_APPLY.indexOf(s.apply) >= 0 ? s.apply : "live",
+    enabled: enabled, reason: enabled ? "" : settingText(s.disabled_reason, CONFIG_REASON_CAP)
+  }
+  if (s.type === "bool") {
+    if (typeof s.value !== "boolean") return null
+    e.value = s.value
+    e.defaultValue = typeof s["default"] === "boolean" ? s["default"] : null
+  } else if (s.type === "int" || s.type === "float") {
+    var num = s.type === "int" ? configInt : configFloat
+    var v = num(s.value)
+    if (v === null) return null
+    var min = num(s.min)
+    var max = num(s.max)
+    var step = num(s.step)
+    e.bounded = min !== null && max !== null && step !== null && max > min && step > 0 && (max - min) / step <= SETTING_STEPS_MAX
+    if (e.bounded) {
+      e.min = min
+      e.max = max
+      e.step = step
+      v = Math.max(min, Math.min(max, v))
+    }
+    e.decimals = s.type === "float" ? stepDecimals(e.bounded ? step : 0.01) : 0
+    e.value = v
+    e.defaultValue = num(s["default"])
+  } else if (s.type === "enum") {
+    var opts = configOptions(s.options)
+    if (opts.options.length === 0) return null
+    e.options = opts.options
+    e.optionsTotal = opts.total
+    e.value = configOptionIndex(opts.options, s.value) >= 0 ? s.value : null
+    e.defaultValue = configOptionIndex(opts.options, s["default"]) >= 0 ? s["default"] : null
+  } else if (s.type === "string" || s.type === "path") {
+    if (typeof s.value !== "string") return null
+    e.value = sanitize(s.value, CONFIG_VALUE_CAP)
+  } else {
+    if (!Array.isArray(s.value)) return null
+    var items = []
+    for (var i = 0; i < s.value.length && i < CONFIG_LIST_CAP; i++)
+      if (typeof s.value[i] === "string") items.push(sanitize(s.value[i], CONFIG_FILE_CAP))
+    e.value = items
+    e.itemsTotal = s.value.length
+  }
+  return e
+}
+
+function configOptionIndex(options, value) {
+  var list = Array.isArray(options) ? options : []
+  for (var i = 0; i < list.length && i < CONFIG_OPTION_CAP; i++) if (list[i].value === value) return i
+  return -1
+}
+
+// A config_group line -> { serial, index, count, group } or null (an
+// envelope a v1 producer does not print). A group id not of the grammar is
+// kept as a refused group, so the rest of the set still commits.
+function configGroupLine(m) {
+  if (!isPlainObject(m) || m.type !== "config_group" || typeof m.schema !== "number") return null
+  var serial = settingsNumber(m.serial)
+  var count = lineIndex(m.count, 1, CONFIG_LINES_CAP)
+  if (serial === 0 || count < 0) return null
+  var index = lineIndex(m.index, 0, count)
+  if (index < 0) return null
+  var g = m.group
+  var gid = isPlainObject(g) ? groupIdOf(g.id) : ""
+  if (gid === "") return { serial: serial, schema: m.schema, index: index, count: count, group: null }
+  var src = Array.isArray(g.settings) ? g.settings : []
+  var n = Math.min(src.length, SETTINGS_LINE_LOOK)
+  var rows = []
+  for (var i = 0; i < n; i++) {
+    var e = configEntry(src[i])
+    if (e) rows.push(e)
+  }
+  var label = settingText(g.label, SETTING_LABEL_CAP)
+  return { serial: serial, schema: m.schema, index: index, count: count,
+           group: { id: gid, label: label !== "" ? label : gid, rows: rows } }
+}
+
+// `config show --json` -> { ok, serial, groups } or { ok: false, error }:
+// the lines of one serial and count, each index once (the assembly rule of
+// settings_group); groups in the order they first appear, the parts of one
+// joined, a repeated key kept once, CONFIG_GROUP_CAP groups of at most
+// CONFIG_GROUP_ROW_CAP rows and CONFIG_ROW_CAP rows in all. A schema newer
+// than CONFIG_SCHEMA is not drawn: the plugin says it needs updating.
+function readConfig(lines, code, stderrText) {
+  var got = setupMessages(lines)
+  var first = null
+  var slots = []
+  var received = 0
+  for (var i = 0; i < got.messages.length; i++) {
+    var line = configGroupLine(got.messages[i])
+    if (!line) continue
+    if (first === null) {
+      if (line.schema > CONFIG_SCHEMA) return readFailed(SETUP_OLD_PLUGIN)
+      if (line.schema !== CONFIG_SCHEMA) continue
+      first = line
+      for (var n = 0; n < line.count; n++) slots.push(null)
+    }
+    if (line.serial !== first.serial || line.count !== first.count || line.schema !== first.schema) continue
+    if (slots[line.index] !== null) continue
+    slots[line.index] = line
+    received++
+  }
+  if (first === null) return readFailure(got, code, stderrText, "omarchy-broadcast printed no configuration")
+  if (received < first.count) return readFailed("The configuration arrived incomplete")
+  var groups = []
+  var byId = Object.create(null)
+  var seen = Object.create(null)
+  var rows = 0
+  for (var k = 0; k < slots.length; k++) {
+    var grp = slots[k].group
+    if (grp === null) continue
+    var g = byId[grp.id]
+    if (g === undefined) {
+      if (groups.length >= CONFIG_GROUP_CAP) continue
+      g = { id: grp.id, label: grp.label, rows: [] }
+      byId[grp.id] = g
+      groups.push(g)
+    }
+    for (var r = 0; r < grp.rows.length; r++) {
+      var row = grp.rows[r]
+      if (seen[row.id] === true || g.rows.length >= CONFIG_GROUP_ROW_CAP || rows >= CONFIG_ROW_CAP) continue
+      seen[row.id] = true
+      g.rows.push(row)
+      rows++
+    }
+  }
+  return { ok: true, serial: first.serial, groups: groups }
+}
+
+// A row of the read configuration by key, or null.
+function findConfigRow(config, key) {
+  if (!isPlainObject(config) || config.ok !== true || typeof key !== "string") return null
+  for (var g = 0; g < config.groups.length && g < CONFIG_GROUP_CAP; g++) {
+    var rows = config.groups[g].rows
+    for (var r = 0; r < rows.length && r < CONFIG_GROUP_ROW_CAP; r++) if (rows[r].id === key) return rows[r]
+  }
+  return null
+}
+
+// `config files --json` -> { ok, dir, files, truncated } or { ok: false,
+// error }: the files in load order, { path, status, managed, reason }; an
+// unknown status reads as "error".
+function readConfigFiles(lines, code, stderrText) {
+  var got = setupMessages(lines)
+  var m = null
+  for (var i = 0; i < got.messages.length && m === null; i++) if (got.messages[i].type === "config_files") m = got.messages[i]
+  if (m === null || !Array.isArray(m.files)) return readFailure(got, code, stderrText, "omarchy-broadcast printed no configuration files")
+  var files = []
+  for (var k = 0; k < m.files.length && k < CONFIG_FILES_CAP; k++) {
+    var f = m.files[k]
+    if (!isPlainObject(f)) continue
+    var status = FILE_STATUSES.indexOf(f.status) >= 0 ? f.status : "error"
+    files.push({ path: fileText(f.path), status: status, managed: f.managed === true,
+                 reason: settingText(f.reason, CONFIG_REASON_CAP) })
+  }
+  return { ok: true, dir: sanitize(m.dir, CONFIG_DIR_CAP), files: files,
+           truncated: m.files_truncated === true || m.files.length > CONFIG_FILES_CAP }
+}
+
+// One read's result by kind (SETUP_READS), from its stdout lines, exit
+// status and first stderr line.
+function setupRead(kind, lines, code, stderrText) {
+  if (kind === "modules") return readModules(lines, code, stderrText)
+  if (kind === "order") return readOrder(lines, code, stderrText)
+  if (kind === "config") return readConfig(lines, code, stderrText)
+  if (kind === "files") return readConfigFiles(lines, code, stderrText)
+  return readFailed("")
+}
+
+// The reads the daemon supports now, in order: the modules and the order
+// from MODULES_REVISION, the configuration and its files from
+// CONFIG_REVISION; none while it is unavailable.
+function setupReads(record) {
+  if (!available(record) || record.interfaceRevision < MODULES_REVISION) return []
+  var out = ["modules", "order"]
+  if (record.interfaceRevision >= CONFIG_REVISION) out.push("config", "files")
+  return out
+}
+
+// The argv of read `kind` (fixed words only), or null.
+function setupReadArgv(cli, kind) {
+  if (!cliUsable(cli)) return null
+  if (kind === "modules") return [cli, "modules", "list", "--json"]
+  if (kind === "order") return [cli, "order", "show", "--json"]
+  if (kind === "config") return [cli, "config", "show", "--json"]
+  if (kind === "files") return [cli, "config", "files", "--json"]
+  return null
+}
+
+// Every read, not yet loaded (null): what the dialog shows as loading.
+function emptySetup() {
+  return { modules: null, order: null, config: null, files: null }
+}
+
+// `setup` with only the reads of `reads` kept (a new object): what a daemon
+// whose revision dropped (or that went) still supports; the others read as
+// not loaded.
+function setupForReads(setup, reads) {
+  var out = emptySetup()
+  var kinds = Array.isArray(reads) ? reads : []
+  if (isPlainObject(setup))
+    for (var i = 0; i < SETUP_READS.length; i++)
+      if (kinds.indexOf(SETUP_READS[i]) >= 0) out[SETUP_READS[i]] = setup[SETUP_READS[i]] || null
+  return out
+}
+
+// `setup` with read `kind` replaced by `result` (a new object).
+function withSetupRead(setup, kind, result) {
+  var out = emptySetup()
+  if (isPlainObject(setup)) for (var i = 0; i < SETUP_READS.length; i++) out[SETUP_READS[i]] = setup[SETUP_READS[i]] || null
+  if (SETUP_READS.indexOf(kind) >= 0) out[kind] = result
+  return out
+}
+
+// ---- writes (intents { verb: "setup", op, ... }, re-checked when they run)
+
+// The word a config row's value is written as, or null: a boolean as
+// true/false, a bounded number put on its grid (an int by String, a float
+// with its step's decimals), an option value of the row (Automatic is "").
+// Only for a row the daemon accepts a write for now: editable, enabled, not
+// overridden by a later file.
+function configWord(row, value) {
+  if (!isPlainObject(row) || !row.editable || !row.enabled || row.overriddenBy !== "") return null
+  if (row.type === "bool") return typeof value === "boolean" ? (value ? "true" : "false") : null
+  if (row.type === "enum") return typeof value === "string" && configOptionIndex(row.options, value) >= 0 ? value : null
+  if ((row.type === "int" || row.type === "float") && row.bounded) {
+    var v = configStep(row, value)
+    if (v === null) return null
+    return row.type === "int" ? String(v) : v.toFixed(row.decimals)
+  }
+  return null
+}
+
+// A number put on a bounded row's grid (min + k * step, within range), or
+// null.
+function configStep(row, value) {
+  if (!isPlainObject(row) || !row.bounded || typeof value !== "number" || !isFinite(value)) return null
+  var kmax = Math.floor((row.max - row.min) / row.step + 1e-9)
+  var k = Math.max(0, Math.min(kmax, Math.round((value - row.min) / row.step)))
+  var v = row.min + k * row.step
+  if (row.type === "int") return Math.round(v)
+  return Number(v.toFixed(row.decimals))
+}
+
+// One Left/Right press (or a - / + button) on a number row: about a
+// twentieth of the range, on the step grid, at least one step; null when it
+// would not move.
+function configNudge(row, direction) {
+  if (!isPlainObject(row) || !row.bounded || !(direction === 1 || direction === -1)) return null
+  var unit = Math.max(row.step, Math.round((row.max - row.min) / 20 / row.step) * row.step)
+  var v = configStep(row, row.value + direction * unit)
+  return v === null || v === row.value ? null : v
+}
+
+function configSetArgv(cli, key, word) {
+  if (!cliUsable(cli) || configKeyOf(key) === "" || typeof word !== "string" || !CONFIG_WORD_RE.test(word)) return null
+  return [cli, "config", "set", "--", key, word]
+}
+
+function moduleEnableArgv(cli, id, on) {
+  var m = moduleIdOf(id)
+  if (!cliUsable(cli) || m === "" || typeof on !== "boolean") return null
+  return [cli, "modules", on ? "enable" : "disable", m]
+}
+
+// The whole order, every id of the stage grammar and once: one argv element.
+function orderSetArgv(cli, order) {
+  if (!cliUsable(cli) || !Array.isArray(order) || order.length === 0 || order.length > ORDER_CAP) return null
+  var seen = Object.create(null)
+  for (var i = 0; i < order.length; i++) {
+    if (stageIdOf(order[i]) === "" || seen[order[i]] === true) return null
+    seen[order[i]] = true
+  }
+  return [cli, "order", "set", order.join(",")]
+}
+
+function orderResetArgv(cli) {
+  return cliUsable(cli) ? [cli, "order", "reset"] : null
+}
+
+// A setup intent's argv under `record`, re-checked when it runs: the daemon
+// is available at the revision the write needs (a module or the order:
+// MODULES_REVISION; a config key: CONFIG_REVISION), and every word is
+// checked again.
+function setupIntentArgv(cli, record, intent) {
+  if (!isPlainObject(intent) || !available(record) || record.interfaceRevision < MODULES_REVISION) return null
+  switch (intent.op) {
+  case "module": return moduleEnableArgv(cli, intent.id, intent.on)
+  case "order": return orderSetArgv(cli, intent.order)
+  case "order-reset": return orderResetArgv(cli)
+  case "config": return record.interfaceRevision >= CONFIG_REVISION ? configSetArgv(cli, intent.id, intent.word) : null
+  default: return null
+  }
+}
+
+function isSetupIntent(intent) {
+  return isPlainObject(intent) && intent.verb === "setup"
+}
+
+// A setup write is running or queued: the dialog takes no other until its
+// result (and the read after it) is in, so one is ever queued.
+function setupWriteBusy(running, queue) {
+  if (isSetupIntent(running)) return true
+  var q = Array.isArray(queue) ? queue : []
+  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++) if (isSetupIntent(q[i])) return true
+  return false
+}
+
+// ---- the dialog's views
+
+// The section shown: a word of SETUP_SECTIONS, else the first.
+function setupSectionValue(value) {
+  return typeof value === "string" && SETUP_SECTIONS.indexOf(value) >= 0 ? value : SETUP_SECTIONS[0]
+}
+
+// The section list: { value, label, description, number, selected }.
+function setupSectionOptions(section) {
+  var current = setupSectionValue(section)
+  var out = []
+  for (var i = 0; i < SETUP_SECTIONS.length; i++) {
+    var v = SETUP_SECTIONS[i]
+    out.push({ value: v, label: SETUP_SECTION_LABELS[v], description: SETUP_SECTION_DESCRIPTIONS[v],
+               number: String(i + 1), selected: v === current })
+  }
+  return out
+}
+
+// What the daemon lets the dialog do: { modules, config, text, hint,
+// commandText }. `modules`: Modules and Order work (MODULES_REVISION);
+// `config`: Backends and Daemon too (CONFIG_REVISION). `text` replaces every
+// section but Diagnostics while the daemon is unavailable (with the panel's
+// hint and command) or predates the dialog.
+function setupGate(record) {
+  var out = { modules: false, config: false, text: "", hint: "", commandText: "" }
+  if (!available(record)) {
+    var msg = unavailableMessage(record)
+    out.text = msg.title
+    out.hint = msg.hint
+    out.commandText = msg.commandText
+    return out
+  }
+  if (record.interfaceRevision < MODULES_REVISION) { out.text = SETUP_OLD_DAEMON; return out }
+  out.modules = true
+  out.config = record.interfaceRevision >= CONFIG_REVISION
+  return out
+}
+
+// A read's state as a section hint: loading, its failure, or "" (loaded).
+function readHint(result) {
+  if (result === null || result === undefined) return SETUP_LOADING
+  return result.ok === true ? "" : (result.error !== "" ? result.error : "The daemon could not be read")
+}
+
+function overriddenText(file) {
+  return typeof file === "string" && file !== "" ? OVERRIDDEN_PREFIX + file : ""
+}
+
+// The Modules section: { hint, rows, truncation }; a row:
+//   { id, title, statusText, reason, stagesText, checked, switchable, note,
+//     index }
+// `switchable` is false while a later config file sets the module's
+// enabled key (`note` says which file).
+function modulesSectionView(setup, record) {
+  var out = { hint: "", rows: [], truncation: "" }
+  var gate = setupGate(record)
+  if (!gate.modules) { out.hint = gate.text; return out }
+  var list = isPlainObject(setup) ? setup.modules : null
+  out.hint = readHint(list)
+  if (out.hint !== "") return out
+  if (list.modules.length === 0) { out.hint = MODULES_EMPTY_TEXT; return out }
+  for (var i = 0; i < list.modules.length && i < SETUP_MODULE_CAP; i++) {
+    var m = list.modules[i]
+    var ids = []
+    for (var s = 0; s < m.stages.length && s < MODULE_STAGE_CAP; s++) ids.push(m.stages[s].id)
+    out.rows.push({
+      id: m.id, title: m.name + (m.version !== "" ? " " + m.version : ""),
+      statusText: m.status === "available" ? "Available" : (m.status === "disabled" ? "Disabled" : "Unavailable"),
+      reason: m.reason, stagesText: ids.length > 0 ? "Stages: " + ids.join(", ") + (m.stagesTruncated ? ", …" : "") : "",
+      checked: m.enabled, switchable: m.overriddenBy === "", note: overriddenText(m.overriddenBy), index: i
+    })
+  }
+  out.truncation = showingText(out.rows.length, list.total, "modules")
+  return out
+}
+
+// The Order section: { hint, rows, reset, note }; a row:
+//   { id, position, slot, up, down, index }
+// up/down are the daemon's (readOrder); none moves, and Reset order is not
+// offered, while a later config file sets the order (`note`).
+function orderSectionView(setup, record) {
+  var out = { hint: "", rows: [], reset: false, note: "" }
+  var gate = setupGate(record)
+  if (!gate.modules) { out.hint = gate.text; return out }
+  var order = isPlainObject(setup) ? setup.order : null
+  out.hint = readHint(order)
+  if (out.hint !== "") return out
+  if (order.order.length === 0) { out.hint = ORDER_EMPTY_TEXT; return out }
+  var locked = order.overriddenBy !== ""
+  for (var i = 0; i < order.stages.length && i < ORDER_CAP; i++) {
+    var st = order.stages[i]
+    out.rows.push({ id: st.id, position: String(i + 1), slot: st.slot, up: !locked && st.up, down: !locked && st.down, index: i })
+  }
+  out.reset = !locked
+  out.note = locked ? overriddenText(order.overriddenBy) : (order.truncated ? ORDER_TRUNCATED_TEXT : "")
+  return out
+}
+
+// A config value as the dialog writes it.
+function configValueText(row, value) {
+  if (!isPlainObject(row)) return ""
+  var v = value === undefined ? row.value : value
+  if (row.type === "bool") return v === true ? "On" : "Off"
+  if (row.type === "int" || row.type === "float") {
+    if (typeof v !== "number" || !isFinite(v)) return UNKNOWN
+    return (row.type === "float" ? v.toFixed(row.decimals) : String(v)) + (row.unit !== "" ? " " + row.unit : "")
+  }
+  if (row.type === "enum") {
+    var at = configOptionIndex(row.options, v)
+    return at >= 0 ? row.options[at].label : UNKNOWN
+  }
+  if (row.type === "list") {
+    var items = Array.isArray(v) ? v : []
+    if (items.length === 0) return "None"
+    return items.join(", ") + (row.itemsTotal > items.length ? ", …" : "")
+  }
+  return typeof v === "string" && v !== "" ? v : "Not set"
+}
+
+// The widget a config row gets: "switch" (bool), "choices" (enum: a row of
+// buttons), "stepper" (a bounded number: - and +), or "text" (the value,
+// read-only): every row the daemon does not take a write for now
+// (configWord's rule), and every string, path or list.
+function configWidget(row) {
+  if (!isPlainObject(row) || !row.editable || !row.enabled || row.overriddenBy !== "") return "text"
+  if (row.type === "bool") return "switch"
+  if (row.type === "enum") return "choices"
+  if ((row.type === "int" || row.type === "float") && row.bounded) return "stepper"
+  return "text"
+}
+
+// A config row as drawn: { id, type, widget, label, description, value,
+// valueText, options, note, applyText, greyed, stop }. `note` is "Overridden
+// by <file>" for a row a later file sets, else the daemon's reason for a
+// greyed one; `applyText` says when a change takes effect (not for a live
+// one); `stop` is the keyboard stop of an interactive row, -1 for text.
+function configRowView(row, stop) {
+  var widget = configWidget(row)
+  var options = []
+  for (var i = 0; row.type === "enum" && i < row.options.length && i < CONFIG_OPTION_CAP; i++)
+    options.push({ value: row.options[i].value, label: row.options[i].label, selected: row.options[i].value === row.value })
+  var overridden = row.overriddenBy !== ""
+  return {
+    id: row.id, type: row.type, widget: widget, label: row.label, description: row.description, value: row.value,
+    valueText: configValueText(row), options: options,
+    note: overridden ? overriddenText(row.overriddenBy) : (row.enabled ? "" : row.reason),
+    applyText: APPLY_TEXTS[row.apply] !== undefined && widget !== "text" ? APPLY_TEXTS[row.apply] : "",
+    greyed: overridden || !row.enabled, stop: widget === "text" ? -1 : stop
+  }
+}
+
+// Whether a key of the modules group is one Backends draws: the profile and
+// a stage's pin.
+function backendKey(id) {
+  return id === "modules.profile" || id.indexOf("modules.pin.") === 0
+}
+
+// The rows of the read configuration that `pick(group, row)` keeps, as
+// groups of configRowView rows numbered for the keyboard from 0.
+function configGroupsView(config, pick) {
+  var groups = []
+  var stop = 0
+  for (var g = 0; g < config.groups.length && g < CONFIG_GROUP_CAP; g++) {
+    var group = config.groups[g]
+    var rows = []
+    for (var r = 0; r < group.rows.length && r < CONFIG_GROUP_ROW_CAP; r++) {
+      if (!pick(group, group.rows[r])) continue
+      var view = configRowView(group.rows[r], stop)
+      if (view.stop >= 0) stop++
+      rows.push(view)
+    }
+    if (rows.length > 0) groups.push({ id: group.id, label: group.label, rows: rows })
+  }
+  return { groups: groups, stops: stop }
+}
+
+// The Backends section: { hint, groups, stops }: the modules group's profile
+// row and its pin rows (one per stage), written with `config set`.
+function backendsSectionView(setup, record) {
+  var out = { hint: "", groups: [], stops: 0 }
+  var gate = setupGate(record)
+  if (!gate.modules) { out.hint = gate.text; return out }
+  if (!gate.config) { out.hint = SETUP_OLD_CONFIG; return out }
+  var config = isPlainObject(setup) ? setup.config : null
+  out.hint = readHint(config)
+  if (out.hint !== "") return out
+  var v = configGroupsView(config, function(group, row) { return group.id === "modules" && backendKey(row.id) })
+  if (v.groups.length === 0) { out.hint = BACKENDS_EMPTY_TEXT; return out }
+  out.groups = v.groups
+  out.stops = v.stops
+  return out
+}
+
+// The Daemon section: { hint, groups, stops }: every group of the
+// configuration but the modules one (Modules, Order and Backends draw it).
+function daemonSectionView(setup, record) {
+  var out = { hint: "", groups: [], stops: 0 }
+  var gate = setupGate(record)
+  if (!gate.modules) { out.hint = gate.text; return out }
+  if (!gate.config) { out.hint = SETUP_OLD_CONFIG; return out }
+  var config = isPlainObject(setup) ? setup.config : null
+  out.hint = readHint(config)
+  if (out.hint !== "") return out
+  var v = configGroupsView(config, function(group) { return group.id !== "modules" })
+  out.groups = v.groups
+  out.stops = v.stops
+  if (v.groups.length === 0) out.hint = "The daemon reports no configuration."
+  return out
+}
+
+// The index of a config row view's selected option, else -1.
+function configSelected(rowView) {
+  var options = isPlainObject(rowView) && Array.isArray(rowView.options) ? rowView.options : []
+  for (var i = 0; i < options.length; i++) if (options[i].selected) return i
+  return -1
+}
+
+// The row at keyboard stop `stop` of a Backends or Daemon view, or null.
+function configViewRow(view, stop) {
+  var groups = isPlainObject(view) && Array.isArray(view.groups) ? view.groups : []
+  for (var g = 0; g < groups.length && g < CONFIG_GROUP_CAP; g++) {
+    var rows = groups[g].rows
+    for (var r = 0; r < rows.length && r < CONFIG_GROUP_ROW_CAP; r++) if (rows[r].stop === stop) return rows[r]
+  }
+  return null
+}
+
+// The Diagnostics section, read-only: { rows, filesHint, dir, files,
+// problems, problemsHint, commands }. rows: { label, value } (the interface
+// revision and the daemon's error); files: { path, statusText, reason, note }
+// in load order (`note` marks the managed one); problems: { title, reason },
+// each module that is not available and each stage of an available module
+// that cannot run.
+function diagnosticsView(setup, record) {
+  var out = { rows: [], filesHint: "", dir: "", files: [], problems: [], problemsHint: "", commands: DIAGNOSTIC_COMMANDS.slice() }
+  var linkedOk = available(record)
+  out.rows.push({ label: "D-Bus API", value: linkedOk && record.interfaceRevision >= 0 ? "revision " + record.interfaceRevision : UNKNOWN })
+  out.rows.push({ label: "Daemon error", value: linkedOk ? (record.error !== "" ? record.error : "None") : unavailableMessage(record).title })
+  var gate = setupGate(record)
+  var files = isPlainObject(setup) ? setup.files : null
+  if (!gate.config) out.filesHint = gate.modules ? SETUP_OLD_CONFIG : gate.text
+  else out.filesHint = readHint(files)
+  if (out.filesHint === "") {
+    out.dir = files.dir
+    for (var i = 0; i < files.files.length && i < CONFIG_FILES_CAP; i++) {
+      var f = files.files[i]
+      out.files.push({ path: f.path, statusText: FILE_STATUS_TEXTS[f.status], reason: f.reason,
+                       note: f.managed ? MANAGED_FILE_TEXT : "" })
+    }
+    if (files.truncated) out.files.push({ path: "…", statusText: "", reason: "", note: "" })
+  }
+  var list = isPlainObject(setup) ? setup.modules : null
+  out.problemsHint = gate.modules ? readHint(list) : gate.text
+  if (out.problemsHint === "") {
+    for (var m = 0; m < list.modules.length && m < SETUP_MODULE_CAP; m++) {
+      var mod = list.modules[m]
+      if (mod.status !== "available") {
+        out.problems.push({ title: mod.name, reason: (mod.status === "disabled" ? "Disabled" : "Unavailable") + (mod.reason !== "" ? ": " + mod.reason : "") })
+        continue
+      }
+      for (var s = 0; s < mod.stages.length && s < MODULE_STAGE_CAP; s++)
+        if (!mod.stages[s].available)
+          out.problems.push({ title: mod.name + ", stage " + mod.stages[s].id, reason: mod.stages[s].reason !== "" ? mod.stages[s].reason : "Unavailable" })
+    }
+    if (out.problems.length === 0) out.problemsHint = "No module problems"
+  }
+  return out
+}
+
+// Where the dialog's content scrolls to from `contentY` by `delta` pixels,
+// kept within the content (a view `viewHeight` tall over `contentHeight`).
+function scrollTarget(contentY, contentHeight, viewHeight, delta) {
+  var y = typeof contentY === "number" && isFinite(contentY) ? contentY : 0
+  var h = typeof contentHeight === "number" && isFinite(contentHeight) ? contentHeight : 0
+  var v = typeof viewHeight === "number" && isFinite(viewHeight) ? viewHeight : 0
+  var d = typeof delta === "number" && isFinite(delta) ? delta : 0
+  return Math.max(0, Math.min(Math.max(0, h - v), y + d))
+}
+
+// The dialog's keyboard stops, top to bottom: the five section entries,
+// then the shown section's controls:
+//   modules   each module whose switch can be flipped
+//   order     each stage that can move (Left/Right pick Move up or Move
+//             down, Enter moves; Ctrl+Up/Down moves at once), then Reset
+//             order when offered
+//   backends, daemon  each interactive config row (index: its `stop`)
+//   diagnostics  nothing (it only shows)
+// `view` is the shown section's view, as drawn.
+function setupStops(section, view) {
+  var stops = []
+  for (var i = 0; i < SETUP_SECTIONS.length; i++) stops.push({ kind: "section", index: i })
+  var shown = setupSectionValue(section)
+  if (!isPlainObject(view) || view.hint !== "") return stops
+  if (shown === "modules") {
+    for (var m = 0; m < view.rows.length; m++) if (view.rows[m].switchable) stops.push({ kind: "module", index: m })
+  } else if (shown === "order") {
+    for (var o = 0; o < view.rows.length; o++) if (view.rows[o].up || view.rows[o].down) stops.push({ kind: "stage", index: o })
+    if (view.reset) stops.push({ kind: "order-reset", index: -1 })
+  } else if (shown === "backends" || shown === "daemon") {
+    for (var s = 0; s < view.stops; s++) stops.push({ kind: "config", index: s })
+  }
+  return stops
+}
+
+// The button of a stage row a Left/Right press lands on (0 Move up, 1 Move
+// down), from `current`: only an offered one; -1 when neither is.
+function stageButtonAfter(row, current, direction) {
+  if (!isPlainObject(row)) return -1
+  var offered = [row.up === true, row.down === true]
+  var want = direction > 0 ? 1 : (direction < 0 ? 0 : current)
+  if (want === 0 || want === 1) { if (offered[want]) return want }
+  if (offered[current === 1 ? 1 : 0]) return current === 1 ? 1 : 0
+  return offered[0] ? 0 : (offered[1] ? 1 : -1)
 }

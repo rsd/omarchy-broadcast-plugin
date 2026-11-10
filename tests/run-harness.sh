@@ -4,9 +4,13 @@
 # its own (mktemp -d), inside --work DIR if given, else in $TMPDIR; nothing
 # outside it is ever removed. It holds:
 #
+#   plugin/    the plugin's files the harness loads, copied from the checkout
+#              (SetupDialog.qml without its layer-shell namespace line, which
+#              the stub OverlayWindow cannot take); reload/ a second copy
 #   qs/        the harness config: shell.qml, Commons -> Omarchy's, Ui copied
-#              with tests/harness/KeyboardPanel.qml in place of the layer-shell
-#              popup (no compositor offscreen)
+#              with tests/harness/KeyboardPanel.qml and OverlayWindow.qml in
+#              place of the layer-shell popup and overlay (no compositor
+#              offscreen)
 #   bin/       omarchy-broadcast = a copy of tests/fake-omarchy-broadcast; its path is
 #              the unique marker the harness counts watch processes by
 #   fake/      the fake's snapshot, feed, log and exit/stderr/delay files, and
@@ -182,11 +186,23 @@ cp "$here/harness/shell.qml" "$work/qs/shell.qml"
 ln -s "$shell_dir/Commons" "$work/qs/Commons"
 cp -R "$shell_dir/Ui" "$work/qs/Ui"
 cp "$here/harness/KeyboardPanel.qml" "$work/qs/Ui/KeyboardPanel.qml"
+cp "$here/harness/OverlayWindow.qml" "$work/qs/Ui/OverlayWindow.qml"
 cp "$here/fake-omarchy-broadcast" "$work/bin/omarchy-broadcast"
 chmod +x "$work/bin/omarchy-broadcast"
-# The plugin again at another URL, for a reload that yields a new singleton.
-mkdir -p "$work/reload/br.com.dias.omarchy-broadcast"
-cp "$plugin"/*.qml "$plugin"/*.js "$plugin"/qmldir "$plugin"/manifest.json "$work/reload/br.com.dias.omarchy-broadcast/"
+# The plugin as the harness loads it (plugin/), and again at another URL for
+# a reload that yields a new singleton (reload/): copies of the checkout's
+# files, with one line taken out of SetupDialog.qml, its overlay's
+# `WlrLayershell.namespace`. The stub OverlayWindow is an Item, which has no
+# layer-shell object to attach, and the engine refuses to create a dialog
+# that sets one; tests/check-source.py checks the line in the source.
+for copy in "$work/plugin/br.com.dias.omarchy-broadcast" "$work/reload/br.com.dias.omarchy-broadcast"; do
+  mkdir -p "$copy"
+  cp "$plugin"/*.qml "$plugin"/*.js "$plugin"/qmldir "$plugin"/manifest.json "$copy/"
+  ns_lines=$(grep -c '^ *WlrLayershell\.namespace: "omarchy-broadcast"$' "$copy/SetupDialog.qml" || true)
+  [ "$ns_lines" = 1 ] || { echo "harness: SetupDialog.qml should set its overlay's namespace once, found $ns_lines" >&2; exit 1; }
+  grep -v '^ *WlrLayershell\.namespace: "omarchy-broadcast"$' "$copy/SetupDialog.qml" > "$copy/SetupDialog.qml.new"
+  mv "$copy/SetupDialog.qml.new" "$copy/SetupDialog.qml"
+done
 mkdir -m 700 "$work/runtime"
 # Real JPEG frames for the fake's preview stream, made before the shell starts.
 mkdir -p "$work/fake/frames"
@@ -271,7 +287,7 @@ log=$work/harness-$mode.log
   export QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime"
   export PATH="$run_path"
   export FAKE_OB_DIR="$work/fake"
-  export OBH_MODE="$mode" OBH_PLUGIN="$plugin" OBH_PLUGIN_COPY="$work/reload/br.com.dias.omarchy-broadcast" OBH_CLI="$cli" OBH_FAKE="$work/fake" \
+  export OBH_MODE="$mode" OBH_PLUGIN="$work/plugin/br.com.dias.omarchy-broadcast" OBH_PLUGIN_COPY="$work/reload/br.com.dias.omarchy-broadcast" OBH_CLI="$cli" OBH_FAKE="$work/fake" \
          OBH_SCREENS="$screens" \
          OBH_DAEMON="$daemon" OBH_LIVE="$work/live" \
          OBH_NLBIN="$work/nl/bin${nl}y" OBH_RESOLVER_PATH="$work/rbin" \
@@ -280,7 +296,7 @@ log=$work/harness-$mode.log
 ) > "$log" 2>&1 &
 qs_pid=$!
 
-limit=180
+limit=240
 [ "$mode" = live ] && limit=300
 elapsed=0
 result=""

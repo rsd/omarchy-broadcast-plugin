@@ -1,5 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -10,12 +11,18 @@ import "Model.js" as Model
 // Preview singleton, which owns the only preview process: an open panel holds
 // the preview (Preview.hold), a closed one releases it.
 //
-// Left (or middle) click opens and closes the panel, as the shell's keyboard
-// summon does (it calls open()). Right click turns the camera on or off, but
-// only while the daemon's state is known: unavailable, it opens the panel
-// instead, so a persisted `off` the user cannot see is never flipped (and
-// `on` never D-Bus-activates a stopped daemon). While a command is running or
-// queued it does nothing.
+// Left click opens and closes the panel. Middle click turns the camera on or
+// off, but only while the daemon's state is known: unavailable, it opens the
+// panel instead, so a persisted `off` the user cannot see is never flipped
+// (and `on` never D-Bus-activates a stopped daemon). While a command is
+// running or queued it does nothing. Right click opens the setup dialog, the
+// plugin's overlay, through the shell (openSetup).
+//
+// The manifest makes the plugin an overlay as well, so the shell routes the
+// plugin's summon and toggle (the panel hotkey) to SetupDialog.qml, which
+// forwards them here through the Daemon singleton (Daemon.openPanel, which
+// calls open(), and Daemon.closePanels): the hotkey still opens and closes
+// this panel.
 BarWidget {
   id: root
   moduleName: "br.com.dias.omarchy-broadcast"
@@ -30,6 +37,13 @@ BarWidget {
 
   property bool opened: false
   property bool popoutSwitchClosing: false
+  // For Daemon.panelOwners: this is a bar widget with a panel (the setup
+  // dialog attaches to the Daemon too, and is not one).
+  readonly property bool panelOwner: true
+  // The monitor this copy is drawn on, for the panel the hotkey opens
+  // (Daemon.openPanel prefers the focused one).
+  readonly property string screenName: root.QsWindow.window && root.QsWindow.window.screen
+    ? String(root.QsWindow.window.screen.name || "") : ""
 
   // For the test harness: the shared services, the icon and the popup.
   readonly property QtObject service: Daemon
@@ -52,19 +66,36 @@ BarWidget {
     return bar && typeof bar.switchPanelFrom === "function" ? bar.switchPanelFrom(root, direction) : false
   }
 
-  // The right click. "ignore": an on/off or other non-control command is
+  // The middle click. "ignore": an on/off or other non-control command is
   // running or queued (Daemon.toggleBusy), so the result of the last click
-  // has not arrived and the target of a toggle is unknown. Slider writes do
-  // not hold it.
+  // has not arrived and the target of a toggle is unknown. Setting writes
+  // and the setup dialog's writes do not hold it.
   function toggleCamera() {
-    var action = Model.rightClickAction(root.record, Daemon.toggleBusy)
+    var action = Model.middleClickAction(root.record, Daemon.toggleBusy)
     if (action === "toggle") Daemon.toggleEnabled()
     else if (action === "open-panel") root.open()
   }
 
+  // The right click: the setup dialog, through the shell's toggle of this
+  // plugin with the setup payload (the overlay's open() reads it; the
+  // widget's cliPath setting rides along). Every open panel closes first:
+  // the shell reports the plugin open while one is (SetupDialog.opened), and
+  // its toggle would then close instead of open. False, with every panel
+  // left as it was, when the shell has no overlay to open (the bar gave no
+  // shell, or one without a toggle).
+  function openSetup() {
+    var shell = root.bar ? root.bar.shell : null
+    if (!shell || typeof shell.toggle !== "function") return false
+    Daemon.closePanels()
+    return shell.toggle(root.moduleName, Model.setupPayloadJson(root.cliSetting)) === true
+  }
+
   function press(buttonCode) {
-    if (buttonCode === Qt.RightButton) root.toggleCamera()
-    else root.toggle()
+    var action = Model.clickAction(buttonCode === Qt.MiddleButton ? "middle" : (buttonCode === Qt.RightButton ? "right" : "left"),
+                                   root.record, Daemon.toggleBusy)
+    if (action === "setup") root.openSetup()
+    else if (action === "panel") root.toggle()
+    else root.toggleCamera()
   }
 
   // A user's change in the panel (a preview preference or the tab): in force
@@ -98,6 +129,7 @@ BarWidget {
   onOpenedChanged: {
     if (root.opened) Preview.hold(root)
     else Preview.release(root)
+    Daemon.notePanels()
   }
 
   Component.onCompleted: {

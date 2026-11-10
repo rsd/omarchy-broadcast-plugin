@@ -12,7 +12,9 @@ import qs.Ui
 //
 //   OBH_MODE     mock | live
 //   OBH_PLUGIN   absolute path of the plugin directory (loaded by file URL,
-//                as the shell loads a plugin)
+//                as the shell loads a plugin): run-harness.sh's copy of the
+//                checkout's files, SetupDialog.qml without its layer-shell
+//                namespace line (see OverlayWindow.qml)
 //   OBH_CLI      CLI for the widgets' cliPath (the fake's copy, or live a
 //                symlink to the real CLI of OMARCHY_BROADCAST_CLI; either
 //                path is unique to the run, the marker watches are counted by)
@@ -85,11 +87,29 @@ ShellRoot {
   // `refuse`: stands for a shell that finds no layout entry to write; the
   // call is recorded in `refused`, nothing is handed back, and it answers
   // false, as the real one does.
+  // Its toggle and hide, as the shell routes them to the plugin's overlay
+  // (the setup dialog, h.dialog): toggle hides it while it reports itself
+  // open (`opened`), else summons it with the payload (open()); hide calls
+  // its close(). Each call is recorded.
   QtObject {
     id: fakeShell
     property var calls: []
     property bool refuse: false
     property var refused: []
+    property var toggles: []
+    property var hides: []
+    function toggle(id, payload) {
+      toggles = toggles.concat([{ id: id, payload: payload }])
+      if (!h.dialog) return false
+      if (h.dialog.opened) h.dialog.close()
+      else h.dialog.open(payload)
+      return true
+    }
+    function hide(id) {
+      hides = hides.concat([id])
+      if (h.dialog) h.dialog.close()
+      return true
+    }
     function updateEntryInline(id, settings) {
       if (refuse) {
         refused = refused.concat([{ id: id, entry: JSON.parse(JSON.stringify(settings)) }])
@@ -102,6 +122,12 @@ ShellRoot {
       if (h.widgetB) h.widgetB.settings = JSON.parse(JSON.stringify(copy))
       return true
     }
+  }
+
+  // A shell with no toggle (openSetup has nothing to open).
+  QtObject {
+    id: noToggleShell
+    function hide(id) { return false }
   }
 
   FloatingWindow {
@@ -164,6 +190,8 @@ ShellRoot {
 
     property var widgetA: null
     property var widgetB: null
+    // The setup dialog, as the shell's panel loader makes it (setupScenario).
+    property var dialog: null
     property var oldService: null
     property var model: null
 
@@ -245,6 +273,17 @@ ShellRoot {
       var kids = item.children || []
       for (var i = 0; i < kids.length; i++) {
         var found = findByName(kids[i], name)
+        if (found) return found
+      }
+      return null
+    }
+    // The first item under `item` whose text is `text`.
+    function findByText(item, text) {
+      if (!item) return null
+      if (item.text === text) return item
+      var kids = item.children || []
+      for (var i = 0; i < kids.length; i++) {
+        var found = findByText(kids[i], text)
         if (found) return found
       }
       return null
@@ -617,9 +656,9 @@ ShellRoot {
       h.eq("tab labels", ["effect", "camera", "status"].map(function(t) { return h.find(A(), "tab-" + t).text }).join(","), "Effect,Camera,Status")
       h.eq("camera rows", h.find(A(), "cameraRepeater").count, 3)
       h.eq("switch shown", h.find(A(), "enableSwitch").visible, true)
-      h.eq("noise removal row shown", h.find(A(), "denoiseRow").visible, true)
-      h.eq("noise removal off", h.find(A(), "denoiseToggle").checked, false)
-      h.eq("noise removal label", h.find(A(), "denoiseLabel").text, "Noise removal")
+      h.eq("a revision-4 daemon: no effect choices", h.find(A(), "effectChoices").visible, false)
+      h.eq("the Effect tab says the daemon needs updating", h.find(A(), "effectHint").text, h.model.DAEMON_NO_EFFECTS)
+      h.eq("no generic effect rows", h.find(A(), "effectSettingsArea").visible, false)
       h.eq("hero status line", h.content(A()).heroMeta, "idle")
       h.check("active row marked", h.row(A(), 0).isActive && !h.row(A(), 1).isActive)
       h.check("active row painted as current", h.row(A(), 0).current && !h.row(A(), 1).current)
@@ -631,7 +670,7 @@ ShellRoot {
     h.tabStep(A, "camera", "idle", function() {
       h.eq("cameras block shown on the Camera tab", h.find(A(), "camerasBlock").visible, true)
       h.eq("next camera shown", h.find(A(), "nextCameraButton").visible, true)
-      h.eq("noise removal on the Effect tab only", h.find(A(), "denoiseRow").visible, false)
+      h.eq("the effect hint on the Effect tab only", h.find(A(), "effectHint").visible && h.find(A(), "effectTab").visible, false)
       h.fits(A(), "Camera tab, idle")
     })
     h.tabStep(A, "status", "idle", function() {
@@ -681,7 +720,7 @@ ShellRoot {
       var c = h.content(A())
       h.eq("stop", c.currentStop.kind, "switch")
       h.eq("switch has the cursor", h.find(A(), "enableSwitch").hasCursor, true)
-      h.eq("stops = switch + tab row + effect + noise removal (the Effect tab)", c.stops.length, 4)
+      h.eq("stops = switch + tab row (the Effect tab of a revision-4 daemon has no control)", c.stops.length, 2)
       h.key(Qt.Key_Down)
     })
     h.step("Down: the tab row, on the tab shown", function() {
@@ -690,119 +729,17 @@ ShellRoot {
       h.eq("tab cursor on Effect", c.tabCursor, 0)
       h.eq("Effect chip has the cursor", h.find(A(), "tab-effect").hasCursor, true)
       h.eq("the other chips have none", h.find(A(), "tab-camera").hasCursor || h.find(A(), "tab-status").hasCursor, false)
-      h.key(Qt.Key_Down)
-    })
-    // the effect row: one stop; Left/Right walk its choices
-    h.step("Down: the effect row, on the current effect", function() {
-      var c = h.content(A())
-      h.eq("stop", c.currentStop.kind, "effect")
-      h.eq("cursor on None (the current effect)", c.effectCursor, 0)
-      h.eq("None has the cursor", h.find(A(), "effectChoice-none").hasCursor, true)
-      h.eq("None is selected", h.find(A(), "effectChoice-none").selected, true)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
-      h.check("Replace faded without a background image", h.find(A(), "effectChoice-replace").opacity < 1)
-      h.eq("hint command", h.find(A(), "effectHintCommand").text, "omarchy-broadcast effect replace --image PATH")
-      h.key(Qt.Key_Right)
-      h.key("l")
-      h.key(Qt.Key_Right)
+      h.check("no effect verb is left to call", c.toggleDenoise === undefined && S().setEffect === undefined && S().setDenoise === undefined)
+      h.check("an effect choice with no options runs nothing", !c.chooseEffect(0))
       h.markLog()
-      h.key(Qt.Key_Return)
-    })
-    h.step("Enter on Replace without an image runs nothing", function() {
-      h.eq("cursor on Replace, and no further", h.content(A()).effectCursor, 2)
-      h.eq("Replace has the cursor", h.find(A(), "effectChoice-replace").hasCursor, true)
-      h.eq("nothing armed", S().commandBusy, false)
-      h.eq("nothing ran", h.newLogArgs().length, 0)
-    })
-    h.grabStep(function() { return A().popup }, "panel-cursor-effect.png")
-    h.step("Left, Enter: Blur", function() {
-      h.key(Qt.Key_Left)
-      h.markLog()
-      h.key(Qt.Key_Return)
-    }, function() { return h.newLogArgs().length >= 1 })
-    h.step("effect argv", function() {
-      h.eq("argv", lastArgs(), JSON.stringify(["effect", "blur"]))
-      h.eq("no optimistic change", S().record.effectKey, "none")
-      h.feed([stateLine({ effect: "blur", blur_strength: 0.5, active_camera: fhdId, active_camera_name: "FHD Camera" })])
-    }, function() { return S().record.effectKey === "blur" && !S().commandBusy })
-    h.step("Blur arrives on the stream", function() {
-      h.eq("Blur selected", h.find(A(), "effectChoice-blur").selected, true)
-      h.eq("None no longer selected", h.find(A(), "effectChoice-none").selected, false)
-      h.check("tooltip names the effect", A().iconButton.tooltipText.indexOf("background blurred") !== -1, A().iconButton.tooltipText)
-      h.markLog()
-      h.key(Qt.Key_Return)
-    })
-    h.step("Enter on the current effect runs nothing", function() {
-      h.eq("nothing armed", S().commandBusy, false)
-      h.eq("nothing ran", h.newLogArgs().length, 0)
-      h.feed([stateLine({ effect: "none", active_camera: fhdId, active_camera_name: "FHD Camera" })])
-    }, function() { return S().record.effectKey === "none" })
-    // noise removal: a switch of its own below the effect row; Enter flips it
-    h.step("Down from the effect row: the noise removal switch", function() {
       h.key(Qt.Key_Down)
-      var c = h.content(A())
-      h.eq("stop", c.currentStop.kind, "denoise")
-      h.eq("noise removal has the cursor", h.find(A(), "denoiseToggle").hasCursor, true)
-      h.eq("no effect chip has it", ["none", "blur", "replace"].filter(function(e) {
-        return h.find(A(), "effectChoice-" + e).hasCursor }).length, 0)
-      h.markLog()
-      h.key(Qt.Key_Return)
-    }, function() { return h.newLogArgs().length >= 1 })
-    h.step("denoise on argv", function() {
-      h.eq("argv", lastArgs(), JSON.stringify(["denoise", "on"]))
-      h.eq("no optimistic change", S().record.denoise, false)
-      h.eq("switch still off", h.find(A(), "denoiseToggle").checked, false)
-      h.feed([stateLine({ denoise: true, active_camera: fhdId, active_camera_name: "FHD Camera" })])
-    }, function() { return S().record.denoise === true && !S().commandBusy })
-    h.step("noise removal arrives on the stream", function() {
-      h.eq("switch on", h.find(A(), "denoiseToggle").checked, true)
-      h.eq("None still selected (it stacks with any effect)", h.find(A(), "effectChoice-none").selected, true)
-      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers · noise removal on")
-    })
-    h.step("with Blur too", function() {
-      h.feed([stateLine({ effect: "blur", denoise: true, active_camera: fhdId, active_camera_name: "FHD Camera" })])
-    }, function() { return S().record.effectKey === "blur" })
-    h.step("tooltip names both", function() {
-      h.eq("tooltip", B().iconButton.tooltipText,
-           "Omarchy Broadcast: idle · FHD Camera · 0 consumers · background blurred, noise removal on")
-      h.eq("switch still on", h.find(A(), "denoiseToggle").checked, true)
-    })
-    h.grabStep(function() { return A().popup }, "panel-denoise-on.png")
-    // busy: a second flip while the first runs is refused, as the effect
-    // choices refuse one
-    h.step("slow commands for the denoise double click", function() { h.writeFile("delay", ["0.6"]) },
-           function() { return h.writerIdle() })
-    h.step("click the switch twice", function() {
-      h.markLog()
-      h.find(A(), "denoiseToggle").toggled()
-      h.check("busy after the first click", S().commandBusy)
-      h.eq("the switch shows busy", h.find(A(), "denoiseToggle").busy, true)
-      h.check("second flip refused", !h.content(A()).toggleDenoise())
-      h.check("an effect refused meanwhile", !h.content(A()).chooseEffect(0))
-    }, function() { return h.newLogArgs().length >= 1 })
-    h.wait(900)
-    h.step("denoise off argv, once", function() {
-      var got = h.newLogArgs()
-      h.eq("runs", JSON.stringify(got), JSON.stringify([["denoise", "off"]]))
-      h.eq("no optimistic change", S().record.denoise, true)
-      h.removeFile("delay")
-      h.feed([stateLine({ effect: "none", denoise: false, active_camera: fhdId, active_camera_name: "FHD Camera" })])
-    }, function() { return S().record.denoise === false && S().record.effectKey === "none" && !S().commandBusy })
-    h.step("noise removal off again", function() {
-      h.eq("switch off", h.find(A(), "denoiseToggle").checked, false)
-      h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers")
-      h.content(A()).setCursor("denoise", -1)
-    })
-    h.step("Down from the noise removal switch: the last stop of the tab; Up twice: the tab row", function() {
-      var c = h.content(A())
-      h.key(Qt.Key_Down)
-      h.eq("still on noise removal", c.currentStop.kind, "denoise")
+      h.eq("Down from the last stop stays", c.currentStop.kind, "tabs")
       h.key("k")
-      h.key("k")
+      h.key("j")
       h.eq("the tab row", c.currentStop.kind, "tabs")
       h.eq("on the tab shown", c.tabCursor, 0)
       h.notes.calls = fakeShell.calls.length
-      h.markLog()
       h.key(Qt.Key_Right)
     })
     h.step("Right on the tab row: the Camera tab at once, remembered", function() {
@@ -920,10 +857,9 @@ ShellRoot {
       h.eq("Status still selected", h.find(A(), "tab-status").selected, true)
       h.key(Qt.Key_Return)
       h.eq("Enter: Effect", c.tab, "effect")
-      c.setCursor("denoise", -1)
       h.key("2")
       h.eq("a number key from inside a tab: Camera", c.tab, "camera")
-      h.eq("the cursor left the hidden rows for the tab row", c.currentStop.kind, "tabs")
+      h.eq("the cursor stays on the tab row", c.currentStop.kind, "tabs")
       h.eq("stored", A().settings.panelTab, "camera")
       A().close()
       h.notes.widgetC = h.makeWidget(barB, JSON.parse(JSON.stringify(A().settings)))
@@ -985,13 +921,13 @@ ShellRoot {
     // left click: off, then on from the other monitor; a second click while
     // the first runs is ignored
     h.step("slow commands for the double click", function() { h.writeFile("delay", ["0.6"]) }, function() { return h.writerIdle() })
-    h.step("right click turns off; a second one in flight is ignored", function() {
+    h.step("middle click turns off; a second one in flight is ignored", function() {
       A().close()
       h.markLog()
-      A().iconButton.triggerPress(Qt.RightButton)
+      A().iconButton.triggerPress(Qt.MiddleButton)
       h.check("busy after the first click", S().commandBusy)
-      A().iconButton.triggerPress(Qt.RightButton)
-      B().iconButton.triggerPress(Qt.RightButton)
+      A().iconButton.triggerPress(Qt.MiddleButton)
+      B().iconButton.triggerPress(Qt.MiddleButton)
     }, function() { return h.newLogArgs().length >= 1 })
     h.wait(900)
     h.step("off argv, once", function() {
@@ -999,7 +935,7 @@ ShellRoot {
       h.eq("runs", got.length, 1)
       h.eq("argv", JSON.stringify(got[0]), JSON.stringify(["off"]))
       h.eq("no optimistic change", S().record.enabled, true)
-      h.eq("right click does not open the panel", A().opened, false)
+      h.eq("middle click does not open the panel", A().opened, false)
       h.eq("nor on the other monitor", B().opened, false)
       h.removeFile("delay")
       h.feed([stateLine({ state: "off", enabled: false, active_camera: fhdId, active_camera_name: "FHD Camera" })])
@@ -1014,28 +950,26 @@ ShellRoot {
     h.step("accessible text names the clicks", function() {
       h.eq("role", A().iconButton.Accessible.role, Accessible.Button)
       h.eq("name: the tooltip's state", A().iconButton.Accessible.name, "Omarchy Broadcast: off")
-      h.eq("description", A().iconButton.Accessible.description, "Click: open the panel. Right click: turn the camera on.")
+      h.eq("description", A().iconButton.Accessible.description,
+           "Click: open the panel. Middle click: turn the camera on. Right click: open the setup.")
     })
-    h.step("right click on the other monitor turns on", function() {
+    h.step("middle click on the other monitor turns on", function() {
       h.markLog()
-      B().iconButton.triggerPress(Qt.RightButton)
+      B().iconButton.triggerPress(Qt.MiddleButton)
     }, function() { return h.newLogArgs().length >= 1 })
     h.step("on argv", function() {
       h.eq("argv", JSON.stringify(h.newLogArgs()[0]), JSON.stringify(["on"]))
       h.feed([stateLine({ state: "idle", enabled: true, active_camera: fhdId, active_camera_name: "FHD Camera" })])
     }, function() { return S().record.state === "idle" && S().record.enabled })
-    h.step("left click opens and closes the panel, middle click too", function() {
+    h.step("left click opens and closes the panel", function() {
       h.markLog()
       A().iconButton.triggerPress(Qt.LeftButton)
       h.eq("left click opens it", A().opened, true)
       A().iconButton.triggerPress(Qt.LeftButton)
       h.eq("a second left click closes it", A().opened, false)
-      A().iconButton.triggerPress(Qt.MiddleButton)
-      h.eq("middle click opens it", A().opened, true)
-      A().iconButton.triggerPress(Qt.MiddleButton)
-      h.eq("and closes it", A().opened, false)
       h.eq("the other monitor's panel stays closed", B().opened, false)
-      h.eq("description once on", A().iconButton.Accessible.description, "Click: open the panel. Right click: turn the camera off.")
+      h.eq("description once on", A().iconButton.Accessible.description,
+           "Click: open the panel. Middle click: turn the camera off. Right click: open the setup.")
     })
     h.wait(400)
     h.step("the panel clicks run nothing", function() { h.eq("commands run", h.newLogArgs().length, 0) })
@@ -1178,9 +1112,9 @@ ShellRoot {
       h.check("no tab chosen while unavailable", !h.content(A()).chooseTab(2))
       A().close()
       h.markLog()
-      A().iconButton.triggerPress(Qt.RightButton)
-      h.eq("right click opens the panel instead", A().opened, true)
-      h.eq("description", A().iconButton.Accessible.description, "Click or right click: open the panel.")
+      A().iconButton.triggerPress(Qt.MiddleButton)
+      h.eq("middle click opens the panel instead", A().opened, true)
+      h.eq("description", A().iconButton.Accessible.description, "Click or middle click: open the panel. Right click: open the setup.")
     })
     h.wait(400)
     h.step("no command for an unknown state", function() {
@@ -1204,8 +1138,8 @@ ShellRoot {
       h.eq("cameras hidden", h.find(A(), "camerasBlock").visible, false)
       A().close()
       h.markLog()
-      A().iconButton.triggerPress(Qt.RightButton)
-      h.eq("right click opens the panel instead", A().opened, true)
+      A().iconButton.triggerPress(Qt.MiddleButton)
+      h.eq("middle click opens the panel instead", A().opened, true)
       h.feed([stateLine({ state: "idle" })])
     })
     h.wait(500)
@@ -1218,58 +1152,21 @@ ShellRoot {
     h.step("new snapshot recovers", function() { h.feed([snapshotLine({})]) },
            function() { return S().record.link === "ok" && S().record.state === "idle" })
 
-    // a CLI that predates effects: no blur_strength on its lines (JSON drops
-    // undefined), and no `effect` command; the row offers nothing
-    h.step("snapshot from a CLI without effects", function() {
-      h.tab(A(), "effect")
-      h.feed([snapshotLine({ blur_strength: undefined, background_image: undefined, denoise: undefined })])
-    }, function() { return S().record.link === "ok" && S().record.cliEffects === false })
-    h.step("the effect row is faded and names the CLI", function() {
-      ["none", "blur", "replace"].forEach(function(e) {
-        h.check(e + " faded", h.find(A(), "effectChoice-" + e).opacity < 1)
-      })
-      h.eq("hint", h.find(A(), "effectHint").text, "The omarchy-broadcast CLI needs updating for effects.")
-      h.eq("no command", h.find(A(), "effectHintCommand").visible, false)
-      h.eq("no effect stop", h.content(A()).stops.filter(function(st) { return st.kind === "effect" }).length, 0)
-      // nor does it report noise removal: no switch, rather than an off one
-      h.eq("unknown noise removal", S().record.denoise, null)
-      h.eq("no noise removal row", h.find(A(), "denoiseRow").visible, false)
-      h.eq("no noise removal stop", h.content(A()).stops.filter(function(st) { return st.kind === "denoise" }).length, 0)
-      h.markLog()
-      h.check("Blur refused", !h.content(A()).chooseEffect(1))
-      h.check("noise removal refused", !h.content(A()).toggleDenoise())
-      h.check("setDenoise refused", !S().setDenoise(true))
-      h.eq("nothing ran", h.newLogArgs().length, 0)
-    })
-    h.grabStep(function() { return A().popup }, "panel-denoise-unknown.png")
-    // a new CLI still talking to a daemon started before the upgrade
-    // (interface revision 1): the row offers nothing and names the daemon
+    // a revision-1 daemon (before effects): the Effect tab says it needs updating
     h.step("snapshot from a daemon without effects", function() {
+      h.tab(A(), "effect")
       h.feed([snapshotLine({ interface_revision: 1 })])
-    }, function() { return S().record.cliEffects === true && S().record.interfaceRevision === 1 })
-    h.step("the effect row is faded and names the daemon", function() {
-      ["none", "blur", "replace"].forEach(function(e) {
-        h.check(e + " faded", h.find(A(), "effectChoice-" + e).opacity < 1)
-      })
-      h.eq("hint", h.find(A(), "effectHint").text, "The daemon needs updating for effects.")
-      h.eq("no command", h.find(A(), "effectHintCommand").visible, false)
+    }, function() { return S().record.link === "ok" && S().record.interfaceRevision === 1 })
+    h.step("the Effect tab names the daemon, offers nothing", function() {
+      h.eq("hint", h.find(A(), "effectHint").text, h.model.DAEMON_NO_EFFECTS)
+      h.eq("no choices", h.find(A(), "effectChoices").visible, false)
       h.eq("no effect stop", h.content(A()).stops.filter(function(st) { return st.kind === "effect" }).length, 0)
       h.markLog()
-      h.check("Blur refused", !h.content(A()).chooseEffect(1))
+      h.check("a choice refused", !h.content(A()).chooseEffect(1))
       h.eq("nothing ran", h.newLogArgs().length, 0)
     })
-    // a background image with bidi and zero-width characters, while replacing
-    h.step("replacing with a hostile image path", function() {
-      h.feed([snapshotLine({ effect: "replace", background_image: "/h/\u202egnp.exe\u061c\u200b\ufeff<b>.png" })])
-    }, function() { return S().record.effectKey === "replace" })
-    h.step("the image row is sanitised and isolated", function() {
-      var rows = h.content(A()).effectRows
-      h.eq("one row", rows.length, 1)
-      h.eq("value", rows[0].value, "\u2066/h/gnp.exeb.png\u2069")
-      h.eq("no hint", h.find(A(), "effectHintBlock").visible, false)
-      h.feed([snapshotLine({})])
-    }, null)
-    h.step("effects back", function() {}, function() { return S().record.cliEffects === true && S().record.effectKey === "none" })
+    h.grabStep(function() { return A().popup }, "panel-effect-old-daemon.png")
+    h.step("effects back", function() { h.feed([snapshotLine({})]) }, function() { return S().record.interfaceRevision === 4 })
 
     // the watch is killed by a signal; the respawned one reads a snapshot
     // whose multi-byte characters straddle a read boundary
@@ -1482,8 +1379,8 @@ ShellRoot {
       h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: omarchy-broadcast CLI not found")
       h.eq("unavailable glyph", A().iconButton.text, glyphOf("unavailable"))
       A().close()
-      A().iconButton.triggerPress(Qt.RightButton)
-      h.eq("right click opens the panel", A().opened, true)
+      A().iconButton.triggerPress(Qt.MiddleButton)
+      h.eq("middle click opens the panel", A().opened, true)
     })
     h.countStep(0, "with a missing CLI")
     h.step("the path is on a line of its own, never wrapped at a slash", function() {
@@ -1606,6 +1503,7 @@ ShellRoot {
 
     previewScenario()
     settingsScenario()
+    setupScenario()
 
     // the resolver itself: omarchy-broadcast on PATH, nothing else
     var resolverCase = function(label, argv, path, wantOut, wantExit) {
@@ -1998,8 +1896,8 @@ ShellRoot {
     }, function() { return h.content(A()).currentStop.kind === "preview" })
     h.step("preview: the switch has the cursor; Down to the frame rate", function() {
       h.eq("preview switch has the cursor", h.find(A(), "previewToggle").hasCursor, true)
-      h.eq("stops = switch + preview + fps + tab row + effect + noise removal (the Effect tab)",
-           h.content(A()).stops.length, 6)
+      h.eq("stops = switch + preview + fps + tab row (the Effect tab of a revision-5 daemon has no control)",
+           h.content(A()).stops.length, 4)
       h.key(Qt.Key_Down)
     }, function() { return h.content(A()).currentStop.kind === "fps" })
     h.step("preview: lands on the current rate; Left, Enter: 15 fps", function() {
@@ -2871,8 +2769,9 @@ ShellRoot {
       h.feed([snapshotLine(rev7({}))])
     }, function() { return !S().commandBusy && h.writerIdle() })
 
-    // global settings (revision 8): the Effect tab draws them generically,
-    // below its own effect choice; the Camera tab never does
+    // global settings (revision 9): the Effect tab draws the background
+    // effect's choices from its mode setting, the others generically below
+    // them; the Camera tab never does
     var globalRows = function(mode) {
       var g = function(id, type, label, v, d, o) {
         var x = { scope: "global" }
@@ -2887,9 +2786,9 @@ ShellRoot {
       ]
     }
     var gwrite = function(id, v) { return ["settings", "set", "--", id, String(v)] }
-    h.step("global settings: a revision-8 daemon publishes them after the camera's", function() {
+    h.step("global settings: a revision-9 daemon publishes them after the camera's", function() {
       h.writeFile("settings-state", brioState().concat(globalRows("none")))
-      h.feed([snapshotLine(rev7({ interface_revision: 8, effect: "none", blur_strength: 0.5, denoise: false }))])
+      h.feed([snapshotLine(rev7({ interface_revision: 9, effect: "none", blur_strength: 0.5, denoise: false }))])
     }, function() { return !!S().record.settings && S().record.settings.groups.length === 6 && h.writerIdle() })
     h.step("global settings: the Effect tab", function() { h.tab(A(), "effect") }, function() { return h.find(A(), "effectSettingsArea").visible })
     h.wait(300)
@@ -2899,7 +2798,10 @@ ShellRoot {
       h.eq("no row for the effect choice", row("effect.background.mode"), null)
       h.eq("the strength slider", shown("effect.background.blur_strength") && !!h.find(A(), "settingSlider-effect.background.blur_strength"), true)
       h.eq("the noise removal switch", !!h.find(A(), "settingSwitch-effect.video.denoise"), true)
-      h.eq("the dedicated noise removal row is gone", h.find(A(), "denoiseRow").visible, false)
+      h.eq("the choices are the schema's options", [0, 1, 2].map(function(i) { return h.find(A(), "effectChoice-" + i).text }).join(","), "Off,Blur,Replace")
+      h.eq("the current one selected", h.find(A(), "effectChoice-0").selected, true)
+      h.eq("no fourth choice", h.find(A(), "effectChoice-3"), null)
+      h.eq("no hint", h.find(A(), "effectHint").visible, false)
       h.eq("group heading", h.find(A(), "effect-settingsGroupLabel-background").text, "BACKGROUND EFFECT", "small caps, as the section headers")
       h.eq("no title, no reset, no note", h.find(A(), "effect-settingsTitle").visible || h.find(A(), "effect-settingsReset").visible, false)
       h.eq("greyed with its reason", h.find(A(), "settingReason-effect.background.blur_strength").visible
@@ -2916,10 +2818,24 @@ ShellRoot {
       h.check("refused", !S().moveSetting("effect.background.blur_strength", 70))
     })
     h.wait(300)
+    h.step("global settings: Enter on Blur writes the mode as a setting", function() {
+      h.markLog()
+      C().setCursor("effect", -1)
+      h.eq("lands on the current choice", C().effectCursor, 0)
+      h.eq("the chip has the cursor", h.find(A(), "effectChoice-0").hasCursor, true)
+      h.key(Qt.Key_Right)
+      h.eq("Right: Blur", C().effectCursor, 1)
+      h.key(Qt.Key_Return)
+    }, function() { return setArgs().length >= 1 && value("effect.background.mode") === "blur" && !S().commandBusy }, 3000)
     h.step("global settings: Blur chosen; the strength opens", function()  {
-      h.writeFile("settings-state", brioState().concat(globalRows("blur")))
-      h.feed([snapshotLine(rev7({ interface_revision: 8, effect: "blur", blur_strength: 0.5, denoise: false }))])
+      h.eq("argv: the setting, no camera", JSON.stringify(setArgs()), JSON.stringify([gwrite("effect.background.mode", "blur")]))
+      h.eq("Blur selected", h.find(A(), "effectChoice-1").selected, true)
+      h.check("tooltip names it", A().iconButton.tooltipText.indexOf("background: Blur") !== -1, A().iconButton.tooltipText)
+      h.markLog()
+      h.key(Qt.Key_Return)
+      h.eq("Enter on the current choice runs nothing", S().commandBusy, false)
     }, function() { return h.model.findSetting(S().record, "effect.background.blur_strength").enabled === true && h.writerIdle() })
+    h.grabStep(function() { return A().popup }, "e2-effect-blur.png")
     h.step("global settings: Right moves the slider; the write names no camera", function() {
       h.markLog()
       C().setCursor("setting", stopOf("effect.background.blur_strength"))
@@ -2937,16 +2853,18 @@ ShellRoot {
       h.eq("the switch follows the daemon", h.find(A(), "settingSwitch-effect.video.denoise").checked, true)
       h.eq("no error", S().commandError, "")
     })
-    h.step("global settings: no global setting published: the dedicated rows return", function() {
+    h.step("global settings: no global setting published (no module): no choices, a hint", function() {
       h.writeFile("settings-state", brioState())
-      h.feed([snapshotLine(rev7({ interface_revision: 8, effect: "blur", blur_strength: 0.5, denoise: true }))])
+      h.feed([snapshotLine(rev7({ interface_revision: 9, effect: "blur", blur_strength: 0.5, denoise: true }))])
     }, function() { return S().record.settings.groups.length === 4 && h.writerIdle() })
     h.wait(300)
-    h.step("global settings: the fallback", function() {
+    h.step("global settings: nothing to offer", function() {
       h.eq("no generic section", h.find(A(), "effectSettingsArea").visible, false)
-      h.eq("noise removal row", h.find(A(), "denoiseRow").visible, true)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs,effect,denoise")
+      h.eq("no choices", h.find(A(), "effectChoices").visible, false)
+      h.eq("the hint", h.find(A(), "effectHint").text, h.model.NO_BACKGROUND_TEXT)
+      h.eq("stops", kinds(), "switch,preview,fps,tabs")
     })
+    h.grabStep(function() { return A().popup }, "e3-effect-no-module.png")
     h.step("global settings: back to the Camera tab", function() { h.tab(A(), "camera") }, function() { return h.find(A(), "settingsArea").visible })
     h.wait(300)
 
@@ -2993,6 +2911,540 @@ ShellRoot {
       h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
       h.eq("queue empty", S().pendingIntents.length, 0)
     })
+  }
+
+  // ---- the setup dialog (mock): the overlay, its reads and writes ------------------
+
+  function setupModulesLines(maxineOn) {
+    var mods = [
+      { id: "br.com.dias.maxine-vfx", name: "NVIDIA Maxine video effects", version: "0.25.0", licence: "MIT", description: "", kind: "video-stage",
+        library: "/usr/lib/x.so", manifest: "/usr/lib/x.toml", enabled: maxineOn, status: maxineOn ? "available" : "disabled",
+        reason: maxineOn ? "" : "Disabled", overridden_by: "",
+        stages: [{ id: "background", slot: "matte", rank: 300, device: "nvidia-gpu", available: true, reason: "", selected: true },
+                 { id: "relight", slot: "post-matte", rank: 300, device: "nvidia-gpu", available: false, reason: "Not installed", selected: false }],
+        stages_truncated: false },
+      { id: "org.example.hello", name: "Hello <b>tint</b>", version: "0.1.0", licence: "MIT", description: "", kind: "video-stage",
+        library: "/l.so", manifest: "/m.toml", enabled: false, status: "disabled",
+        reason: "Disabled after crashing the daemon twice in a row", overridden_by: "config.d/90-local.toml",
+        stages: [{ id: "hello", slot: "post-composite", rank: 100, device: "cpu", available: false, reason: "Disabled", selected: false }],
+        stages_truncated: false }
+    ]
+    var out = [JSON.stringify({ v: 1, type: "modules", serial: 1, profile: "quality", count: mods.length, profile_overridden_by: "" })]
+    for (var i = 0; i < mods.length; i++)
+      out.push(JSON.stringify({ v: 1, type: "module", serial: 1, index: i, count: mods.length, module: mods[i] }))
+    return out
+  }
+  function setupOrderLine(ids) {
+    var stages = []
+    for (var i = 0; i < ids.length; i++) stages.push({ id: ids[i], slot: "pre-matte", up: i > 0, down: i < ids.length - 1 })
+    return JSON.stringify({ v: 1, type: "order", order: ids, order_truncated: false, stages: stages, overridden_by: "" })
+  }
+  // One config row: id and value first (the fake's `config set` rewrites
+  // the value that follows the id).
+  function cfg(id, type, value, o) {
+    var m = { id: id, value: value, label: id, description: "", type: type, editable: true, source: "", overridden_by: "",
+              apply: "live", enabled: true, disabled_reason: "" }
+    for (var k in o) m[k] = o[k]
+    return m
+  }
+  function setupConfigLines() {
+    var groups = [
+      { id: "output", label: "Output", settings: [
+        cfg("output.format", "enum", "nv12", { label: "Format", "default": "nv12", apply: "reload", description: "The pixel format apps receive",
+            options: [{ value: "nv12", label: "NV12" }, { value: "yuyv", label: "YUYV" }] }),
+        cfg("output.mode", "string", "1920x1080@30", { label: "Mode", editable: false, description: "The output size and rate" })] },
+      { id: "lifecycle", label: "Lifecycle", settings: [
+        cfg("lifecycle.idle_grace_s", "int", 5, { label: "Idle grace", "default": 5, min: 0, max: 60, step: 1, unit: "s" }),
+        cfg("lifecycle.start_debounce_ms", "int", 200, { label: "Start debounce", min: 0, max: 5000, step: 10, unit: "ms",
+            source: "config.d/90-local.toml", overridden_by: "config.d/90-local.toml", enabled: false,
+            disabled_reason: "Overridden by config.d/90-local.toml" })] },
+      { id: "pipewire", label: "PipeWire", settings: [
+        cfg("pipewire.enabled", "bool", false, { label: "PipeWire output", "default": false, apply: "reload", source: "config.d/50-panel.toml" })] },
+      { id: "effect", label: "Effect", settings: [
+        cfg("effect.maxine_root", "path", "/opt/maxine", { label: "Maxine root", editable: false, apply: "restart" })] },
+      { id: "modules", label: "Modules", settings: [
+        cfg("modules.profile", "enum", "quality", { label: "Backend profile", apply: "reload",
+            options: [{ value: "quality", label: "Quality" }, { value: "battery", label: "Battery" }] }),
+        cfg("modules.pin.background", "enum", "", { label: "Background", apply: "reload",
+            options: [{ value: "", label: "Automatic" }, { value: "br.com.dias.maxine-vfx", label: "NVIDIA Maxine video effects" },
+                      { value: "org.example.long", label: "A backend module with a name far too long to share a line of chips with any other" }] }),
+        cfg("modules.dirs", "list", ["/usr/lib/omarchy-broadcast/modules.d"], { label: "Module directories", editable: false })] }
+    ]
+    var raw = []
+    for (var g = 0; g < groups.length; g++) {
+      var per = 2
+      var parts = Math.max(1, Math.ceil(groups[g].settings.length / per))
+      for (var p = 0; p < parts; p++)
+        raw.push({ v: 1, type: "config_group", schema: 1, serial: 4, part: p + 1, parts: parts,
+                   group: { id: groups[g].id, label: groups[g].label, settings: groups[g].settings.slice(p * per, (p + 1) * per) } })
+    }
+    for (var i = 0; i < raw.length; i++) { raw[i].index = i; raw[i].count = raw.length }
+    return raw.map(function(o) { return JSON.stringify(o) })
+  }
+  function setupFilesLine() {
+    return JSON.stringify({ v: 1, type: "config_files", serial: 4, dir: "/home/u/.config/omarchy-broadcast", files: [
+      { path: "config.toml", status: "loaded", managed: false, reason: "" },
+      { path: "config.d/50-panel.toml", status: "loaded", managed: true, reason: "" },
+      { path: "config.d/90-local.toml", status: "error", managed: false, reason: "line 3: unknown field `foo`" }], files_truncated: false })
+  }
+
+  function setupScenario() {
+    var A = function() { return h.widgetA }
+    var B = function() { return h.widgetB }
+    var S = function() { return h.widgetA.service }
+    var D = function() { return h.dialog }
+    var find = function(name) { return h.findByName(D(), name) }
+    var rev = function(n) { return { interface_revision: n, config_serial: 1, modules_serial: 1, error: "" } }
+    var reads = function() {
+      return h.newLogArgs().filter(function(a) { return a[a.length - 1] === "--json" && a[0] !== "watch" && a[0] !== "preview" })
+                           .map(function(a) { return a.join(" ") })
+    }
+    var writes = function() {
+      return h.newLogArgs().filter(function(a) { return (a[0] === "modules" || a[0] === "order" || a[0] === "config") && a[a.length - 1] !== "--json" })
+    }
+    var loaded = function(kinds) { return kinds.every(function(k) { return S().setup[k] !== null }) && !S().readArmed && S().readQueue.length === 0 }
+    var shot = function(file) { h.grabStep(function() { return find("setupCard") }, file) }
+
+    h.step("setup: seed the fake with a revision-10 daemon; two monitors again", function() {
+      // The overlay is loaded from the widgets' directory, as the shell does.
+      if (!h.widgetB) h.widgetB = h.makeWidget(barB, { cliPath: shellRoot.cli })
+      h.writeFile("modules-list", setupModulesLines(true))
+      h.writeFile("order-show", [setupOrderLine(["enhance", "denoise", "background"])])
+      h.writeFile("config-show", setupConfigLines())
+      h.writeFile("config-files", [setupFilesLine()])
+      h.writeFile("setup-serial", ["1"])
+      h.removeFile("delay")
+      h.removeFile("stderr")
+      h.writeFile("exit", ["0"])
+      h.feed([snapshotLine(rev(10))])
+    }, function() { return S().record.interfaceRevision === 10 && S().attachedCount === 2 && h.writerIdle() })
+    // As the shell's panel loader (shell.qml, panelEntry.panelLoader): an
+    // asynchronous Loader of the entry point whose onLoaded hands the item
+    // what it declares, in the shell's order, before registering it. An
+    // assignment that throws (a readonly property of one of these names)
+    // stops it there, as in the shell: never registered, so never opened.
+    h.step("setup: the shell's loader makes the overlay", function() {
+      fakeShell.toggles = []
+      fakeShell.hides = []
+      h.notes.loaderError = ""
+      var loader = Qt.createQmlObject('import QtQuick; Loader { asynchronous: true; width: 900; height: 760 }',
+                                      window.contentItem, "setupLoader")
+      h.notes.loader = loader
+      loader.loaded.connect(function() {
+        var item = loader.item
+        if (!item) return
+        try {
+          if ("omarchyPath" in item) item.omarchyPath = "/usr/share/omarchy"
+          if ("shell" in item) item.shell = fakeShell
+          if ("manifest" in item) item.manifest = { id: shellRoot.moduleName }
+          if ("barWidgetRegistry" in item) item.barWidgetRegistry = null
+          if ("pluginRegistry" in item) item.pluginRegistry = null
+          // This plugin has no service entry: the shell's serviceFor gives null.
+          if ("service" in item) item.service = null
+          h.dialog = item
+        } catch (e) {
+          h.notes.loaderError = String(e)
+        }
+      })
+      loader.source = "file://" + shellRoot.pluginPath + "/SetupDialog.qml"
+    }, function() { return !!h.dialog || h.notes.loaderError !== "" || h.notes.loader.status === Loader.Error })
+    h.step("setup: loaded, shown nothing, held nothing", function() {
+      h.eq("the loader's injections went through and it registered", h.notes.loaderError, "")
+      h.check("registered", !!h.dialog, h.notes.loader.status === Loader.Error
+              ? Qt.createComponent("file://" + shellRoot.pluginPath + "/SetupDialog.qml").errorString() : h.notes.loader.status)
+      if (!h.dialog) return
+      h.eq("the shell's manifest", D().manifest.id, shellRoot.moduleName)
+      h.eq("not shown", D().shown, false)
+      h.eq("not open", D().opened, false)
+      h.eq("no reads", S().setupHeld, false)
+      h.check("one service: the widgets' singleton", D().daemonService === S())
+      A().open()
+    }, function() { return A().opened })
+    h.step("setup: an open panel makes the plugin open, for the shell", function() {
+      h.eq("panel open: the overlay reports open", D().opened, true)
+      h.eq("Daemon.panelOpen", S().panelOpen, true)
+      // a shell without a toggle: nothing to open, and the panel stays
+      barA.shell = noToggleShell
+      h.eq("no toggle: no setup", A().openSetup(), false)
+      h.eq("the panel stays open", A().opened, true)
+      barA.shell = fakeShell
+      h.markLog()
+      A().iconButton.triggerPress(Qt.RightButton)
+    }, function() { return D().shown && loaded(["modules", "order", "config", "files"]) }, 8000)
+    h.step("setup: the right click closed the panel and opened the dialog through the shell's toggle", function() {
+      h.eq("panel closed", A().opened, false)
+      h.eq("one toggle", fakeShell.toggles.length, 1)
+      h.eq("for the plugin", fakeShell.toggles[0].id, shellRoot.moduleName)
+      h.eq("payload", fakeShell.toggles[0].payload, JSON.stringify({ view: "setup", cliPath: shellRoot.cli }))
+      h.eq("held", S().setupHeld, true)
+      h.eq("the four reads, in order", JSON.stringify(reads()),
+           JSON.stringify(["modules list --json", "order show --json", "config show --json", "config files --json"]))
+      h.eq("no write", writes().length, 0)
+      h.eq("the dialog did not attach itself (the widgets run the watch)", D().attached, false)
+      h.eq("watch still one", S().watchStarts >= 1 && S().attachedCount === 2, true)
+      h.eq("title", find("setupTitle").text, h.model.SETUP_TITLE)
+      h.eq("Modules shown first", D().section, "modules")
+      h.eq("Modules selected in the list", find("setupSection-modules").current, true)
+      h.check("the keyboard is the dialog's", D().keyCatcher.activeFocus)
+    })
+    h.wait(300)
+    h.step("setup: Modules", function() {
+      h.eq("two rows", find("modulesSection").visible && D().modulesView.rows.length, 2)
+      h.eq("titles", D().modulesView.rows.map(function(r) { return r.title }).join("|"), "NVIDIA Maxine video effects 0.25.0|Hello btint/b 0.1.0")
+      h.eq("the crash-ledger reason", D().modulesView.rows[1].reason, "Disabled after crashing the daemon twice in a row")
+      h.eq("overridden: greyed, no switch", D().modulesView.rows[1].switchable, false)
+      h.eq("its note", D().modulesView.rows[1].note, "Overridden by config.d/90-local.toml")
+      h.check("its switch faded", find("moduleSwitch-1").opacity < 1)
+      h.eq("switch on", find("moduleSwitch-0").checked, true)
+      h.eq("stops: the list, then the one switch that can flip", D().stops.map(function(x) { return x.kind + x.index }).join(","),
+           "section0,section1,section2,section3,section4,module0")
+    })
+    shot("setup-modules.png")
+    h.step("setup: Down shows the cursor, Right enters, Enter disables the module", function() {
+      h.markLog()
+      h.key(Qt.Key_Down)
+      h.eq("cursor on the section shown", D().currentStop.kind + D().currentStop.index, "section0")
+      h.eq("one highlight", find("setupSection-modules").hasCursor, true)
+      h.key(Qt.Key_Right)
+      h.eq("into the section", D().currentStop.kind + D().currentStop.index, "module0")
+      h.eq("the row has the cursor", find("moduleRow-0").hasCursor, true)
+      h.key(Qt.Key_Return)
+      h.check("busy", S().setupBusy)
+      h.eq("Saving… on the title line", find("setupSaving").text, h.model.SETUP_SAVING)
+      h.eq("a setup write does not hold the middle click (Q5)", S().toggleBusy, false)
+      h.eq("nor the panel's switch", h.model.middleClickAction(S().record, S().toggleBusy), "toggle")
+      h.check("a second write is refused while it runs", !S().setModuleEnabled("br.com.dias.maxine-vfx", true))
+      h.writeFile("modules-list", setupModulesLines(false))
+    }, function() { return writes().length >= 1 && !S().setupBusy && S().setup.modules && S().setup.modules.ok
+                           && S().setup.modules.modules[0].enabled === false }, 8000)
+    h.step("setup: the write and the re-read", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["modules", "disable", "br.com.dias.maxine-vfx"]]))
+      h.eq("switch off, from the daemon's list", find("moduleSwitch-0").checked, false)
+      h.eq("its status", D().modulesView.rows[0].statusText, "Disabled")
+      h.check("read again after modules_changed", reads().indexOf("modules list --json") >= 0, JSON.stringify(reads()))
+      h.eq("no error", D().statusText, "")
+      h.eq("the panel's error untouched", S().commandError, "")
+    })
+    // Order: the daemon's moves only
+    h.step("setup: 2 shows Order", function() { h.key("2") }, function() { return D().section === "order" })
+    h.wait(250)
+    h.step("setup: Order", function() {
+      h.eq("rows", D().orderView.rows.map(function(r) { return r.position + r.id }).join(","), "1enhance,2denoise,3background")
+      h.eq("first cannot go up", find("stageUp-0").enabled, false)
+      h.eq("last cannot go down", find("stageDown-2").enabled, false)
+      h.eq("reset offered", find("resetOrder").visible, true)
+      h.eq("Move up names its stage", find("stageUp-1").Accessible.name, "Move denoise up")
+      h.eq("Move down names its stage", find("stageDown-1").Accessible.name, "Move denoise down")
+      h.eq("the cursor moved to the section entry", D().currentStop.kind + D().currentStop.index, "section1")
+      h.markLog()
+      D().setCursor("stage", 1)
+      h.eq("lands on Move up", D().stageButton, 0)
+      h.eq("Move up has the cursor", find("stageUp-1").hasCursor, true)
+      h.key(Qt.Key_Return)
+    }, function() { return writes().length >= 1 && !S().setupBusy && S().setup.order && S().setup.order.order[0] === "denoise" }, 8000)
+    h.step("setup: a move is the whole new order", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["order", "set", "denoise,enhance,background"]]))
+      h.eq("re-read", D().orderView.rows.map(function(r) { return r.id }).join(","), "denoise,enhance,background")
+      h.eq("the cursor followed the stage", D().currentStop.kind + D().currentStop.index, "stage0")
+      h.markLog()
+      keys.keyClick(Qt.Key_Down, Qt.ControlModifier)
+    }, function() { return writes().length >= 1 && !S().setupBusy && S().setup.order.order[1] === "denoise" }, 8000)
+    h.step("setup: Ctrl+Down moves it down", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["order", "set", "enhance,denoise,background"]]))
+      h.markLog()
+      var b = find("resetOrder")
+      keys.mouseClick(b, b.width / 2, b.height / 2)
+    }, function() { return writes().length >= 1 && !S().setupBusy }, 8000)
+    h.step("setup: Reset order", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["order", "reset"]]))
+    })
+    shot("setup-order.png")
+    // Backends: the profile and the pins, written with config set
+    h.step("setup: 3 shows Backends", function() { h.key("3") }, function() { return D().section === "backends" })
+    h.wait(250)
+    h.step("setup: Backends", function() {
+      h.eq("rows", D().backendsView.groups.map(function(g) { return g.rows.map(function(r) { return r.id + ":" + r.widget }).join(",") }).join("|"),
+           "modules.profile:choices,modules.pin.background:choices")
+      h.eq("Quality selected", find("configChoice-modules.profile-0").selected, true)
+      var flow = find("configChoices-modules.pin.background")
+      var pinRow = find("configRow-modules.pin.background")
+      h.eq("the pin's choices start at the left", flow.mapToItem(pinRow, 0, 0).x, find("configChoices-modules.profile").mapToItem(find("configRow-modules.profile"), 0, 0).x)
+      h.check("on their own line under the label", flow.y > 0, flow.y)
+      h.check("across the whole row", flow.width > pinRow.width * 0.8, flow.width + " of " + pinRow.width)
+      h.check("each chip within the row", find("configChoice-modules.pin.background-2").width <= flow.width + 0.5)
+      h.eq("a chip that fits has no tooltip", find("configChoice-modules.pin.background-2").tooltipText, "")
+      h.eq("a row of choices reads as a combo box", pinRow.Accessible.role, Accessible.ComboBox)
+      h.eq("a chip as a radio button", find("configChoice-modules.pin.background-1").Accessible.role, Accessible.RadioButton)
+      h.eq("Automatic selected", find("configChoice-modules.pin.background-0").selected, true)
+      h.markLog()
+      D().setCursor("config", 0)
+      h.eq("lands on the current choice", D().choiceCursor, 0)
+      h.key(Qt.Key_Right)
+      h.eq("Battery has the cursor", find("configChoice-modules.profile-1").hasCursor, true)
+      h.key(Qt.Key_Space)
+    }, function() { return writes().length >= 1 && !S().setupBusy && h.model.findConfigRow(S().setup.config, "modules.profile").value === "battery" }, 8000)
+    // a narrow screen: the longest chip is wider than the row
+    h.step("setup: Backends on a narrow screen", function() { h.notes.loader.width = 470 })
+    h.wait(250)
+    h.step("setup: a chip wider than the row elides, with its tooltip", function() {
+      var flow = find("configChoices-modules.pin.background")
+      var longChip = find("configChoice-modules.pin.background-2")
+      var label = h.model.findConfigRow(S().setup.config, "modules.pin.background").options[2].label
+      h.check("it fits the row, elided", longChip.width <= flow.width + 0.5 && longChip.width < longChip.implicitWidth,
+              longChip.width + "/" + longChip.implicitWidth + " in " + flow.width)
+      h.eq("its tooltip has the whole name", longChip.tooltipText, label)
+      h.notes.loader.width = 900
+    })
+    h.wait(250)
+    h.step("setup: the profile write", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["config", "set", "--", "modules.profile", "battery"]]))
+      h.eq("Battery selected", find("configChoice-modules.profile-1").selected, true)
+      h.eq("its apply note", D().backendsView.groups[0].rows[0].applyText, "Applies at next camera start")
+      h.markLog()
+      var chip = find("configChoice-modules.pin.background-1")
+      keys.mouseClick(chip, chip.width / 2, chip.height / 2)
+    }, function() { return writes().length >= 1 && !S().setupBusy }, 8000)
+    h.step("setup: a pin is a config write of the module's id", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["config", "set", "--", "modules.pin.background", "br.com.dias.maxine-vfx"]]))
+    })
+    shot("setup-backends.png")
+    // Daemon: rows by type
+    h.step("setup: 4 shows Daemon", function() { h.key("4") }, function() { return D().section === "daemon" })
+    h.wait(250)
+    h.step("setup: Daemon", function() {
+      h.eq("groups", D().daemonView.groups.map(function(g) { return g.id }).join(","), "output,lifecycle,pipewire,effect")
+      h.eq("an overridden row is greyed, with its file", find("configNote-lifecycle.start_debounce_ms").text, "Overridden by config.d/90-local.toml")
+      h.eq("shown as a value", find("configValue-lifecycle.start_debounce_ms").visible, true)
+      h.eq("read-only rows show their value", find("configValue-output.mode").text, "1920x1080@30")
+      h.eq("a path", find("configValue-effect.maxine_root").text, "/opt/maxine")
+      h.eq("the stops: interactive rows only", D().stops.filter(function(x) { return x.kind === "config" }).length, 3)
+      h.markLog()
+      D().setCursor("config", 1)
+      h.eq("the stepper row has the cursor", find("configRow-lifecycle.idle_grace_s").hasCursor, true)
+      h.eq("a number reads as a spin box", find("configRow-lifecycle.idle_grace_s").Accessible.role, Accessible.SpinBox)
+      h.eq("Less names its row", find("configLess-lifecycle.idle_grace_s").Accessible.name, "Less " + h.model.findConfigRow(S().setup.config, "lifecycle.idle_grace_s").label)
+      h.eq("More names its row", find("configMore-lifecycle.idle_grace_s").Accessible.name, "More " + h.model.findConfigRow(S().setup.config, "lifecycle.idle_grace_s").label)
+      var sw = find("configRow-pipewire.enabled")
+      h.eq("a switch reads as a check box", sw.Accessible.role, Accessible.CheckBox)
+      h.eq("checkable", sw.Accessible.checkable, true)
+      h.eq("unchecked", sw.Accessible.checked, false)
+      h.key(Qt.Key_Right)
+    }, function() { return writes().length >= 1 && !S().setupBusy && h.model.findConfigRow(S().setup.config, "lifecycle.idle_grace_s").value === 8 }, 8000)
+    h.step("setup: a number steps by a twentieth of its range", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["config", "set", "--", "lifecycle.idle_grace_s", "8"]]))
+      h.eq("shown", find("configStepValue-lifecycle.idle_grace_s").text, "8 s")
+      h.markLog()
+      var r = find("configRow-pipewire.enabled")
+      keys.mouseClick(r, r.width / 2, r.height / 2)
+    }, function() { return writes().length >= 1 && !S().setupBusy && h.model.findConfigRow(S().setup.config, "pipewire.enabled").value === true }, 8000)
+    h.step("setup: a switch row owns its click", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["config", "set", "--", "pipewire.enabled", "true"]]))
+      h.eq("switch on", find("configSwitch-pipewire.enabled").checked, true)
+      h.eq("apply note", D().daemonView.groups[2].rows[0].applyText, "Applies at next camera start")
+    })
+    shot("setup-daemon.png")
+    // a refused write: the daemon's reason in the dialog, not the panel
+    h.step("setup: a refused write", function() {
+      h.writeFile("exit", ["1"])
+      h.writeFile("stderr", ["omarchy-broadcast: Overridden by config.d/90-local.toml"])
+    }, function() { return h.writerIdle() })
+    h.step("setup: refused", function() {
+      h.markLog()
+      D().setCursor("config", 0)
+      h.key(Qt.Key_Right)
+      h.key(Qt.Key_Return)
+    }, function() { return writes().length >= 1 && !S().setupBusy && D().statusText !== "" }, 8000)
+    h.wait(400)
+    h.step("setup: the reason shows on the dialog's status line", function() {
+      h.eq("status", find("setupStatus").text, "The daemon refused the request: Overridden by config.d/90-local.toml")
+      h.check("under the title, wrapped", find("setupStatus").y > find("setupTitle").y && find("setupStatus").wrapMode === Text.Wrap)
+      h.eq("at most two lines", find("setupStatus").maximumLineCount, 2)
+      h.eq("Saving… gone", find("setupSaving").text, "")
+      h.eq("a refused write is read again once, all four reads", JSON.stringify(reads()),
+           JSON.stringify(["modules list --json", "order show --json", "config show --json", "config files --json"]))
+      h.eq("the panel's error untouched", S().commandError, "")
+      h.writeFile("exit", ["0"])
+      h.removeFile("stderr")
+    }, function() { return h.writerIdle() })
+    // Diagnostics, read-only
+    h.step("setup: 5 shows Diagnostics", function() { h.key("5") }, function() { return D().section === "diagnostics" })
+    h.wait(250)
+    h.step("setup: Diagnostics", function() {
+      var d = D().diagnostics
+      h.eq("revision", d.rows[0].value, "revision 10")
+      h.eq("files in load order", d.files.map(function(f) { return f.path + ":" + f.statusText }).join(","),
+           "config.toml:Loaded,config.d/50-panel.toml:Loaded,config.d/90-local.toml:Error")
+      h.eq("the managed one", d.files[1].note, h.model.MANAGED_FILE_TEXT)
+      h.eq("the error", d.files[2].reason, "line 3: unknown field `foo`")
+      h.eq("problems", d.problems.map(function(p) { return p.title }).join("|"), "NVIDIA Maxine video effects|Hello btint/b")
+      h.eq("a command to copy", find("diagnosticCommand").text, "omarchy-broadcast modules")
+      h.eq("read-only", find("diagnosticCommand").readOnly, true)
+      h.eq("no stops but the list", D().stops.length, 5)
+      h.check("its sub-headings are section headers, uppercased", !!h.findByText(find("diagnosticsSection"), "MODULE PROBLEMS"))
+      // a short screen, so the section does not fit
+      h.notes.loader.height = 420
+    })
+    h.wait(250)
+    h.step("setup: Diagnostics scrolls with the keys", function() {
+      var f = find("setupFlick")
+      h.check("does not fit", f.contentHeight > f.height + 0.5, f.contentHeight + " in " + f.height)
+      h.eq("at the top", f.contentY, 0)
+      h.key(Qt.Key_Down)
+      h.check("Down scrolls", f.contentY > 0, f.contentY)
+      var y = f.contentY
+      h.key(Qt.Key_Up)
+      h.check("Up scrolls back", f.contentY < y, f.contentY)
+      h.key(Qt.Key_PageDown)
+      h.check("PageDown scrolls a page", f.contentY > y, f.contentY)
+      for (var i = 0; i < 6; i++) h.key(Qt.Key_PageDown)
+      h.eq("never past the end", f.contentY, Math.max(0, f.contentHeight - f.height))
+      h.key(Qt.Key_PageUp)
+      h.check("PageUp scrolls back", f.contentY < Math.max(0, f.contentHeight - f.height), f.contentY)
+      for (var j = 0; j < 6; j++) h.key(Qt.Key_PageUp)
+      h.eq("never past the top", f.contentY, 0)
+      h.key("1")
+      h.notes.loader.height = 760
+    })
+    h.wait(250)
+    h.step("setup: PageDown scrolls a section with stops too; Up/Down still walk them", function() {
+      h.key("4")
+      h.key(Qt.Key_Down)
+      h.eq("the cursor, not a scroll", D().cursorActive, true)
+      h.key("5")
+      D().cursorActive = false
+    })
+    h.step("setup: selecting a command copies it", function() {
+      var edit = find("diagnosticCommand")
+      h.notes.copies = D().copies
+      edit.select(0, "omarchy-broadcast".length)
+    }, function() { return D().copies === h.notes.copies + 1 }, 3000)
+    h.step("setup: copied", function() {
+      var edit = find("diagnosticCommand")
+      h.eq("what was copied", D().copiedText, "omarchy-broadcast")
+      h.eq("said so", find("diagnosticCopied").text, "Copied: omarchy-broadcast")
+      h.eq("the selection stays drawn", edit.persistentSelection, true)
+      var probe = Qt.createQmlObject('import QtQuick; TextEdit { visible: false }', window.contentItem, "pasteProbe")
+      probe.paste()
+      h.eq("on the clipboard", probe.text, "omarchy-broadcast")
+      probe.destroy()
+      h.check("the keyboard is still the dialog's", D().keyCatcher.activeFocus)
+      edit.deselect()
+    })
+    shot("setup-diagnostics.png")
+    // Escape closes through the shell; the reads stop
+    h.step("setup: Escape", function() {
+      h.markLog()
+      h.key(Qt.Key_Escape)
+    }, function() { return !D().shown })
+    h.step("setup: closed through the shell's hide", function() {
+      h.eq("hide called", fakeShell.hides.length, 1)
+      h.eq("released", S().setupHeld, false)
+      h.eq("data dropped", S().setup.modules, null)
+      h.eq("not open", D().opened, false)
+      h.notes.reads = S().setupReadRuns
+      h.feed(['{"v":1,"type":"config_changed","serial":40}'])
+    }, function() { return S().record.configSerial === 40 })
+    h.wait(300)
+    h.step("setup: no read while closed", function() { h.eq("reads", S().setupReadRuns, h.notes.reads) })
+    // the panel hotkey: routed to the overlay, forwarded to a panel
+    h.step("setup: the hotkey (empty payload) opens a bar panel", function() {
+      fakeShell.toggle(shellRoot.moduleName, "")
+      h.eq("a panel opened", A().opened || B().opened, true)
+      h.eq("one only", A().opened && B().opened, false)
+      h.eq("the dialog stays hidden", D().shown, false)
+      h.eq("the plugin reports open", D().opened, true)
+      fakeShell.toggle(shellRoot.moduleName, "")
+      h.eq("the hotkey again closes it", A().opened || B().opened, false)
+      fakeShell.toggle(shellRoot.moduleName, "{}")
+      h.eq("the shell's togglePanelAt payload too", A().opened || B().opened, true)
+      fakeShell.hide(shellRoot.moduleName)
+      h.eq("hide closes it", A().opened || B().opened, false)
+      h.eq("no reads", S().setupHeld, false)
+    })
+    // a revision-9 daemon: Modules and Order, no configuration
+    h.step("setup: revision 9", function() {
+      h.feed([snapshotLine(rev(9))])
+    }, function() { return S().record.interfaceRevision === 9 })
+    h.step("setup: reopened from the other monitor", function() {
+      h.markLog()
+      B().iconButton.triggerPress(Qt.RightButton)
+    }, function() { return D().shown && loaded(["modules", "order"]) && !S().readArmed }, 8000)
+    h.wait(300)
+    h.step("setup: only the modules reads", function() {
+      h.eq("reads", JSON.stringify(reads()), JSON.stringify(["modules list --json", "order show --json"]))
+      h.eq("Modules work", D().modulesView.hint, "")
+      h.eq("no configuration read kept from revision 10", S().setup.config, null)
+      h.key("3")
+      h.eq("Backends needs a newer daemon", find("setupHint").text, h.model.SETUP_OLD_CONFIG)
+      h.key("4")
+      h.eq("Daemon too", find("setupHint").text, h.model.SETUP_OLD_CONFIG)
+      h.eq("no config stops", D().stops.length, 5)
+      h.check("a config write is refused", !S().setConfig("pipewire.enabled", false))
+    })
+    shot("setup-revision-9.png")
+    h.step("setup: revision 8", function() {
+      h.markLog()
+      h.feed([snapshotLine(rev(8))])
+    }, function() { return S().record.interfaceRevision === 8 })
+    h.wait(400)
+    h.step("setup: the daemon needs updating", function() {
+      h.eq("the modules reads of revision 9 are dropped", S().setup.modules, null)
+      h.eq("and the order", S().setup.order, null)
+      h.key("1")
+      h.eq("hint", find("setupHint").text, h.model.SETUP_OLD_DAEMON)
+      h.eq("no reads", reads().length, 0)
+      h.eq("no module stops", D().stops.length, 5)
+    })
+    h.step("setup: the daemon goes away", function() {
+      h.feed(['{"v":1,"type":"error","code":"daemon-not-running","error":"gone"}'])
+    }, function() { return S().record.link === "not-running" })
+    h.wait(250)
+    h.step("setup: says so, with the start command", function() {
+      h.eq("hint", find("setupHint").text, "omarchy-broadcastd is not running")
+      h.key("5")
+      h.eq("Diagnostics still shows", D().diagnostics.rows[1].value, "omarchy-broadcastd is not running")
+    })
+    shot("setup-unavailable.png")
+    h.step("setup: close and clean up", function() {
+      D().close()
+      h.removeFile("modules-list")
+      h.removeFile("order-show")
+      h.removeFile("config-show")
+      h.removeFile("config-files")
+      h.removeFile("setup-serial")
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.link === "ok" && S().record.interfaceRevision === 4 && h.writerIdle() })
+    h.step("setup: the overlay goes", function() {
+      h.eq("released", S().setupHeld, false)
+      h.dialog = null
+      h.notes.loader.destroy()
+      h.notes.loader = null
+    })
+    // An overlay whose singleton no widget attached to (the plugin copy, at
+    // another URL than the widgets): it runs the watch itself while shown.
+    h.step("setup: an overlay of a singleton with no widget", function() {
+      var comp = Qt.createComponent("file://" + shellRoot.pluginCopy + "/SetupDialog.qml")
+      h.notes.lone = comp.createObject(window.contentItem, { width: 900, height: 760 })
+      h.check("another singleton", h.notes.lone.daemonService !== S())
+      h.eq("no reader", h.notes.lone.daemonService.attachedCount, 0)
+      h.notes.lone.open(h.model.setupPayloadJson(shellRoot.cli))
+    }, function() { return h.notes.lone.shown && h.notes.lone.daemonService.record.link === "ok" }, 8000)
+    h.step("setup: it attached and configured from the payload", function() {
+      var ls = h.notes.lone.daemonService
+      h.eq("attached", h.notes.lone.attached, true)
+      h.eq("one reader", ls.attachedCount, 1)
+      h.eq("the payload's CLI", ls.cliPath, shellRoot.cli)
+      h.notes.lone.close()
+      h.eq("detached on close", ls.attachedCount, 0)
+      h.notes.lone.destroy()
+      h.notes.lone = null
+    })
+    h.wait(800)
+    h.countStep(1, "after the lone overlay closed")
+    h.step("setup: back to one widget, as the checks after these expect", function() {
+      B().destroy()
+      h.widgetB = null
+    }, function() { return S().attachedCount === 1 })
   }
 
   // ---- live scenario (real daemon, real CLI) --------------------------------------
@@ -3063,16 +3515,16 @@ ShellRoot {
     }, function() { return S().record.activeCamera !== h.notes.before && !S().commandBusy }, 15000)
     h.step("next camera result", function() { h.note("after next: " + S().record.activeCameraName) })
 
-    h.step("right click: off", function() {
+    h.step("middle click: off", function() {
       A().close()
-      A().iconButton.triggerPress(Qt.RightButton)
+      A().iconButton.triggerPress(Qt.MiddleButton)
     }, function() { return S().record.state === "off" && !S().commandBusy }, 15000)
     h.step("off icon", function() {
       h.eq("off glyph", A().iconButton.text, glyphOf("off"))
       h.eq("enabled false", S().record.enabled, false)
     })
     h.grabStep(function() { return strip }, "live-bar-off.png")
-    h.step("right click: on", function() { A().iconButton.triggerPress(Qt.RightButton) },
+    h.step("middle click: on", function() { A().iconButton.triggerPress(Qt.MiddleButton) },
            function() { return S().record.state === "idle" && S().record.enabled }, 15000)
 
     h.step("a consumer opens the virtual camera", function() {
