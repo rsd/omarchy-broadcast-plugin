@@ -58,7 +58,8 @@
 # gst-launch for ~12 s, kills the daemon by PID, restarts it, and stops it.
 # It refuses to run if br.com.dias.OmarchyBroadcast already has an owner.
 #
-# The work directory is removed on exit; KEEP_WORK=1 keeps it.
+# The work directory is removed when the run succeeds, and kept (with its path
+# printed) when it fails or is signalled; KEEP_WORK=1 keeps it on success too.
 #
 # Exit status 0 when the harness prints "ALL OK". Whatever it started is gone
 # when this returns (checked with pgrep on paths inside the work dir: the
@@ -126,12 +127,48 @@ else
   # else, is deleted to make room.
   work=$(mktemp -d "$(cd -- "$work" && pwd)/obh.XXXXXX")
 fi
-# Only the directory this run's mktemp made is removed, on exit or a signal;
-# KEEP_WORK=1 keeps it (for debugging).
+# Only the directory this run's mktemp made is removed, and only when the run
+# succeeded: a failed or signalled run keeps it (log, fake log, screenshots) and
+# says where it is. KEEP_WORK=1 keeps it on success too. On any exit, first
+# stop what this run started: its quickshell and the leftovers the normal path
+# below also stops (by PID; paths are regex-escaped, pgrep -f takes a regex).
 made_work=$work
+qs_pid=""
+cli=""
+marker_prefix=""
+escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
+stop_leftovers() {
+  left=""
+  if [ -n "$cli" ]; then
+    left=$(pgrep -f "$marker_prefix$(escape "$cli") " || true)
+    if [ "$mode" = live ] && [ -n "$daemon" ]; then
+      left="$left $(pgrep -f "^$(escape "$daemon") --config $(escape "$work/live/config.toml")" || true)"
+    fi
+  fi
+  leftovers=0
+  for pid in $left; do
+    leftovers=$((leftovers + 1))
+    echo "harness: stopping leftover process $pid: $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" >&2
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+}
+# shellcheck disable=SC2329  # run by the EXIT trap
 cleanup() {
-  [ "${KEEP_WORK:-}" = 1 ] && return 0
-  if [ -n "$made_work" ] && [ -d "$made_work" ]; then rm -rf -- "$made_work"; fi
+  status=$?
+  trap - EXIT INT TERM
+  if [ -n "$qs_pid" ]; then
+    kill -TERM "$qs_pid" 2>/dev/null || true
+    wait "$qs_pid" 2>/dev/null || true
+  fi
+  stop_leftovers
+  if [ -n "$made_work" ] && [ -d "$made_work" ]; then
+    if [ "$status" -ne 0 ]; then
+      echo "harness: failed (status $status); work directory kept at $made_work (log, fake/log, screens/)" >&2
+    elif [ "${KEEP_WORK:-}" != 1 ]; then
+      rm -rf -- "$made_work"
+    fi
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -259,24 +296,21 @@ while [ "$elapsed" -lt "$limit" ]; do
 done
 kill -TERM "$qs_pid" 2>/dev/null || true
 wait "$qs_pid" 2>/dev/null || true
+qs_pid=""
 
 # Anything this run started and the harness did not stop: by PID only.
-# Paths are regex-escaped: pgrep -f takes a regular expression.
-escape() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
-left=$(pgrep -f "$marker_prefix$(escape "$cli") " || true)
-if [ "$mode" = live ]; then
-  left="$left $(pgrep -f "^$(escape "$daemon") --config $(escape "$work/live/config.toml")" || true)"
-fi
-leftovers=0
-for pid in $left; do
-  leftovers=$((leftovers + 1))
-  echo "harness: stopping leftover process $pid: $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" >&2
-  kill -TERM "$pid" 2>/dev/null || true
-done
+stop_leftovers
 
 sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E 'qml: ' | sed 's/^.*qml: //'
 echo "log: $log"
-echo "screens: $screens"
-[ "$result" = "done" ] || { echo "harness: no result within ${limit}s" >&2; exit 1; }
-[ "$leftovers" -eq 0 ] || { echo "harness: $leftovers process(es) left running" >&2; exit 1; }
-sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -q 'qml: ALL OK'
+ok=0
+[ "$result" = "done" ] || { echo "harness: no result within ${limit}s" >&2; ok=1; }
+if [ "$ok" -eq 0 ] && [ "$leftovers" -ne 0 ]; then echo "harness: $leftovers process(es) left running" >&2; ok=1; fi
+if [ "$ok" -eq 0 ]; then sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -q 'qml: ALL OK' || ok=1; fi
+case $screens in
+  "$work"/*)
+    if [ "$ok" -ne 0 ] || [ "${KEEP_WORK:-}" = 1 ]; then echo "screens: $screens"
+    else echo "screens: removed with the work directory (KEEP_WORK=1 or --screens DIR keeps them)"; fi ;;
+  *) echo "screens: $screens" ;;
+esac
+exit "$ok"
