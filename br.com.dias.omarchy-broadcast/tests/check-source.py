@@ -322,16 +322,29 @@ check("setting intents run only while offered, bound to the set's camera, on an 
       and 'case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null' in model
       and "intent.camera === record.settings.camera" in block(model, "function settingIntentBound")
       and all(t in block(model, "function settingIntentArgv") for t in (
-          "if (!settingsSupported(record) || !settingIntentBound(intent, record)) return null",
+          "if (!settingsSupported(record)) return null",
+          'if (row.scope !== "global" && !settingIntentBound(intent, record)) return null',
           "if (!row || !row.enabled) return null", "var word = settingArgvValue(row, intent.value)",
-          "settingArgv(cli, record.settings.camera, row.id, word)")))
+          "settingArgv(cli, record.settings.camera, row.id, word)",
+          "settingArgvGlobal(cli, row.id, word)")))
+check("a global setting is written as `settings set -- ID VALUE`, the id and the value checked, no camera named",
+      re.search(r'function settingArgvGlobal\(cli, id, word\)\s*\{\s*'
+                r'if \(!cliUsable\(cli\) \|\| settingId\(id\) === "" \|\| typeof word !== "string" \|\| !SETTING_VALUE_RE\.test\(word\)\)\s*'
+                r'return null\s*return \[cli, "settings", "set", "--", id, word\]', model) is not None)
+check("the Effect tab skips only the one setting its choice row owns; the two legacy rows' settings are named in Model.js alone",
+      'var EFFECT_MODE_SETTING = "effect.background.mode"' in model
+      and model.count("EFFECT_MODE_SETTING") == 2
+      and re.findall(r"[a-z0-9]+\.[a-z0-9_]+\.[a-z0-9_]+", " ".join(re.findall(r'"([^"\n]*)"', model)))
+          == ["effect.background.mode", "effect.background.blur_strength", "effect.video.denoise"])
 check("a change of the set's camera drops the queued setting writes; cameras compared raw",
       'if ((after ? after.camera : "") !== (before ? before.camera : "")) dropQueuedSettings()' in block(daemon, "function ingest")
       and "var before = record.settings" in block(daemon, "function ingest")
-      and "camera = rawId(m.camera)" in block(model, "function settingsGroupLine"))
+      and "var camera = m.camera" in block(model, "function settingsGroupLine")
+      and 'typeof m.camera !== "string"' in block(model, "function settingsGroupLine"))
 check("Daemon requests settings only as intents from flushSettings, runSettingAction and resetSettings",
-      re.findall(r'request\(\{ verb: "(setting|reset-settings)"[^)]*\)', daemon) == ["setting", "setting", "reset-settings"]
-      and 'request({ verb: "setting", id: id, value: v, camera: camera })' in block(daemon, "function flushSettings")
+      re.findall(r'request\(\{ verb: "(setting|reset-settings)"[^)]*\)', daemon) == ["setting", "reset-settings"]
+      and 'var intent = { verb: "setting", id: id, value: v, camera: camera }' in block(daemon, "function flushSettings")
+      and "if (request(intent))" in block(daemon, "function flushSettings")
       and 'request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera })' in block(daemon, "function runSettingAction")
       and 'request({ verb: "reset-settings", camera: record.settings.camera })' in block(daemon, "function resetSettings"))
 check("flushSettings walks only the drafts, bounded by Model.withSetting",
@@ -354,7 +367,7 @@ check("no Timer in the panel or the renderer", all(re.search(r"\bTimer\b", sourc
 qml_writes = re.findall(r"Daemon\.(?:moveSetting|commitSetting|runSettingAction)\(([^,)]*)", panel + settings_view)
 check("QML writes a setting only by the id of a row of the view",
       qml_writes != [] and all(w in ("row.id", "settingRow.row.id") for w in qml_writes)
-      and "var row = Model.viewRow(root.settingsView, stop)" in block(panel, "function nudgeSetting"), str(qml_writes))
+      and "var row = Model.viewRow(root.activeView, stop)" in block(panel, "function nudgeSetting"), str(qml_writes))
 literals = [(p.name, lit) for p in plugin_qml for lit in re.findall(r'"([^"\n]*)"', sources[p])]
 named = [x for x in literals if re.fullmatch(r"[a-z0-9]+(\.[a-z0-9_]+){1,3}", x[1]) or "camera." in x[1]]
 check("no QML file names a setting (no string literal of the id grammar)", named == [], str(named))
@@ -380,7 +393,10 @@ check("the settings section is drawn only from Model.settingsView",
       "readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)" in panel
       and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible', panel) is not None
       and "view: root.settingsView" in panel
-      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView)" in panel)
+      and "readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)" in panel
+      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings)" in panel
+      and re.search(r'objectName: "effectSettingsArea"[^}]*visible: root\.genericEffect', panel) is not None
+      and "view: root.effectSettings" in panel)
 check("the set's lines, options and changes are capped before they are walked",
       "var n = Math.min(src.length, SETTINGS_LINE_LOOK)" in block(model, "function settingsGroupLine")
       and "var n = Math.min(changes.length, SETTINGS_LINE_LOOK)" in block(model, "function settingsDelta")

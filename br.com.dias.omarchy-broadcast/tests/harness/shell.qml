@@ -2247,12 +2247,13 @@ ShellRoot {
   // reaches a watch: a write that flips a dependent setting carries both.
 
   // One settings-state line: group|label|id|type|label|value|default|stored|
-  // min|max|step|unit|options|master|when|reason|fixed.
+  // min|max|step|unit|options|master|when|reason|fixed|scope ("global" for a
+  // setting of the daemon's own, else empty).
   function stateRow(group, groupLabel, id, type, label, value, def, o) {
     var x = o || {}
     var f = function(v) { return v === undefined ? "" : String(v) }
     return [group, groupLabel, id, type, label, f(value), f(def), x.stored ? "1" : "0", f(x.min), f(x.max), f(x.step), f(x.unit),
-            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : ""].join("|")
+            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope)].join("|")
   }
   // The MX Brio as the daemon publishes it (its starting values).
   function brioState() {
@@ -2880,6 +2881,85 @@ ShellRoot {
       h.writeFile("settings-state", brioState())
       h.feed([snapshotLine(rev7({}))])
     }, function() { return !S().commandBusy && h.writerIdle() })
+
+    // global settings (revision 8): the Effect tab draws them generically,
+    // below its own effect choice; the Camera tab never does
+    var globalRows = function(mode) {
+      var g = function(id, type, label, v, d, o) {
+        var x = { scope: "global" }
+        for (var k in o) x[k] = o[k]
+        return stateRow(id.split(".")[1], id.split(".")[1] === "video" ? "Video" : "Background effect", id, type, label, v, d, x)
+      }
+      return [
+        g("effect.background.mode", "enum", "Effect", mode, "none", { options: "none:Off,blur:Blur,replace:Replace" }),
+        g("effect.background.blur_strength", "int", "Blur strength", 50, 50,
+          { min: 0, max: 100, step: 1, unit: "%", master: "effect.background.mode", when: "blur", reason: "Choose Blur to change this" }),
+        g("effect.video.denoise", "bool", "Noise removal", "false", "false", {})
+      ]
+    }
+    var gwrite = function(id, v) { return ["settings", "set", "--", id, String(v)] }
+    h.step("global settings: a revision-8 daemon publishes them after the camera's", function() {
+      h.writeFile("settings-state", brioState().concat(globalRows("none")))
+      h.feed([snapshotLine(rev7({ interface_revision: 8, effect: "none", blur_strength: 0.5, denoise: false }))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 6 && h.writerIdle() })
+    h.step("global settings: the Effect tab", function() { h.tab(A(), "effect") }, function() { return h.find(A(), "effectSettingsArea").visible })
+    h.wait(300)
+    h.step("global settings: generic rows, no dedicated strength or noise removal", function() {
+      h.eq("the camera's view has no global group", C().settingsView.groups.map(function(g) { return g.id }).join(","), "image,white_balance,exposure,focus")
+      h.eq("the Effect view's groups", C().effectSettings.groups.map(function(g) { return g.id }).join(","), "background,video")
+      h.eq("no row for the effect choice", row("effect.background.mode"), null)
+      h.eq("the strength slider", shown("effect.background.blur_strength") && !!h.find(A(), "settingSlider-effect.background.blur_strength"), true)
+      h.eq("the noise removal switch", !!h.find(A(), "settingSwitch-effect.video.denoise"), true)
+      h.eq("the dedicated noise removal row is gone", h.find(A(), "denoiseRow").visible, false)
+      h.eq("group heading", h.find(A(), "effect-settingsGroupLabel-background").text, "BACKGROUND EFFECT", "small caps, as the section headers")
+      h.eq("no title, no reset, no note", h.find(A(), "effect-settingsTitle").visible || h.find(A(), "effect-settingsReset").visible, false)
+      h.eq("greyed with its reason", h.find(A(), "settingReason-effect.background.blur_strength").visible
+           && h.find(A(), "settingReason-effect.background.blur_strength").text === "Choose Blur to change this", true)
+      h.eq("stops", kinds(), "switch,preview,fps,tabs,effect,setting0,setting1")
+      h.fits(A(), "Effect tab with the generic rows")
+    })
+    h.grabStep(function() { return A().popup }, "e1-effect-generic.png")
+    h.step("global settings: a greyed row refuses the keyboard", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("effect.background.blur_strength"))
+      h.key(Qt.Key_Right)
+      h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
+      h.check("refused", !S().moveSetting("effect.background.blur_strength", 70))
+    })
+    h.wait(300)
+    h.step("global settings: Blur chosen; the strength opens", function()  {
+      h.writeFile("settings-state", brioState().concat(globalRows("blur")))
+      h.feed([snapshotLine(rev7({ interface_revision: 8, effect: "blur", blur_strength: 0.5, denoise: false }))])
+    }, function() { return h.model.findSetting(S().record, "effect.background.blur_strength").enabled === true && h.writerIdle() })
+    h.step("global settings: Right moves the slider; the write names no camera", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("effect.background.blur_strength"))
+      h.key(Qt.Key_Right)
+    }, function() { return setArgs().length >= 1 && value("effect.background.blur_strength") === 55 }, 3000)
+    h.step("global settings: the write", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("effect.background.blur_strength", 55)]))
+      h.eq("shown", h.find(A(), "settingValue-effect.background.blur_strength").text, "55 %")
+      h.markLog()
+      C().setCursor("setting", stopOf("effect.video.denoise"))
+      h.key(Qt.Key_Return)
+    }, function() { return setArgs().length >= 1 && value("effect.video.denoise") === true }, 3000)
+    h.step("global settings: the switch", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("effect.video.denoise", true)]))
+      h.eq("the switch follows the daemon", h.find(A(), "settingSwitch-effect.video.denoise").checked, true)
+      h.eq("no error", S().commandError, "")
+    })
+    h.step("global settings: no global setting published: the dedicated rows return", function() {
+      h.writeFile("settings-state", brioState())
+      h.feed([snapshotLine(rev7({ interface_revision: 8, effect: "blur", blur_strength: 0.5, denoise: true }))])
+    }, function() { return S().record.settings.groups.length === 4 && h.writerIdle() })
+    h.wait(300)
+    h.step("global settings: the fallback", function() {
+      h.eq("no generic section", h.find(A(), "effectSettingsArea").visible, false)
+      h.eq("noise removal row", h.find(A(), "denoiseRow").visible, true)
+      h.eq("stops", kinds(), "switch,preview,fps,tabs,effect,denoise")
+    })
+    h.step("global settings: back to the Camera tab", function() { h.tab(A(), "camera") }, function() { return h.find(A(), "settingsArea").visible })
+    h.wait(300)
 
     // an old daemon, an old CLI, a newer schema, no camera: a hint, no settings
     var hintCase = function(label, snapshot, mode, text, file) {

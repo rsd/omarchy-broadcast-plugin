@@ -27,12 +27,15 @@
 #       none   nothing (a daemon below interface revision 7)
 #     settings-state holds one setting per line, fields separated by "|":
 #       group|group label|id|type|label|value|default|stored|min|max|step|
-#       unit|options|master|when|reason|fixed
+#       unit|options|master|when|reason|fixed|scope
 #     options as value:Label,value:Label (enum); a setting with a master
 #     (another setting's id) is enabled only while the master's value is one
 #     of `when` (comma-separated), else greyed with `reason`; fixed 1: always
-#     greyed (a read-only control). Values: decimal (int), true/false (bool),
-#     an option value (enum), - (action).
+#     greyed (a read-only control); scope "global" (optional, else camera): a
+#     setting of the daemon's own, whose groups come after the camera's. With
+#     only global rows, settings-camera is empty and the lines carry camera "".
+#     Values: decimal (int), true/false (bool), an option value (enum), -
+#     (action).
 #     A feed line that is exactly {"fake":"settings-set"} is not printed:
 #     the settings set is, alone, as the real CLI prints it after a serial
 #     change (it reads the settings again, with no snapshot before them).
@@ -51,11 +54,13 @@
 #     prints `{"v":1,"type":"frame","seq":N,"path":P}`, seq from 1.
 # On SIGTERM/SIGINT/SIGHUP it removes the frame files and exits 0.
 #
-# `settings set --camera=ID -- SETTING VALUE` and `settings reset
-# --camera=ID`: as the other commands below (delay, stderr, exit), after a
+# `settings set [--camera=ID] -- SETTING VALUE`, `settings reset --camera=ID`
+# and `settings reset --setting=ID` (that one setting back to its default,
+# stored cleared): as the other commands below (delay, stderr, exit), after a
 # usage check (exit 2: any other shape). When the exit status is 0 and
 # settings-state exists, it is the daemon: another camera than
-# settings-camera, an unknown id, a greyed setting, or a value that is not
+# settings-camera for a camera setting (a global one takes no camera and
+# ignores one; a reset of the camera leaves the global ones alone), an unknown id, a greyed setting, or a value that is not
 # one of the setting's (an int off its range or step, a bool that is not
 # true/false, an enum that is not an option, an action value that is not
 # true) is refused (exit 1, a message on stderr); otherwise the value is
@@ -100,7 +105,7 @@ function enabled(k,   m, i, nw, ws) {
 }
 function setting(k,   s, t, i, n, os, kv, w, nw, ws, mt) {
   t = f[k, 4]
-  s = "{\"id\":" jstr(f[k, 3]) ",\"label\":" jstr(f[k, 5]) ",\"type\":" jstr(t) ",\"scope\":\"camera\",\"stored\":" (f[k, 8] == "1" ? "true" : "false")
+  s = "{\"id\":" jstr(f[k, 3]) ",\"label\":" jstr(f[k, 5]) ",\"type\":" jstr(t) ",\"scope\":\"" (f[k, 18] == "global" ? "global" : "camera") "\",\"stored\":" (f[k, 8] == "1" ? "true" : "false")
   s = s ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16])
   w = ""
   if (f[k, 14] != "") {
@@ -134,8 +139,8 @@ function change(k,   s) {
   if (f[k, 4] != "action") s = s ",\"value\":" jval(f[k, 4], f[k, 6])
   return s ",\"stored\":" (f[k, 8] == "1" ? "true" : "false") ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16]) "}"
 }
-function load(   i) { n++; for (i = 1; i <= 17; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
-function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 17; i++) s = s "|" f[k, i]; return s }
+function load(   i) { n++; for (i = 1; i <= 18; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
+function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 18; i++) s = s "|" f[k, i]; return s }
 '
 
 setting_file() { head -n 1 -- "$dir/$1" 2>/dev/null || echo "$2"; }
@@ -224,11 +229,14 @@ fi
 if [ "${1:-}" = "settings" ]; then
   case ${2:-} in
     set)
-      [ $# -eq 6 ] && [ "$4" = "--" ] || { echo "fake: usage: settings set --camera=ID -- SETTING VALUE" >&2; exit 2; }
-      case $3 in --camera=?*) ;; *) echo "fake: usage: settings set --camera=ID -- SETTING VALUE" >&2; exit 2 ;; esac ;;
+      case $# in
+        6) [ "$4" = "--" ] && case $3 in --camera=?*) true ;; *) false ;; esac ;;
+        5) [ "$3" = "--" ] ;;
+        *) false ;;
+      esac || { echo "fake: usage: settings set [--camera=ID] -- SETTING VALUE" >&2; exit 2; } ;;
     reset)
-      [ $# -eq 3 ] || { echo "fake: usage: settings reset --camera=ID" >&2; exit 2; }
-      case $3 in --camera=?*) ;; *) echo "fake: usage: settings reset --camera=ID" >&2; exit 2 ;; esac ;;
+      [ $# -eq 3 ] || { echo "fake: usage: settings reset --camera=ID | --setting=ID" >&2; exit 2; }
+      case $3 in --camera=?* | --setting=?*) ;; *) echo "fake: usage: settings reset --camera=ID | --setting=ID" >&2; exit 2 ;; esac ;;
     *) echo "fake: usage: settings set|reset" >&2; exit 2 ;;
   esac
   [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
@@ -236,22 +244,38 @@ if [ "${1:-}" = "settings" ]; then
   status=0
   [ -f "$dir/exit" ] && status=$(cat "$dir/exit")
   [ "$status" -eq 0 ] && [ -f "$dir/settings-state" ] || exit "$status"
-  camera=${3#--camera=}
-  [ "$camera" = "$(setting_file settings-camera "")" ] || { echo "omarchy-broadcast: no camera $camera" >&2; exit 1; }
   state=$dir/settings-state
+  # The camera the write names (none: the active one), and the setting it is for.
+  camera=$(setting_file settings-camera "")
+  active=$camera
+  case $3 in --camera=*) camera=${3#--camera=} ;; esac
+  only=""
+  case $2 in
+    set) if [ $# -eq 6 ]; then id=$5 value=$6; else id=$4 value=$5; fi ;;
+    *) id="" value=""; case $3 in --setting=*) only=${3#--setting=}; id=$only ;; esac ;;
+  esac
+  # A camera setting must be written for the active camera; a global one
+  # takes no camera and ignores one.
+  if ! awk -F'|' -v id="$id" '$3 == id && $18 == "global" { found = 1 } END { exit !found }' "$state"; then
+    [ "$camera" = "$active" ] || { echo "omarchy-broadcast: no camera $camera" >&2; exit 1; }
+  fi
+  camera=$active
   rev=$(($(setting_file settings-rev 1) + 1))
   serial=$(setting_file settings-serial 1)
   deltas=$dir/settings-delta.tmp
   : > "$deltas"
-  if [ "$2" = set ]; then id=$5 value=$6; else id="" value=""; fi
-  awk -F'|' -v id="$id" -v value="$value" -v reset="$([ "$2" = reset ] && echo 1)" -v out="$deltas" \
+  awk -F'|' -v id="$id" -v value="$value" -v reset="$([ "$2" = reset ] && [ -z "$only" ] && echo 1)" -v only="$only" -v out="$deltas" \
       -v head="{\"v\":1,\"type\":\"settings_delta\",\"schema\":1,\"rev\":$rev,\"serial\":$serial,\"camera\":" \
       -v camera="$camera" "$SETTINGS_AWK"'
     NF >= 16 { load() }
     END {
       for (k = 1; k <= n; k++) before[k] = enabled(k)
       if (reset == "1") {
-        for (k = 1; k <= n; k++) { f[k, 6] = f[k, 7]; f[k, 8] = "0"; val[f[k, 3]] = f[k, 7] }
+        for (k = 1; k <= n; k++) if (f[k, 18] != "global") { f[k, 6] = f[k, 7]; f[k, 8] = "0"; val[f[k, 3]] = f[k, 7] }
+      } else if (only != "") {
+        if (!(only in row)) { print "omarchy-broadcast: no setting " only > "/dev/stderr"; exit 3 }
+        k = row[only]
+        f[k, 6] = f[k, 7]; f[k, 8] = "0"; val[only] = f[k, 7]
       } else {
         if (!(id in row)) { print "omarchy-broadcast: the camera has no setting " id > "/dev/stderr"; exit 3 }
         k = row[id]
@@ -267,7 +291,7 @@ if [ "${1:-}" = "settings" ]; then
       }
       for (k = 1; k <= n; k++) en[k] = enabled(k)
       m = 0
-      for (k = 1; k <= n; k++) if (reset == "1" || f[k, 3] == id || en[k] != before[k]) { m++; ch[m] = change(k) }
+      for (k = 1; k <= n; k++) if ((reset == "1" && f[k, 18] != "global") || f[k, 3] == id || en[k] != before[k]) { m++; ch[m] = change(k) }
       for (i = 1; i <= m; i += 16) {
         s = ""
         for (j = i; j <= m && j < i + 16; j++) s = s (j > i ? "," : "") ch[j]

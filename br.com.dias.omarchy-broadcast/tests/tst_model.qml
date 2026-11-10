@@ -2056,7 +2056,8 @@ TestCase {
     // test_settings_prototype_keys); a bad envelope is ignored.
     for (var i = 0; i < hostile.length; i++) {
       var res = Model.reduce(snap(rev7({})), line(merged(JSON.parse(JSON.stringify(l)), hostile[i])))
-      compare(res.outcome, hostile[i].group !== undefined ? "settings_group" : "ignored", JSON.stringify(hostile[i]))
+      // (a camera group with no camera is a refused group too)
+      compare(res.outcome, hostile[i].group !== undefined || hostile[i].camera === "" ? "settings_group" : "ignored", JSON.stringify(hostile[i]))
     }
     // a huge settings or changes array: bounded work, only the first entries read
     var junk = []
@@ -2374,6 +2375,208 @@ TestCase {
     compare(half.record.settings, null, "half a set: the delta has nothing to apply to")
   }
 
+  // ---- global settings (the daemon's own: the effect, noise removal, ...)
+  readonly property string modeId: "effect.background.mode"
+  readonly property string strengthId: "effect.background.blur_strength"
+  readonly property string denoiseId: "effect.video.denoise"
+  function globalGroups(o) {
+    var opt = merged({ effect: "none", denoise: true, denoiseOk: true }, o || {})
+    var blur = opt.effect === "blur"
+    return [
+      { id: "background", label: "Background effect", settings: [
+        enumS(modeId, "Effect", [{ value: "none", label: "Off" }, { value: "blur", label: "Blur" }, { value: "replace", label: "Replace" }],
+              { scope: "global", value: opt.effect, "default": "none" }),
+        intS(strengthId, "Blur strength", { scope: "global", min: 0, max: 100, value: 50, "default": 50, unit: "%", enabled: blur,
+                                            disabled_reason: blur ? "" : "Choose Blur to change this",
+                                            enabled_when: [{ id: modeId, op: "eq", value: "blur" }] })] },
+      { id: "video", label: "Video", settings: [
+        boolS(denoiseId, "Noise removal", { scope: "global", value: opt.denoiseOk ? opt.denoise : false, "default": false, enabled: opt.denoiseOk,
+                                            disabled_reason: opt.denoiseOk ? "" : "Not installed" })] }
+    ]
+  }
+  function rev8(o) { return merged({ interface_revision: 8, settings_schema: 1, settings_revision: 5 }, o || {}) }
+  // The camera's groups, then the global ones, as the daemon publishes them.
+  function withGlobals(o, g) {
+    return feedAll(snap(rev8(o)), setLines(brioGroups().concat(globalGroups(g)))).record
+  }
+  // No camera: only global groups, with camera "".
+  function globalsOnly(o, g) {
+    return feedAll(snap(rev8(merged({ active_camera: "", cameras: [] }, o || {}))), setLines(globalGroups(g), { camera: "" })).record
+  }
+
+  function test_global_settings_routed_by_scope() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] })
+    compare(rowIds(r.settings), JSON.stringify(["image:5", "white_balance:2", "exposure:5", "focus:6", "background:2", "video:1"]),
+            "the global groups come after the camera's")
+    compare(r.settings.groups[4].scope, "global")
+    compare(r.settings.groups[0].scope, "camera")
+    compare(Model.findSetting(r, strengthId).scope, "global")
+    var cam = Model.settingsView(r, {}, {})
+    compare(JSON.stringify(cam.groups.map(function(g) { return g.id })), JSON.stringify(["image", "white_balance", "exposure", "focus"]),
+            "the Camera tab draws no global group")
+    compare(cam.reset, true)
+    compare(cam.title, Model.SETTINGS_TITLE)
+    compare(cam.truncation, "")
+    // routed by scope, not by id: a global group named like a camera one stays global
+    var same = feedAll(snap(rev8({})), setLines([{ id: "image", label: "Image", settings: [intS("camera.image.x", "X")] },
+                                                  { id: "image", label: "Image fx", settings: [intS("effect.image.y", "Y", { scope: "global" })] }])).record
+    compare(rowIds(same.settings), JSON.stringify(["image:1", "image:1"]), "one group a scope")
+    compare(Model.settingsView(same, {}, {}).groups.length, 1)
+    compare(Model.effectSettingsView(same, {}).groups.length, 1)
+    // the default open group is a camera one
+    compare(Model.openGroupId(null, r.settings), "image")
+    var onlyGlobal = globalsOnly()
+    compare(Model.openGroupId(null, onlyGlobal.settings), "", "no camera group: none to open")
+    compare(Model.openGroupId("background", r.settings), "image", "a global group is never the open one")
+  }
+
+  function test_effect_view_skips_the_mode_and_shows_the_rest() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" })
+    var v = Model.effectSettingsView(r, {})
+    compare(v.visible, true)
+    compare(v.collapsible, false)
+    compare(v.reset, false)
+    compare(v.title, "")
+    compare(JSON.stringify(v.groups.map(function(g) { return g.id + ":" + g.expanded + ":" + g.rows.map(function(x) { return x.id }).join(",") })),
+            JSON.stringify(["background:true:" + strengthId, "video:true:" + denoiseId]),
+            "every global group open, the effect choice left to the dedicated row")
+    compare(v.rowCount, 2)
+    compare(v.truncation, "")
+    compare(v.groups[0].truncation, "", "the skipped setting is not a truncation")
+    var strength = Model.viewRow(v, 0)
+    compare(strength.widget, "slider")
+    compare(strength.enabled, true)
+    compare(strength.valueText, "50 %")
+    compare(Model.viewRow(v, 1).widget, "switch")
+    compare(Model.effectSettingsShown(v), true)
+    // a group that holds only the skipped setting is not drawn
+    var lone = feedAll(snap(rev8({})), setLines([{ id: "background", label: "Background effect", settings: [globalGroups()[0].settings[0]] }],
+                                                 { camera: "" })).record
+    compare(Model.effectSettingsView(lone, {}).groups.length, 0)
+    compare(Model.effectSettingsShown(Model.effectSettingsView(lone, {})), false)
+    // a draft shows on a global row too
+    var d = {}
+    d[strengthId] = 80
+    compare(Model.viewRow(Model.effectSettingsView(r, d), 0).valueText, "80 %")
+  }
+
+  function test_effect_fallback_without_global_settings() {
+    var r = brio({ cameras: [cameraObjects()[0]], interface_revision: 7, effect: "blur", blur_strength: 0.5, denoise: true })
+    var v = Model.effectSettingsView(r, {})
+    compare(v.visible, false)
+    compare(v.groups.length, 0)
+    compare(Model.effectSettingsShown(v), false)
+    compare(JSON.stringify(Model.effectRows(r, false)), JSON.stringify([{ label: "Strength", value: "50 %" }]), "the read-only strength stays")
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", Model.settingsView(r, {}, {}), v)), JSON.stringify(["switch", "tabs", "effect", "denoise"]),
+            "the noise removal switch stays a stop")
+    compare(Model.effectSettingsView(Model.withLink("not-running"), {}).visible, false)
+    var cleared = Model.reduce(r, line({ v: 1, type: "settings_clear", rev: 9, serial: 2 })).record
+    compare(Model.effectSettingsView(cleared, {}).visible, false)
+  }
+
+  function test_effect_generic_rows_in_the_effect_tab() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]], effect: "blur", blur_strength: 0.5, denoise: true }, { effect: "blur" })
+    var v = Model.effectSettingsView(r, {})
+    compare(JSON.stringify(Model.effectRows(r, true)), JSON.stringify([]), "no read-only strength beside the adjustable one")
+    var cam = Model.settingsView(r, {}, {})
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", cam, v)), JSON.stringify(["switch", "tabs", "effect", "setting", "setting"]),
+            "the generic rows replace the noise removal stop; no group header is a stop")
+    var stops = Model.cursorStops(r, 1, false, "effect", cam, v)
+    compare(Model.stopIndex(stops, "setting", 1), 4)
+    compare(Model.stopIndex(stops, "denoise", -1), -1)
+    compare(kindsOf(Model.cursorStops(r, 1, false, "camera", cam, v).filter(function(s) { return s.kind === "setting" })), JSON.stringify(["setting", "setting", "setting", "setting", "setting"]),
+            "the Camera tab walks the camera's view only")
+    var replace = withGlobals({ cameras: [cameraObjects()[0]], effect: "replace", background_image: "/tmp/a.png" }, { effect: "replace" })
+    compare(Model.effectRows(replace, true).map(function(x) { return x.label }).join(","), "Image", "the image row stays")
+  }
+
+  function test_global_row_disabled_with_its_reason() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "none", denoiseOk: false })
+    var v = Model.effectSettingsView(r, {})
+    var strength = Model.viewRow(v, 0)
+    compare(strength.enabled + ":" + strength.reason, "false:Choose Blur to change this")
+    var dn = Model.viewRow(v, 1)
+    compare(dn.enabled + ":" + dn.reason + ":" + dn.value, "false:Not installed:false")
+    compare(Model.settingDescription(dn), "Unavailable. Off. Not installed")
+    // refused: a greyed row never runs
+    var go = function(id, value) { return Model.intentArgv({ verb: "setting", id: id, value: value, camera: brioId }, cli, r) }
+    compare(go(strengthId, 20), null)
+    compare(go(denoiseId, true), null)
+    // a delta enables it
+    var d = Model.reduce(r, line(deltaLine([{ id: strengthId, value: 50, stored: false, enabled: true, disabled_reason: "" }]))).record
+    compare(Model.viewRow(Model.effectSettingsView(d, {}), 0).enabled, true)
+  }
+
+  function test_global_settings_argv() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" })
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: strengthId, value: 70, camera: brioId }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", strengthId, "70"]), "no camera named for a global setting")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: strengthId, value: 70, camera: "" }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", strengthId, "70"]), "bound to no camera")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: denoiseId, value: false, camera: fhdId }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", denoiseId, "false"]))
+    compare(Model.intentArgv({ verb: "setting", id: strengthId, value: 700, camera: brioId }, cli, r), null, "off range")
+    compare(Model.intentArgv({ verb: "setting", id: denoiseId, value: "on", camera: brioId }, cli, r), null, "a bool only")
+    compare(Model.intentArgv({ verb: "setting", id: strengthId, value: 1 }, "relative", r), null)
+    // a camera row still needs its camera
+    compare(Model.intentArgv({ verb: "setting", id: "camera.image.brightness", value: 1, camera: fhdId }, cli, r), null)
+    // the camera reset names the camera and is no global reset
+    compare(JSON.stringify(Model.intentArgv({ verb: "reset-settings", camera: brioId }, cli, r)), JSON.stringify([cli, "settings", "reset", "--camera=" + brioId]))
+    // no camera: the global rows still write
+    var none = globalsOnly({}, { effect: "blur" })
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: strengthId, value: 30, camera: "" }, cli, none)),
+            JSON.stringify([cli, "settings", "set", "--", strengthId, "30"]))
+    compare(Model.settingArgvGlobal(cli, "-1", "1"), null)
+    compare(Model.settingArgvGlobal(cli, strengthId, "--help"), null)
+    compare(Model.settingArgvGlobal("", strengthId, "1"), null)
+  }
+
+  function test_no_camera_with_global_groups_only() {
+    var r = globalsOnly()
+    compare(r.settings.camera, "", "a set with no camera")
+    compare(rowIds(r.settings), JSON.stringify(["background:2", "video:1"]))
+    var cam = Model.settingsView(r, {}, {})
+    compare(cam.visible, false, "the Camera tab shows nothing: no camera, no hint")
+    compare(cam.hint, "")
+    compare(cam.reset, false)
+    compare(cam.groups.length, 0)
+    var v = Model.effectSettingsView(r, {})
+    compare(v.visible, true)
+    compare(v.groups.length, 2)
+    compare(kindsOf(Model.cursorStops(r, 0, false, "camera", cam, v)), JSON.stringify(["switch", "tabs"]))
+    // a camera group with no camera is not a v1 line
+    // is refused, and the set commits without it
+    var bad = feedAll(snap(rev8({})), setLines(brioGroups(), { camera: "" })).record
+    compare(bad.settings.groups.length, 0)
+    compare(bad.settings.camera, "")
+    // a camera appears: a new set with the camera's groups first
+    var withCam = feedAll(r, setLines(brioGroups().concat(globalGroups()), { rev: 6, serial: 3, camera: brioId })).record
+    compare(Model.settingsView(withCam, {}, {}).visible, true)
+    compare(Model.settingsView(withCam, {}, {}).groups.length, 4)
+    // a set with a camera and no camera setting says the camera has none
+    var camNone = feedAll(snap(rev8({ active_camera: brioId })), setLines(globalGroups(), { camera: brioId })).record
+    compare(Model.settingsView(camNone, {}, {}).hint, Model.SETTINGS_EMPTY_TEXT)
+    // nothing at all to show
+    var cleared = Model.reduce(r, line({ v: 1, type: "settings_clear", rev: 9, serial: 3 })).record
+    compare(Model.settingsView(cleared, {}, {}).visible, false)
+    compare(Model.effectSettingsView(cleared, {}).visible, false)
+  }
+
+  function test_global_deltas_and_caps() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "none" })
+    var d = Model.reduce(r, line(deltaLine([{ id: modeId, value: "blur", stored: true, enabled: true, disabled_reason: "" },
+                                             { id: strengthId, value: 55, stored: false, enabled: true, disabled_reason: "" }]))).record
+    compare(Model.findSetting(d, strengthId).value, 55)
+    compare(Model.findSetting(d, strengthId).scope, "global", "a delta keeps the scope")
+    compare(d.settings.groups[4].scope, "global")
+    compare(Model.effectSettingsView(d, {}).groups.length, 2)
+    // the caps are a scope's own: sixteen camera groups leave the global ones
+    var many = feedAll(snap(rev8({})), setLines(groupsOf(16, 1).concat(globalGroups()), { camera: brioId, per: 8 })).record
+    compare(Model.settingsView(many, {}, {}).groups.length, 16)
+    compare(Model.effectSettingsView(many, {}).groups.length, 2)
+    compare(Model.settingsView(many, {}, {}).truncation, "")
+  }
+
   // F1/F2: a group id, an option value or a change id that names a member
   // of Object.prototype is refused; nothing reaches the prototype, and the
   // rest of the set commits and draws.
@@ -2653,5 +2856,86 @@ TestCase {
       "State=idle", "Camera=none", "Consumers=—", "Output=—", "PipeWire=—", "D-Bus API=—"]))
     compare(Model.statusRows(Model.emptyRecord("not-running")).length, 0)
     compare(Model.statusRows(snap({ state: "dancing" })).length, 0)
+  }
+
+  // ---- review round: scope-aware camera changes, no-camera sets, per-row fallback
+
+  function test_queued_global_write_survives_a_camera_change_and_reset() {
+    var g = { verb: "setting", id: strengthId, value: 70, scope: "global" }
+    var c = { verb: "setting", id: "camera.image.contrast", value: 2, camera: brioId }
+    var q = [c, g, { verb: "reset-settings", camera: brioId }, { verb: "next" }]
+    compare(JSON.stringify(Model.dropSettingIntents(q)), JSON.stringify([g, { verb: "next" }]),
+            "another camera: only the camera's writes and reset go")
+    var after = Model.enqueueIntent([c, g], { verb: "reset-settings", camera: brioId })
+    compare(JSON.stringify(after), JSON.stringify([g, { verb: "reset-settings", camera: brioId }]),
+            "a camera reset supersedes the camera's writes, not the global one")
+    var again = Model.enqueueIntent(after, { verb: "reset-settings", camera: brioId })
+    compare(JSON.stringify(again), JSON.stringify(after), "a second reset replaces the first")
+    // the drafts: kept by the scope of the row in either set
+    var r = withGlobals({ cameras: [cameraObjects()[0]] })
+    var drafts = {}
+    drafts[strengthId] = 70
+    drafts["camera.image.contrast"] = 3
+    var kept = Model.keepGlobalSettings(drafts, [r])
+    compare(JSON.stringify(Object.keys(kept)), JSON.stringify([strengthId]))
+    // another camera's set (none of the camera's rows): the global draft stays through the old set
+    var none = globalsOnly()
+    compare(JSON.stringify(Object.keys(Model.keepGlobalSettings(drafts, [r, none]))), JSON.stringify([strengthId]))
+    compare(Object.keys(Model.keepGlobalSettings(drafts, [none])).length, 1, "the new set alone holds the global row")
+    compare(Object.keys(Model.keepGlobalSettings(drafts, [])).length, 0)
+    compare(Object.keys(Model.keepGlobalSettings(null, [r])).length, 0)
+  }
+
+  function test_no_camera_set_commits_without_a_bad_line() {
+    var lines = setLines(globalGroups(), { camera: "" })
+    // the first line of the set is a refused group id; the next, a camera group
+    var clone = function(o) { return JSON.parse(JSON.stringify(o)) }
+    var bogus = merged(clone(lines[0]), { group: { id: "Bad Id!", label: "x", settings: [] } })
+    var camGroup = merged(clone(lines[1]), { group: { id: "cam", label: "Cam", settings: [intS("camera.cam.x", "X")] } })
+    var all = [bogus, camGroup].concat(lines)
+    for (var i = 0; i < all.length; i++) { all[i] = merged(all[i], { index: i, count: all.length }) }
+    var r = feedAll(snap(rev8({})), all).record
+    verify(r.settings !== null, "the set committed")
+    compare(r.settings.camera, "")
+    compare(r.settings.groups.every(function(x) { return x.scope === "global" }), true)
+    verify(Model.findSetting(r, strengthId) !== null || Model.findSetting(r, denoiseId) !== null, "the global rows are there")
+    verify(Model.findSetting(r, "camera.cam.x") === null, "the camera group is left out")
+  }
+
+  function test_camera_must_be_a_string() {
+    var good = setLines(globalGroups(), { camera: "" })
+    for (var i = 0; i < good.length; i++) {
+      var broken = [null, 5, true, {}, [], "x".repeat(Model.ID_CAP * 2 + 1)]
+      for (var b = 0; b < broken.length; b++)
+        compare(Model.reduce(snap(rev8({})), line(merged(good[i], { camera: broken[b] }))).record.settings, null, "camera " + JSON.stringify(broken[b]).slice(0, 12))
+    }
+    var r = globalsOnly()
+    var d = deltaLine([], { camera: "" })
+    compare(Model.settingsDelta(r.settings, d) !== null, true, "the literal empty string is the no-camera set")
+    d.camera = 0
+    compare(Model.settingsDelta(r.settings, d), null, "a number is not the empty camera")
+    delete d.camera
+    compare(Model.settingsDelta(r.settings, d), null, "an absent camera is not the empty camera")
+  }
+
+  function test_legacy_rows_fall_back_per_row() {
+    var base = { cameras: [cameraObjects()[0]], effect: "blur", blur_strength: 0.5, denoise: true }
+    // only the video group is published: the strength stays read-only, the switch goes
+    var onlyVideo = feedAll(snap(rev8(base)), setLines(brioGroups().concat([globalGroups({ effect: "blur" })[1]]))).record
+    var v1 = Model.effectSettingsView(onlyVideo, {})
+    compare(Model.effectSettingShown(v1, strengthId), false)
+    compare(Model.effectSettingShown(v1, denoiseId), true)
+    compare(JSON.stringify(Model.effectRows(onlyVideo, Model.effectSettingShown(v1, strengthId))), JSON.stringify([{ label: "Strength", value: "50 %" }]))
+    compare(kindsOf(Model.cursorStops(onlyVideo, 1, false, "effect", Model.settingsView(onlyVideo, {}, {}), v1)),
+            JSON.stringify(["switch", "tabs", "effect", "setting"]), "no legacy switch stop: the setting row holds it")
+    // only the background group: the strength is generic, the legacy switch stays
+    var onlyBg = feedAll(snap(rev8(base)), setLines(brioGroups().concat([globalGroups({ effect: "blur" })[0]]))).record
+    var v2 = Model.effectSettingsView(onlyBg, {})
+    compare(Model.effectSettingShown(v2, strengthId), true)
+    compare(Model.effectSettingShown(v2, denoiseId), false)
+    compare(Model.effectRows(onlyBg, true).length, 0)
+    compare(kindsOf(Model.cursorStops(onlyBg, 1, false, "effect", Model.settingsView(onlyBg, {}, {}), v2)),
+            JSON.stringify(["switch", "tabs", "effect", "denoise", "setting"]), "the legacy switch stands, above the rows")
+    compare(Model.effectSettingShown(null, strengthId), false)
   }
 }
