@@ -18,24 +18,20 @@ import qs.Ui
 //                path is unique to the run, the marker watches are counted by)
 //   OBH_FAKE     the fake's state directory (mock)
 //   OBH_SCREENS  where PNG grabs go
-//   OBH_LINKED   a symlink to the plugin dir, for the resolver checks (mock)
-//   OBH_NOREPO   a plugin-named dir outside any repository (mock)
 //   OBH_DAEMON   omarchy-broadcastd binary (OMARCHY_BROADCASTD); OBH_LIVE
 //                the live scratch dir (live)
-//   OBH_DEVLINK  a symlink to a plugin copy inside a scratch development tree
-//                whose target/release/omarchy-broadcast is the fake,
-//                OBH_DEVCLI, three levels above the plugin dir (mock)
-//   OBH_NLPLUGIN a plugin dir whose path holds a newline; OBH_NLBIN a PATH
-//                entry whose name holds one, with a CLI in it (mock)
+//   OBH_NLBIN    a PATH entry whose name holds a newline, with a CLI in it (mock)
 //   OBH_RESOLVER_PATH the PATH every resolver case runs with (plus a CLI dir
-//                where a case wants one): a dir holding only links to the
-//                tools the resolver script needs, never an omarchy-broadcast,
-//                so one installed in /usr/bin cannot answer (mock)
-//   OBH_REALLINK a symlink to a plugin copy in the same layout whose
-//                target/release/omarchy-broadcast links to the real CLI of
-//                OMARCHY_BROADCAST_CLI; OBH_REALCLI that CLI's resolved path.
+//                where a case wants one): an empty dir, never an
+//                omarchy-broadcast, so one installed in /usr/bin cannot
+//                answer (mock)
+//   OBH_REALCLI  the path of a symlink to the real CLI of OMARCHY_BROADCAST_CLI
+//                in a dir of its own, which one resolver case puts on PATH.
 //                Empty when the variable is unset: the case prints SKIP. The
 //                resolver only prints the path; nothing runs it (mock)
+//
+// The shell's own PATH holds the fake and the system tools, never another
+// omarchy-broadcast (run-harness.sh refuses to start otherwise).
 //
 // Nothing here depends on where the plugin's own checkout lives: every
 // resolver case runs against the scratch trees run-harness.sh builds.
@@ -1611,8 +1607,7 @@ ShellRoot {
     previewScenario()
     settingsScenario()
 
-    // the resolver itself: PATH first, then the development build behind a
-    // symlink (in the scratch development tree, not the plugin's checkout)
+    // the resolver itself: omarchy-broadcast on PATH, nothing else
     var resolverCase = function(label, argv, path, wantOut, wantExit) {
       h.step("resolver: " + label, function() {
         h.resolverDone = false
@@ -1628,54 +1623,42 @@ ShellRoot {
     // no system dir: an installed omarchy-broadcast would win over the case
     var rpath = Quickshell.env("OBH_RESOLVER_PATH") || ""
     var fakeBin = shellRoot.cli.replace(/\/omarchy-broadcast$/, "")
-    var direct = function(dir) { return ["sh", "-c", h.model.RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir] }
-    var nlPlugin = Quickshell.env("OBH_NLPLUGIN")
     var nlBin = Quickshell.env("OBH_NLBIN")
-    resolverCase("PATH wins", h.model.resolverArgv(Quickshell.env("OBH_LINKED")), fakeBin + ":" + rpath, shellRoot.cli, 0)
-    var devLink = Quickshell.env("OBH_DEVLINK")
-    var devBuild = Quickshell.env("OBH_DEVCLI")
-    resolverCase("development build through the symlink", h.model.resolverArgv(devLink), rpath, devBuild, 0)
-    resolverCase("nothing found", h.model.resolverArgv(Quickshell.env("OBH_NOREPO")), rpath, "", 1)
-    resolverCase("empty plugin dir still searches PATH", h.model.resolverArgv(""), fakeBin + ":" + rpath, shellRoot.cli, 0)
-    resolverCase("empty plugin dir, nothing on PATH", h.model.resolverArgv(""), rpath, "", 1)
-    resolverCase("plugin dir with a newline (argv refuses it)", h.model.resolverArgv(nlPlugin), rpath, "", 1)
-    resolverCase("plugin dir with a newline (script refuses it)", direct(nlPlugin), rpath, "", 1)
-    resolverCase("PATH entry with a newline is skipped", h.model.resolverArgv(devLink), nlBin + ":" + rpath, devBuild, 0)
-    // a real omarchy-broadcast binary, found (not run) through a symlinked
-    // plugin dir; optional, as the plugin's checkout carries no CLI
-    var realLink = Quickshell.env("OBH_REALLINK") || ""
+    resolverCase("PATH wins", h.model.resolverArgv(), fakeBin + ":" + rpath, shellRoot.cli, 0)
+    resolverCase("nothing found", h.model.resolverArgv(), rpath, "", 1)
+    resolverCase("PATH entry with a newline is skipped", h.model.resolverArgv(), nlBin + ":" + rpath, "", 1)
+    // a real omarchy-broadcast binary, found (not run) on PATH; optional,
+    // as the plugin's checkout carries no CLI
     var realCli = Quickshell.env("OBH_REALCLI") || ""
-    if (realLink !== "" && realCli !== "")
-      resolverCase("real CLI through the symlink (OMARCHY_BROADCAST_CLI)", h.model.resolverArgv(realLink), rpath, realCli, 0)
+    if (realCli !== "")
+      resolverCase("real CLI on PATH (OMARCHY_BROADCAST_CLI)", h.model.resolverArgv(),
+                   realCli.replace(/\/omarchy-broadcast$/, "") + ":" + rpath, realCli, 0)
     else
-      h.step("resolver: real CLI through the symlink", function() {
-        console.log("  SKIP resolver real CLI through the symlink: OMARCHY_BROADCAST_CLI is not set")
+      h.step("resolver: real CLI on PATH", function() {
+        console.log("  SKIP resolver real CLI on PATH: OMARCHY_BROADCAST_CLI is not set")
       })
     h.step("newline fixtures exist", function() {
       h.check("resolver PATH set", rpath !== "" && rpath.charAt(0) === "/", rpath)
-      h.check("plugin dir has a newline", nlPlugin.indexOf("\n") !== -1)
       h.check("PATH entry has a newline", nlBin.indexOf("\n") !== -1)
     })
 
-    // the development build, found through Daemon.pluginDir of a symlinked
-    // plugin dir in a scratch repository; re-resolved after a start failure
-    var devCli = Quickshell.env("OBH_DEVCLI")
-    h.step("hide the PATH CLI", function() {
+    // the CLI found on PATH; re-resolved after a start failure and on attach
+    var devCli = shellRoot.cli
+    h.step("back up the PATH CLI", function() {
       A().destroy()
       h.widgetA = null
-      h.enqueue(["mv", "--", shellRoot.cli, shellRoot.cli + ".off"])
+      h.enqueue(["cp", "--", shellRoot.cli, shellRoot.cli + ".off"])
     }, function() { return h.writerIdle() })
-    h.step("widget from the symlinked dev plugin", function() {
-      h.widgetA = h.makeWidget(barA, {}, Quickshell.env("OBH_DEVLINK"))
+    h.step("widget searching PATH", function() {
+      h.widgetA = h.makeWidget(barA, {})
     }, function() { return h.widgetA && S().record.link === "ok" }, 8000)
-    h.step("development build resolved", function() {
-      h.eq("pluginDir is the symlink path", S().pluginDir, Quickshell.env("OBH_DEVLINK"))
-      h.eq("source", S().cliSource, "development")
+    h.step("PATH CLI resolved", function() {
+      h.eq("source", S().cliSource, "path")
       h.eq("path", S().cliPath, devCli)
       // replaced (new inode) by a file the resolver accepts but cannot start
       h.enqueue(["sh", "-c", 'printf "#!/nonexistent/interpreter\\n" > "$0.new" && chmod +x "$0.new" && mv -f "$0.new" "$0"', devCli])
     }, function() { return h.writerIdle() })
-    h.step("kill the dev watch", function() {
+    h.step("kill the watch", function() {
       h.notes.failures = S().watchStartFailures
       h.notes.resolves = S().resolverRuns
       h.notes.killedAt = Date.now()
@@ -1686,18 +1669,16 @@ ShellRoot {
       var f = S().watchStartFailures - h.notes.failures
       var r = S().resolverRuns - h.notes.resolves
       var since = Date.now() - h.notes.killedAt
-      h.note("dev build unstartable: " + f + " failures, " + r + " resolver runs in " + since + " ms")
+      h.note("CLI unstartable: " + f + " failures, " + r + " resolver runs in " + since + " ms")
       h.eq("resolver runs = failures", r, f)
       h.check("second failure waited the doubled backoff (>= ~3 s)", since >= 2700, since)
-      h.eq("still the dev path", S().cliPath, devCli)
+      h.eq("still the PATH path", S().cliPath, devCli)
       h.enqueue(["rm", "-f", "--", devCli])
     }, function() { return h.writerIdle() })
-    h.step("dev build removed: the next failure re-resolves to nothing", function() {},
+    h.step("CLI removed: the next failure re-resolves to nothing", function() {},
            function() { return S().cliPath === "" && S().record.link === "cli-missing" }, 10000)
     h.step("says what was searched", function() {
-      var t = S().record.linkText
-      h.check("names PATH and the dev path", t.indexOf("not on PATH") !== -1
-              && t.indexOf(Quickshell.env("OBH_DEVLINK") + "/../../../target/release/omarchy-broadcast") !== -1, t)
+      h.eq("names PATH", S().record.linkText, "omarchy-broadcast is not on PATH")
       h.notes.failures = S().watchStartFailures
       h.notes.resolves = S().resolverRuns
     })
@@ -1707,24 +1688,23 @@ ShellRoot {
       h.eq("no more resolver runs", S().resolverRuns - h.notes.resolves, 0)
       h.enqueue(["sh", "-c", 'cp -- "$1" "$0" && chmod +x "$0"', devCli, shellRoot.cli + ".off"])
     }, function() { return h.writerIdle() })
-    h.step("dev build back; a new widget attaches and re-resolves", function() {
+    h.step("CLI back; a new widget attaches and re-resolves", function() {
       h.notes.resolves = S().resolverRuns
-      h.widgetB = h.makeWidget(barB, {}, Quickshell.env("OBH_DEVLINK"))
+      h.widgetB = h.makeWidget(barB, {})
     }, function() { return S().record.link === "ok" && S().cliPath === devCli }, 8000)
     h.step("recovered on attach", function() {
       h.eq("one resolver run", S().resolverRuns - h.notes.resolves, 1)
-      h.eq("source", S().cliSource, "development")
+      h.eq("source", S().cliSource, "path")
       A().destroy()
       B().destroy()
       h.widgetA = null
       h.widgetB = null
-      h.enqueue(["mv", "--", shellRoot.cli + ".off", shellRoot.cli])
+      h.enqueue(["rm", "-f", "--", shellRoot.cli + ".off"])
     }, function() { return h.writerIdle() })
 
     // zero widgets -> zero watch processes
     h.wait(500)
     h.countStep(0, "with zero widgets at the end")
-    h.countStep(0, "of the dev build at the end", devCli)
   }
 
   // ---- the live preview (mock): R1, one process, ingestion, settings -------------
@@ -2736,25 +2716,30 @@ ShellRoot {
       h.feed([snapshotLine(rev7({}))])
     }, function() { return !!S().record.settings && S().record.settings.camera === brioId && h.writerIdle() })
 
-    // F3: more distinct writes than the queue holds, and an on/off ask,
-    // behind a slow command: every write runs once, the ask too, and no
-    // draft is left behind
-    h.step("settings: eleven writes and an on/off ask behind a slow command", function() {
+    // F3: more slider writes than the queue holds, three discrete writes, all
+    // behind a slow on/off ask: the queue refuses the ninth slider write (it
+    // stays a draft, settingsDeferred), and every write, the refused one
+    // too, runs once; no draft is left behind
+    h.step("settings: twelve writes behind a slow on/off ask", function() {
       h.writeFile("delay", ["0.3"])
     }, function() { return h.writerIdle() })
     h.step("settings: queue them in one turn", function() {
       h.markLog()
+      h.check("the on/off ask is taken", S().setEnabled(true))
       h.notes.wanted = [["camera.image.brightness", 100], ["camera.image.contrast", 101], ["camera.image.saturation", 102],
                         ["camera.image.sharpness", 103], ["camera.image.backlight_compensation", 0], ["camera.exposure.gain", 10],
-                        ["camera.focus.zoom_absolute", 222], ["camera.focus.field_of_view", "78"], ["camera.focus.tilt_absolute", 7200],
-                        ["camera.exposure.keep_framerate", true], ["camera.exposure.power_line_frequency", "50hz"]]
+                        ["camera.focus.zoom_absolute", 222], ["camera.focus.tilt_absolute", 7200],
+                        ["camera.focus.field_of_view", "78"], ["camera.exposure.keep_framerate", true],
+                        ["camera.exposure.power_line_frequency", "50hz"], ["camera.focus.pan_absolute", 7200]]
       for (var i = 0; i < h.notes.wanted.length; i++)
         h.check("taken: " + h.notes.wanted[i][0], S().commitSetting(h.notes.wanted[i][0], h.notes.wanted[i][1]))
-      h.check("the on/off ask is taken", S().setEnabled(true))
       var q = S().pendingIntents
-      h.eq("the queue: the ask first, then the writes it holds", q.length, h.model.SETTING_QUEUE_CAP + 1)
-      h.eq("the ask first", q[0].verb, "enable")
-      h.eq("the rest wait as drafts", S().settingsDeferred, true)
+      var held = q.filter(function(x) { return x.verb === "setting" && !h.model.isQuickIntent(x) }).length
+      h.eq("the slider writes held are at the cap", held, h.model.SETTING_QUEUE_CAP)
+      h.eq("every discrete write is queued, ahead of the sliders", q.length, h.model.SETTING_QUEUE_CAP + 3)
+      h.check("within the queue's bound", q.length <= h.model.INTENT_QUEUE_CAP, String(q.length))
+      h.check("the ninth slider write is not queued", !h.model.queuedSetting(q, "camera.focus.pan_absolute"))
+      h.check("its draft waits: deferred", S().settingsDeferred)
       h.eq("every draft kept", Object.keys(S().settingDrafts).length, h.notes.wanted.length)
     }, function() { return !S().commandBusy && JSON.stringify(S().settingDrafts) === "{}" && !S().settingsDeferred }, 20000)
     h.step("settings: every write ran once, and the ask", function() {
@@ -2766,6 +2751,10 @@ ShellRoot {
       h.eq("power line", value("camera.exposure.power_line_frequency"), "50hz")
       h.removeFile("delay")
     }, function() { return h.writerIdle() })
+    h.step("settings: put pan back for the steps after", function() {
+      h.markLog()
+      h.check("taken", S().commitSetting("camera.focus.pan_absolute", 14400))
+    }, function() { return value("camera.focus.pan_absolute") === 14400 && !S().commandBusy && JSON.stringify(S().settingDrafts) === "{}" }, 5000)
 
     // a refused write: the row goes back to what the daemon reports
     h.step("settings: the daemon refuses", function() {

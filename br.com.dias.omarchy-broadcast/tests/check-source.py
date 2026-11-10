@@ -209,11 +209,12 @@ for path, src in everything.items():
     check(f"{name}: no StdioCollector", "StdioCollector" not in src)
     check(f"{name}: no string command", re.search(r"command\s*:\s*[\"']", src) is None)
 
-# The only `sh -c` is the resolver, with its directory passed positionally.
+# The only `sh -c` is the resolver: a fixed script that looks on PATH only.
 sh_uses = [p.name for p, s in everything.items() if '"sh", "-c"' in s]
 check("sh -c only in Model.resolverArgv", sh_uses == ["Model.js"], str(sh_uses))
 model = js_sources[PLUGIN / "Model.js"]
-check("resolver passes the dir as $1", 'return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve", dir]' in model)
+check("resolver argv is the fixed script", 'return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve"]' in model)
+check("no development-build fallback", "target/release" not in model and "development" not in everything[PLUGIN / "Daemon.qml"])
 
 
 def block(src, header):
@@ -345,7 +346,7 @@ check("Daemon requests settings only as intents from flushSettings, runSettingAc
       re.findall(r'request\(\{ verb: "(setting|reset-settings)"[^)]*\)', daemon) == ["setting", "reset-settings"]
       and 'var intent = { verb: "setting", id: id, value: v, camera: camera }' in block(daemon, "function flushSettings")
       and "if (request(intent))" in block(daemon, "function flushSettings")
-      and 'request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera })' in block(daemon, "function runSettingAction")
+      and 'request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera, quick: true })' in block(daemon, "function runSettingAction")
       and 'request({ verb: "reset-settings", camera: record.settings.camera })' in block(daemon, "function resetSettings"))
 check("flushSettings walks only the drafts, bounded by Model.withSetting",
       'var drafts = Model.withSetting(settingDrafts, "", undefined)' in block(daemon, "function flushSettings")

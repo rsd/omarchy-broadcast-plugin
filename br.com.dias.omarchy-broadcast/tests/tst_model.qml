@@ -701,11 +701,9 @@ TestCase {
   function test_paths_leave_the_title() {
     var cases = [
       Model.CLI_MISSING_TEXT + ": /nonexistent/omarchy-broadcast",
-      Model.CLI_MISSING_TEXT + ": /home/a b/with space/omarchy-broadcast",
-      Model.resolverMissText("/p/br.com.dias.omarchy-broadcast")
+      Model.CLI_MISSING_TEXT + ": /home/a b/with space/omarchy-broadcast"
     ]
-    var paths = ["/nonexistent/omarchy-broadcast", "/home/a b/with space/omarchy-broadcast",
-                 "/p/br.com.dias.omarchy-broadcast/../../../target/release/omarchy-broadcast"]
+    var paths = ["/nonexistent/omarchy-broadcast", "/home/a b/with space/omarchy-broadcast"]
     for (var i = 0; i < cases.length; i++) {
       var m = Model.unavailableMessage(Model.withLink("cli-missing", cases[i]))
       compare(m.path, paths[i], cases[i])
@@ -717,7 +715,7 @@ TestCase {
     }
     // No path in the text: the title is the whole text, the path empty.
     for (var reason of ["cliPath must be an absolute path", "HOME is not set",
-                        "the cliPath setting is not text", Model.resolverMissText("")]) {
+                        "the cliPath setting is not text", Model.resolverMissText()]) {
       var r = Model.unavailableMessage(Model.withLink("cli-missing", reason))
       compare(r.path, "", reason)
       compare(r.title, reason)
@@ -1272,24 +1270,17 @@ TestCase {
     compare(Model.settingValue(null, "cliPath"), null)
   }
 
-  function test_resolver_argv_passes_dir_positionally() {
-    var dir = "/home/u/plugins/br.com.dias.omarchy-broadcast; rm -rf ~ $(id)"
-    var argv = Model.resolverArgv(dir)
-    compare(argv.length, 5)
+  function test_resolver_argv_searches_path_only() {
+    var argv = Model.resolverArgv()
+    compare(argv.length, 4)
     compare(argv[0], "sh")
     compare(argv[1], "-c")
-    compare(argv[4], dir)
-    verify(argv[2].indexOf(dir) === -1, "never interpolated")
-    verify(argv[2].indexOf("\"$1\"") !== -1)
-    // PATH is searched even without a usable plugin dir: it is passed as ""
-    compare(Model.resolverArgv("")[4], "")
-    compare(Model.resolverArgv("relative/dir")[4], "")
-    compare(Model.resolverArgv("/a/b\nc")[4], "", "a newline in the dir is refused")
-    verify(argv[2].indexOf("[ -n \"$1\" ] || exit 1") !== -1, "an empty dir skips the development search")
+    compare(argv[3], "omarchy-broadcast-resolve")
+    verify(argv[2].indexOf("command -v omarchy-broadcast") !== -1)
+    verify(argv[2].indexOf("target/release") === -1, "no development-build fallback")
+    verify(argv[2].indexOf("readlink") === -1 && argv[2].indexOf("$1") === -1, "no plugin directory is searched")
     verify(argv[2].indexOf("nl='\n'") === 0, "newline guard")
-    verify(Model.resolverMissText("").indexOf("no development build was searched") !== -1)
-    var miss = Model.resolverMissText("/p/br.com.dias.omarchy-broadcast")
-    verify(miss.indexOf("not on PATH") !== -1 && miss.indexOf("/p/br.com.dias.omarchy-broadcast/../../../target/release/omarchy-broadcast") !== -1, miss)
+    compare(Model.resolverMissText(), "omarchy-broadcast is not on PATH")
     compare(Model.resolverAnswer("/usr/bin/omarchy-broadcast", 1), "/usr/bin/omarchy-broadcast")
     compare(Model.resolverAnswer("/x/nl", 2), "", "two lines are no answer")
     compare(Model.resolverAnswer("", 0), "")
@@ -2238,6 +2229,58 @@ TestCase {
     compare(Model.dropSettingIntents(null).length, 0)
   }
 
+  // A switch, a choice, an effect or noise removal does not wait behind
+  // queued slider writes; the sliders' latest values stay queued and run
+  // after it, and two writes of one id keep their order (one per id).
+  function test_intent_queue_quick_asks_pass_sliders() {
+    var order = function(q) {
+      return JSON.stringify(q.map(function(i) { return i.verb + (i.verb === "setting" ? ":" + i.id + "=" + i.value : "") }))
+    }
+    var slider = function(id, v) { return { verb: "setting", id: id, value: v } }
+    var q = [slider("camera.image.brightness", 1), slider("camera.image.contrast", 2)]
+    q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.autofocus", value: true, quick: true })
+    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "setting:camera.image.brightness=1", "setting:camera.image.contrast=2"]), "a switch goes first")
+    q = Model.enqueueIntent(q, { verb: "denoise", on: true })
+    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "denoise", "setting:camera.image.brightness=1", "setting:camera.image.contrast=2"]), "noise removal goes after the earlier quick ask, before the sliders")
+    // the slider's coalesced latest value stays queued, after the quick ones
+    q = Model.enqueueIntent(q, slider("camera.image.brightness", 9))
+    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "denoise", "setting:camera.image.contrast=2", "setting:camera.image.brightness=9"]))
+    // an effect replaces the other ask, passes the sliders
+    var e = Model.enqueueIntent([slider("camera.image.brightness", 1)], { verb: "effect", effect: "blur" })
+    compare(order(e), JSON.stringify(["effect", "setting:camera.image.brightness=1"]))
+    // the same id keeps one write: a quick write replaces a queued one of its id
+    var same = Model.enqueueIntent([slider("camera.image.contrast", 2), slider("camera.image.mode", "a")],
+                                   { verb: "setting", id: "camera.image.mode", value: "b", quick: true })
+    compare(order(same), JSON.stringify(["setting:camera.image.mode=b", "setting:camera.image.contrast=2"]))
+    // never ahead of a reset queued before it
+    var r = Model.enqueueIntent([{ verb: "reset-settings" }, slider("camera.image.contrast", 2)],
+                                { verb: "setting", id: "camera.image.autofocus", value: false, quick: true })
+    compare(order(r), JSON.stringify(["reset-settings", "setting:camera.image.autofocus=false", "setting:camera.image.contrast=2"]))
+    // a quick ask with no slider queued goes last, as before
+    var l = Model.enqueueIntent([{ verb: "next" }], { verb: "denoise", on: false })
+    compare(order(l), JSON.stringify(["denoise"]), "the latest other ask wins")
+    verify(Model.isQuickIntent({ verb: "effect", effect: "off" }))
+    verify(!Model.isQuickIntent(slider("camera.image.brightness", 1)))
+    verify(!Model.isQuickIntent(null))
+  }
+
+  // The daemon prints no change for a write of the value in force: such a
+  // write owes no line, and its exit alone settles the draft.
+  function test_setting_noop_write_owes_no_line() {
+    var r = brio()
+    var id = "camera.exposure.keep_framerate"
+    compare(Model.findSetting(r, id).value, false)
+    verify(!Model.settingNoop(r, { verb: "setting", id: id, value: false }), "shown but not stored: the write prints a line")
+    Model.findSetting(r, id).stored = true
+    verify(Model.settingNoop(r, { verb: "setting", id: id, value: false }), "the value already in force")
+    verify(!Model.settingNoop(r, { verb: "setting", id: id, value: false }, 3, 4), "an earlier write's line is still owed: the record may be stale")
+    verify(Model.settingNoop(r, { verb: "setting", id: id, value: false }, 4, 4), "no line owed")
+    verify(!Model.settingNoop(r, { verb: "setting", id: id, value: true }), "a real change owes its line")
+    verify(!Model.settingNoop(r, { verb: "reset-settings" }))
+    verify(!Model.settingNoop(r, { verb: "setting", id: "camera.image.nope", value: 1 }))
+    verify(!Model.settingNoop(snap(rev7({})), { verb: "setting", id: id, value: false }))
+  }
+
   // A draft goes on the change its own write caused, never on an earlier
   // write's late one.
   function test_setting_line_ownership_and_drafts() {
@@ -2644,6 +2687,11 @@ TestCase {
     compare(JSON.stringify(Model.enqueueIntent(q, newWrite)), JSON.stringify(q), "refused: the queue as it was, nothing evicted")
     verify(Model.queueTakes(q, { verb: "setting", id: "camera.image.s3", value: 9 }), "a write for a queued id replaces it")
     compare(Model.enqueueIntent(q, { verb: "setting", id: "camera.image.s3", value: 9 }).length, Model.SETTING_QUEUE_CAP)
+    var toggle = { verb: "setting", id: "camera.image.toggle", value: true, quick: true }
+    verify(Model.queueTakes(q, toggle), "a quick ask is not refused by a full slider queue")
+    var tq = Model.enqueueIntent(q, toggle)
+    compare(tq.length, Model.SETTING_QUEUE_CAP + 1)
+    compare(tq[0], toggle, "placed ahead of the sliders")
     var asks = [{ verb: "enable", on: false }, { verb: "select", id: fhdId }, { verb: "next" }, { verb: "effect", effect: "blur" },
                 { verb: "denoise", on: true }]
     for (var a = 0; a < asks.length; a++) {
@@ -2679,6 +2727,91 @@ TestCase {
              "step " + step + ": " + run.length + "/" + writes + "/" + resets + "/" + others.length)
       if (lastOther !== null) verify(others.length === 1 && others[0] === lastOther, "step " + step + ": the latest other ask is queued")
     }
+  }
+
+  // The queue's own bound covers quick writes: slider writes, quick writes and
+  // one other ask fill it, and the next enqueue (of any kind) never makes the
+  // trim to INTENT_QUEUE_CAP cut a slider's latest value.
+  function test_intent_queue_quick_writes_never_cost_a_slider_write() {
+    var q = []
+    for (var i = 0; i < Model.SETTING_QUEUE_CAP; i++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.s" + i, value: i })
+    q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.q0", value: true, quick: true })
+    q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.q1", value: true, quick: true })
+    q = Model.enqueueIntent(q, { verb: "select", id: fhdId })
+    compare(q.length, Model.SETTING_QUEUE_CAP + 3)
+    var sliders = function(x) { return x.filter(function(e) { return e.verb === "setting" && e.quick !== true }) }
+    var next = [{ verb: "setting", id: "camera.image.s2", value: 99 },
+                { verb: "setting", id: "camera.image.new", value: 1 },
+                { verb: "setting", id: "camera.image.q2", value: true, quick: true },
+                { verb: "setting", id: "camera.image.q0", value: false, quick: true }]
+    for (var n = 0; n < next.length; n++) {
+      var out = Model.enqueueIntent(q, next[n])
+      verify(out.length <= Model.INTENT_QUEUE_CAP, "within the cap: " + out.length)
+      var kept = out.filter(function(e) { return e.id === next[n].id })
+      var expectIn = Model.queueTakes(q, next[n])
+      compare(kept.length, expectIn ? 1 : 0, next[n].id)
+      compare(sliders(out).length, Model.SETTING_QUEUE_CAP, "no slider write dropped: " + next[n].id)
+      for (var j = 0; j < Model.SETTING_QUEUE_CAP; j++) {
+        var id = "camera.image.s" + j
+        var w = sliders(out).filter(function(e) { return e.id === id })
+        compare(w.length, 1, id)
+        compare(w[0].value, id === next[n].id ? next[n].value : j, id + " latest value")
+      }
+    }
+    verify(!Model.queueTakes(q, next[1]), "a ninth slider id waits (stays a draft)")
+    verify(Model.queueTakes(q, next[2]) && Model.queueTakes(q, next[3]))
+    // every bound full: the trim removes nothing, a same-id write replaces
+    var full = q
+    for (var k = 2; k < Model.QUICK_QUEUE_CAP; k++) full = Model.enqueueIntent(full, { verb: "setting", id: "camera.image.q" + k, value: true, quick: true })
+    compare(full.length, Model.SETTING_QUEUE_CAP + Model.QUICK_QUEUE_CAP + 1)
+    var fifth = { verb: "setting", id: "camera.image.q9", value: true, quick: true }
+    verify(!Model.queueTakes(full, fifth), "a fifth quick write waits")
+    compare(JSON.stringify(Model.enqueueIntent(full, fifth)), JSON.stringify(full), "refused: the queue as it was")
+    var again = Model.enqueueIntent(full, { verb: "setting", id: "camera.image.q0", value: false, quick: true })
+    compare(again.length, full.length, "a same-id write replaces")
+    var withAsk = Model.enqueueIntent(full, { verb: "effect", effect: "blur" })
+    verify(withAsk.length <= Model.INTENT_QUEUE_CAP, "an other ask fits: " + withAsk.length)
+    compare(sliders(withAsk).length, Model.SETTING_QUEUE_CAP)
+  }
+
+  // A settings action has no draft: a full quick queue never refuses its press,
+  // and nothing queued is dropped.
+  function test_intent_queue_action_press_is_never_refused() {
+    var q = []
+    for (var i = 0; i < Model.SETTING_QUEUE_CAP; i++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.s" + i, value: i })
+    for (var k = 0; k < Model.QUICK_QUEUE_CAP; k++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.q" + k, value: true, quick: true })
+    q = Model.enqueueIntent(q, { verb: "select", id: fhdId })
+    q = Model.enqueueIntent(q, { verb: "reset-settings", camera: "c" })
+    // a reset supersedes the camera's writes: queue the writes after it
+    for (var j = 0; j < Model.SETTING_QUEUE_CAP; j++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.s" + j, value: j })
+    for (var m = 0; m < Model.QUICK_QUEUE_CAP; m++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.q" + m, value: true, quick: true })
+    var act = { verb: "setting", id: "camera.image.reset_wb", value: true, quick: true, action: true }
+    verify(!Model.queueTakes(q, { verb: "setting", id: "camera.image.q9", value: true, quick: true }), "quick queue is full")
+    verify(Model.queueTakes(q, act), "the action press is accepted")
+    var out = Model.enqueueIntent(q, act)
+    compare(out.length, q.length + 1, "nothing dropped")
+    verify(out.length <= Model.INTENT_QUEUE_CAP)
+    compare(out.filter(function(e) { return e.id === act.id }).length, 1)
+    var twice = Model.enqueueIntent(out, act)
+    compare(twice.length, out.length, "one per row id")
+    // every action row at once still fits
+    var all = []
+    for (var a = 0; a < Model.SETTINGS_ROW_CAP; a++) all = Model.enqueueIntent(all, { verb: "setting", id: "camera.image.a" + a, value: true, quick: true, action: true })
+    compare(all.length, Model.SETTINGS_ROW_CAP)
+    all = Model.enqueueIntent(all, { verb: "effect", effect: "blur" })
+    all = Model.enqueueIntent(all, { verb: "reset-settings", camera: "c" })
+    verify(all.length <= Model.INTENT_QUEUE_CAP)
+  }
+
+  // A write for a queued id is checked against the cap of its new kind.
+  function test_intent_queue_same_id_changing_kind_respects_the_cap() {
+    var q = []
+    for (var k = 0; k < Model.QUICK_QUEUE_CAP; k++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.q" + k, value: true, quick: true })
+    q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.x", value: 1 })
+    var asQuick = { verb: "setting", id: "camera.image.x", value: true, quick: true }
+    verify(!Model.queueTakes(q, asQuick), "slider -> quick with the quick queue full waits")
+    compare(JSON.stringify(Model.enqueueIntent(q, asQuick)), JSON.stringify(q))
+    verify(Model.queueTakes(q, { verb: "setting", id: "camera.image.q1", value: false, quick: true }), "same kind replaces")
   }
 
   // F5/F6: "Showing N of M" counts what is drawn; a setting of a known type
