@@ -130,8 +130,10 @@ check("qmldir does not list BarWidget (it would shadow qs.Ui's)",
 
 # ---- manifest ---------------------------------------------------------------
 manifest = json.loads((PLUGIN / "manifest.json").read_text(encoding="utf-8"))
-check("manifest id equals directory name", manifest.get("id") == PLUGIN.name,
-      f"id {manifest.get('id')!r} vs dir {PLUGIN.name!r}")
+# The plugin is the repository root, so the directory name is the checkout's;
+# the id is what the shell installs it under.
+check("manifest id is the plugin id", manifest.get("id") == "br.com.dias.omarchy-broadcast",
+      f"id {manifest.get('id')!r}")
 check("entry point is BarWidget.qml", manifest.get("entryPoints", {}).get("barWidget") == "BarWidget.qml")
 check("allowMultiple is false", manifest.get("barWidget", {}).get("allowMultiple") is False)
 schema = manifest.get("barWidget", {}).get("schema", [])

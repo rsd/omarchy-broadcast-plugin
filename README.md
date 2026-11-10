@@ -4,7 +4,7 @@
 
 It is a client of `omarchy-broadcastd`, the daemon of the omarchy-broadcast project, and does not include it: it reads the state from the stream of `omarchy-broadcast watch --json` and sends commands through the `omarchy-broadcast` command-line client. For the preview it also runs `omarchy-broadcast preview --json`. It does not speak D-Bus itself and never opens a camera device. The stream formats are specified in `docs/cli-json.md` in the omarchy-broadcast repository; the widget requires its schema version (`v`) 1.
 
-The plugin is the directory [br.com.dias.omarchy-broadcast/](br.com.dias.omarchy-broadcast/); its tests are in `br.com.dias.omarchy-broadcast/tests/`. Nothing is built or installed by this repository.
+The plugin is the root of this repository (`manifest.json` and the QML files); its tests are in [tests/](tests/). Nothing is built or installed by this repository.
 
 ## What it shows
 
@@ -70,18 +70,22 @@ Keyboard, once the panel is open: Up/Down or j/k move the cursor over the on/off
 
 ## Install
 
-Clone this repository, then, from the root of the checkout, link the plugin directory into the shell's plugin directory:
+Add the plugin from its git URL:
+
+```sh
+omarchy plugin add <git-url>
+```
+
+This clones the repository into `~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast`, validates it and asks the shell to rescan. The manifest is at the root of the repository, which is what `omarchy plugin add` expects. The whole clone is installed, including `tests/`, which the shell never loads: it reads only the files named by `manifest.json`.
+
+To work from a local checkout instead, link its root into the shell's plugin directory:
 
 ```sh
 mkdir -p ~/.config/omarchy/plugins
-ln -s "$PWD/br.com.dias.omarchy-broadcast" ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast
+ln -s /path/to/omarchy-broadcast-plugin ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast
 ```
 
-That is, `ln -s <checkout>/br.com.dias.omarchy-broadcast ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast`, with `<checkout>` the absolute path of the clone.
-
-To copy instead of linking (later changes in the checkout then no longer apply), use `cp -r br.com.dias.omarchy-broadcast ~/.config/omarchy/plugins/`. The `tests/` directory inside the plugin is not needed at run time and may be left out of a copy.
-
-`omarchy plugin add <git-url>` does not apply to this repository. It clones the URL into the plugin directory and validates the clone with `omarchy plugin validate`, which reads `manifest.json` at the root of the clone (`omarchy-plugin-add`: `git clone -- "$url" "$stage"`, then `omarchy-plugin-validate "$stage"`); here the manifest is one level down, in `br.com.dias.omarchy-broadcast/`, so the validation fails and nothing is added. It also accepts only a git URL, not a local path. Link or copy the directory as above.
+To copy instead of linking (later changes in the checkout then no longer apply), use `cp -r /path/to/omarchy-broadcast-plugin ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast`. The `tests/` and `.git` directories are not needed at run time and may be left out of a copy.
 
 Enable the plugin, which also places the widget in the right section of the bar:
 
@@ -195,29 +199,29 @@ Run from the root of the checkout. None of the tests needs omarchy-broadcast, ex
 ```sh
 # Unit tests of the logic (Model.js): reducer, caps, tooltips, argument lists, effects, noise removal, the camera settings (parsing the settings lines of the watch stream against a fixture of real CLI lines, the reducer for full sets and deltas, caps, the capability rule, validation of ids and values, snapping, argument lists, the command queue), the preview (run rule, argument list, frame lines, placeholder texts, settings), the panel tabs (stored value, keyboard stops) and the Status rows, the click actions, path resolution
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner \
-    -input br.com.dias.omarchy-broadcast/tests/tst_model.qml
+    -input tests/tst_model.qml
 
 # Source invariants (plain text everywhere, no shell strings, no polling timer, manifest id, effect, noise removal and camera setting whitelists, the setting-id check, the command queue and slider debounce, the preview's single process, argument list and fixed frame path, the click mapping, the tab setting and the panel's size)
-python3 -I br.com.dias.omarchy-broadcast/tests/check-source.py
+python3 -I tests/check-source.py
 
 # qmllint on every QML file, import errors fatal
-br.com.dias.omarchy-broadcast/tests/lint.sh
+tests/lint.sh
 
 # The shell's manifest validator
-omarchy plugin validate br.com.dias.omarchy-broadcast
+omarchy plugin validate .
 
 # The plugin inside a throwaway Quickshell with a fake CLI, including its fake preview stream and a scratch `XDG_RUNTIME_DIR` (needs quickshell)
-br.com.dias.omarchy-broadcast/tests/run-harness.sh
+tests/run-harness.sh
 
 # The same, plus one resolver case against a real omarchy-broadcast binary (found, never run)
-OMARCHY_BROADCAST_CLI=/absolute/path/to/omarchy-broadcast br.com.dias.omarchy-broadcast/tests/run-harness.sh
+OMARCHY_BROADCAST_CLI=/absolute/path/to/omarchy-broadcast tests/run-harness.sh
 
 # Against a real daemon and CLI
-OMARCHY_BROADCAST_CLI=/absolute/path/to/omarchy-broadcast br.com.dias.omarchy-broadcast/tests/run-harness.sh --live
+OMARCHY_BROADCAST_CLI=/absolute/path/to/omarchy-broadcast tests/run-harness.sh --live
 ```
 
 - `qmltestrunner` and `qmllint` come from Qt 6 (`/usr/lib/qt6/bin`, package `qt6-declarative` on Arch). `lint.sh` and `run-harness.sh` also need the Omarchy shell modules, by default in `/usr/share/omarchy/shell`; set `OMARCHY_SHELL` to use another copy, such as the `shell/` directory of a checkout of the Omarchy repository.
-- `run-harness.sh` builds its own directory (under `$TMPDIR`, or `--work DIR` if that is empty or an earlier harness directory), runs a separate offscreen Quickshell with the fake CLI `tests/fake-omarchy-broadcast` (which also streams a Logitech MX Brio's camera settings and answers `settings set` and `settings reset`, prints a preview stream and writes real JPEG frames into the harness's own runtime directory, never yours), and removes nothing outside it. It prints `ALL OK` and exits 0 on success. `--screens DIR` keeps the screenshots. Its text-layout checks need a font installed (Omarchy's default is JetBrains Mono Nerd Font).
+- `run-harness.sh` builds its own directory (under `$TMPDIR`, or `--work DIR` if that is empty or an earlier harness directory), runs a separate offscreen Quickshell with the fake CLI `tests/fake-omarchy-broadcast` (which also streams a Logitech MX Brio's camera settings and answers `settings set` and `settings reset`, prints a preview stream and writes real JPEG frames into the harness's own runtime directory, never yours), and removes nothing outside it. It prints `ALL OK` and exits 0 on success, and removes its directory; after a failure it keeps the directory (log, fake log, screenshots) and prints where it is. `KEEP_WORK=1` or `--screens DIR` keeps the screenshots on success. Its text-layout checks need a font installed (Omarchy's default is JetBrains Mono Nerd Font).
 - The mock run is hermetic: the shell it starts has a `PATH` made of the fake CLI and the system tools only, never another `omarchy-broadcast`, and the run refuses to start if anything else would answer. A real CLI installed on the machine is never executed by it. The CLI resolver cases use scratch directories as their `PATH`. With `OMARCHY_BROADCAST_CLI` set to the absolute path of a real `omarchy-broadcast` binary, one more case checks that the resolver finds it on a `PATH`; the resolver only prints the path, and nothing executes the binary in this mode. Without the variable that case prints a `SKIP` line and does not count as a failure.
 - `--live` takes the CLI from `OMARCHY_BROADCAST_CLI` and the daemon from `OMARCHY_BROADCASTD` (default: `omarchy-broadcastd` in the same directory as the CLI), and refuses to run without them. It starts its own `omarchy-broadcastd` with a scratch configuration and state, opens the virtual camera for a few seconds with `gst-launch-1.0` and stops everything again. It refuses to run if `br.com.dias.OmarchyBroadcast` already has an owner on the session bus, and it needs the "Omarchy Broadcast" v4l2loopback device (`docs/setup/loopback.md` in the omarchy-broadcast repository).
 - Continuous integration (`.github/workflows/ci.yml`) runs all of the above except `--live` and the real-CLI case in an Arch Linux container, against the shell modules of a pinned Omarchy release.
@@ -241,7 +245,7 @@ The plugin starts no service of its own and writes no files, except that the she
 
 ## Versioning
 
-The plugin's version is the `version` field of `br.com.dias.omarchy-broadcast/manifest.json`. It started at 0.16.0, the omarchy-broadcast release it was split from, and is independent of the omarchy-broadcast version from then on: the two are released separately, and matching numbers carry no meaning.
+The plugin's version is the `version` field of `manifest.json`. It started at 0.16.0, the omarchy-broadcast release it was split from, and is independent of the omarchy-broadcast version from then on: the two are released separately, and matching numbers carry no meaning.
 
 Compatibility is set by the interface, not by version numbers. The plugin needs an `omarchy-broadcast` CLI whose `watch --json` output is schema version (`v`) 1, specified in `docs/cli-json.md` in the omarchy-broadcast repository; the video effects need a daemon interface revision of 2 or later, noise removal one of 4 or later, the preview one of 5 or later, with a CLI that has `preview --json`, the camera settings one of 7 or later and settings schema 1, and the effect settings on the Effect tab one of 8 or later, with a CLI whose snapshot reports `settings_schema` (see [Requirements](#requirements)). A change of the schema version requires a new release of the plugin.
 
