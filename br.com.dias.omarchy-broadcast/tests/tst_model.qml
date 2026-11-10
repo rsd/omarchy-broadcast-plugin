@@ -3,8 +3,9 @@ import QtTest
 import "../Model.js" as Model
 
 // Unit tests for Model.js: the stream reducer, sanitising, caps, the bar's
-// six visual states, tooltips, argv builders, the camera image controls and
-// the command queue, and CLI-path resolution.
+// six visual states, tooltips, argv builders, the camera settings (the set,
+// its deltas, validation, caps, the writes) and the command queue, and
+// CLI-path resolution.
 //
 // Run (headless):
 //   QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_model.qml
@@ -1664,418 +1665,902 @@ TestCase {
     compare(Model.PREVIEW_UNSAVED_TEXT, "Could not save the preview setting")
   }
 
-  // ---- camera image controls (interface revision 6) --------------------------
+  // ---- camera settings (interface revision 7) ----------------------------------
 
-  function controlObj(name, o) {
-    var c = { name: name, min: 0, max: 255, step: 1, "default": 128, value: 128, stored: false }
-    for (var k in o) c[k] = o[k]
-    return c
+  function merged(base, o) {
+    for (var k in o) base[k] = o[k]
+    return base
   }
-  function fiveControls() {
-    return [controlObj("brightness", {}), controlObj("contrast", { "default": 32, value: 40, stored: true }),
-            controlObj("saturation", { value: 179 }), controlObj("sharpness", { value: 255 }),
-            controlObj("backlight_compensation", { min: 0, max: 1, "default": 0, value: 0 })]
+  function intS(id, label, o) {
+    return merged({ id: id, label: label, type: "int", scope: "camera", stored: false, enabled: true, disabled_reason: "",
+                    enabled_when: [], value: 128, "default": 128, min: 0, max: 255, step: 1, hint: "slider" }, o || {})
   }
-  function rev6(o) {
-    var m = { interface_revision: 6, camera_controls: { camera: brioId, controls: fiveControls() } }
-    for (var k in o) m[k] = o[k]
-    return m
+  function boolS(id, label, o) {
+    return merged({ id: id, label: label, type: "bool", scope: "camera", stored: false, enabled: true, disabled_reason: "",
+                    enabled_when: [], value: true, "default": true, hint: "switch" }, o || {})
   }
-  function names(list) { return JSON.stringify(list.map(function(c) { return c.name })) }
-
-  function test_controls_parsed_from_snapshot() {
-    var r = snap(rev6({}))
-    compare(r.controlsField, "object")
-    compare(r.controlsCamera, brioId)
-    compare(r.controlsCameraId, brioId)
-    compare(names(r.controls), JSON.stringify(["brightness", "contrast", "saturation", "sharpness"]),
-            "backlight_compensation is not a slider")
-    var c = Model.findControl(r, "contrast")
-    compare(JSON.stringify(c), JSON.stringify({ name: "contrast", label: "Contrast", min: 0, max: 255, step: 1,
-                                                defaultValue: 32, value: 40, stored: true }))
-    compare(Model.findControl(r, "backlight_compensation"), null)
-    compare(Model.findControl(r, "sharpness").value, 255)
-    verify(Model.controlsSupported(r))
-    compare(Model.controlsMissingText(r), "")
-    // the daemon's order is kept in the record; the panel draws CONTROL_NAMES order
-    var shuffled = snap(rev6({ camera_controls: { camera: brioId, controls: [controlObj("sharpness", {}), controlObj("brightness", {})] } }))
-    compare(names(shuffled.controls), JSON.stringify(["sharpness", "brightness"]))
-    compare(names(Model.controlsSection(shuffled).controls), JSON.stringify(["brightness", "sharpness"]))
-    compare(Model.CONTROL_LABELS.brightness + Model.CONTROL_LABELS.contrast + Model.CONTROL_LABELS.saturation
-            + Model.CONTROL_LABELS.sharpness, "BrightnessContrastSaturationSharpness")
+  function enumS(id, label, options, o) {
+    return merged({ id: id, label: label, type: "enum", scope: "camera", stored: false, enabled: true, disabled_reason: "",
+                    enabled_when: [], value: options[0].value, "default": options[0].value, options: options, hint: "segmented" }, o || {})
   }
-
-  // Absent field: the CLI predates the controls; null, or a revision below 6:
-  // the daemon does. The CLI is named first, as for effects.
-  function test_controls_capability_rule() {
-    var absent = snap({})
-    compare(absent.controlsField, "absent")
-    verify(!Model.controlsSupported(absent))
-    compare(Model.controlsMissingText(absent), Model.CLI_NO_CONTROLS)
-    var absent6 = snap({ interface_revision: 6 })
-    compare(Model.controlsMissingText(absent6), Model.CLI_NO_CONTROLS, "a revision-6 daemon behind an old CLI")
-    var nul = snap(rev6({ interface_revision: 5, camera_controls: null }))
-    compare(nul.controlsField, "null")
-    verify(!Model.controlsSupported(nul))
-    compare(Model.controlsMissingText(nul), Model.DAEMON_NO_CONTROLS)
-    compare(Model.controlsMissingText(snap(rev6({ camera_controls: null }))), Model.DAEMON_NO_CONTROLS, "null at revision 6")
-    var old = snap(rev6({ interface_revision: 5 }))
-    verify(!Model.controlsSupported(old), "an object from a revision-5 daemon")
-    compare(Model.controlsMissingText(old), Model.DAEMON_NO_CONTROLS)
-    verify(!Model.controlsSupported(snap(rev6({ interface_revision: "6" }))), "a revision that is not a number")
-    var junk = [42, "x", true, [controlObj("brightness", {})]]
-    for (var i = 0; i < junk.length; i++) {
-      var r = snap(rev6({ camera_controls: junk[i] }))
-      compare(r.controlsField, "null", JSON.stringify(junk[i]))
-      compare(r.controls.length, 0)
-    }
-    verify(Model.controlsSupported(snap(rev6({ interface_revision: 7 }))), "a later revision")
-    compare(Model.controlsMissingText(Model.withLink("not-running")), "", "unavailable: the panel shows no section")
-    verify(Model.CLI_NO_CONTROLS.indexOf("0.19") !== -1 && Model.DAEMON_NO_CONTROLS.indexOf("omarchy-broadcastd 0.19") !== -1)
-  }
-
-  function test_controls_entry_validation() {
-    var bad = [
-      ["unknown name", controlObj("zoom", {})],
-      ["name not a string", controlObj(5, {})],
-      ["float value", controlObj("brightness", { value: 1.5 })],
-      ["string value", controlObj("brightness", { value: "128" })],
-      ["null min", controlObj("brightness", { min: null })],
-      ["missing default", (function() { var c = controlObj("brightness", {}); delete c["default"]; return c })()],
-      ["min over max", controlObj("brightness", { min: 10, max: 5, "default": 7, value: 7 })],
-      ["step 0", controlObj("brightness", { step: 0 })],
-      ["negative step", controlObj("brightness", { step: -1 })],
-      ["value over max", controlObj("brightness", { value: 256 })],
-      ["value under min", controlObj("brightness", { value: -1 })],
-      ["default out of range", controlObj("brightness", { "default": 300 })],
-      ["beyond int32", controlObj("brightness", { max: 4294967296 })],
-      ["huge", controlObj("brightness", { max: 1e300 })]
+  // The MX Brio as the daemon publishes it (contract s1, section 1).
+  function brioGroups() {
+    return [
+      { id: "image", label: "Image", settings: [
+        intS("camera.image.brightness", "Brightness"), intS("camera.image.contrast", "Contrast"),
+        intS("camera.image.saturation", "Saturation"), intS("camera.image.sharpness", "Sharpness"),
+        intS("camera.image.backlight_compensation", "Backlight compensation", { min: 0, max: 1, value: 1, "default": 1 })] },
+      { id: "white_balance", label: "White balance", settings: [
+        boolS("camera.white_balance.white_balance_automatic", "Automatic white balance"),
+        intS("camera.white_balance.white_balance_temperature", "Temperature", {
+          min: 2000, max: 7500, value: 2975, "default": 5000, unit: "K", enabled: false,
+          disabled_reason: "Turn off automatic white balance to change this",
+          enabled_when: [{ id: "camera.white_balance.white_balance_automatic", op: "eq", value: false }] })] },
+      { id: "exposure", label: "Exposure", settings: [
+        enumS("camera.exposure.auto_exposure", "Exposure mode", [{ value: "manual", label: "Manual" }, { value: "aperture_priority", label: "Auto" }],
+              { value: "aperture_priority", "default": "aperture_priority" }),
+        intS("camera.exposure.exposure_time_absolute", "Exposure time", {
+          min: 3, max: 2047, value: 1250, "default": 156, unit: "×100 µs", enabled: false,
+          disabled_reason: "Set exposure to manual to change this",
+          enabled_when: [{ id: "camera.exposure.auto_exposure", op: "in", value: ["manual", "shutter_priority"] }] }),
+        intS("camera.exposure.gain", "Gain", { value: 0, "default": 0 }),
+        boolS("camera.exposure.keep_framerate", "Keep 30 fps in low light", { value: false }),
+        enumS("camera.exposure.power_line_frequency", "Anti-flicker", [{ value: "disabled", label: "Off" }, { value: "50hz", label: "50 Hz" },
+                                                                       { value: "60hz", label: "60 Hz" }, { value: "auto", label: "Auto" }],
+              { value: "60hz", "default": "60hz" })] },
+      { id: "focus", label: "Focus & zoom", settings: [
+        boolS("camera.focus.focus_automatic_continuous", "Continuous autofocus"),
+        intS("camera.focus.focus_absolute", "Focus", { value: 40, "default": 0, enabled: false,
+                                                       disabled_reason: "Turn off continuous autofocus to change this" }),
+        intS("camera.focus.zoom_absolute", "Zoom", { min: 100, max: 500, value: 100, "default": 100 }),
+        intS("camera.focus.pan_absolute", "Pan", { min: -36000, max: 36000, step: 3600, value: 14400, "default": 0 }),
+        intS("camera.focus.tilt_absolute", "Tilt", { min: -36000, max: 36000, step: 3600, value: -14400, "default": 0 }),
+        enumS("camera.focus.field_of_view", "Field of view", [{ value: "90", label: "90°" }, { value: "78", label: "78°" }, { value: "65", label: "65°" }],
+              { value: "65", "default": "90" })] }
     ]
-    for (var i = 0; i < bad.length; i++)
-      compare(Model.controlEntry(bad[i][1]), null, bad[i][0])
-    compare(Model.controlEntry(controlObj("brightness", { max: Infinity })), null, "Infinity")
-    compare(Model.controlEntry(controlObj("brightness", { value: NaN })), null, "NaN")
-    compare(Model.controlEntry(null), null)
-    compare(Model.controlEntry([controlObj("brightness", {})]), null)
-    // good edge cases
-    var neg = Model.controlEntry(controlObj("brightness", { min: -64, max: 64, "default": 0, value: -64 }))
-    compare(neg.value, -64)
-    var flat = Model.controlEntry(controlObj("sharpness", { min: 3, max: 3, "default": 3, value: 3 }))
-    compare(flat.max, 3, "min == max is valid")
-    compare(Model.controlEntry(controlObj("brightness", { stored: "yes" })).stored, false, "stored only for a real true")
-    // a bad entry costs only itself; a repeated name keeps its first entry
-    var list = Model.controlList([controlObj("brightness", { value: 999 }), controlObj("contrast", {}),
-                                  controlObj("contrast", { value: 1 }), "junk", null])
-    compare(names(list), JSON.stringify(["contrast"]))
-    compare(list[0].value, 128)
-    compare(Model.controlList("not an array").length, 0)
   }
-
-  // At most CONTROLS_CAP entries are looked at, however long the list.
-  function test_controls_cap_before_iteration() {
-    var big = []
-    for (var i = 0; i < 200000; i++) big.push("junk")
-    big[Model.CONTROLS_CAP - 1] = controlObj("contrast", {})
-    big[Model.CONTROLS_CAP] = controlObj("brightness", {})
-    var t0 = Date.now()
-    var list = Model.controlList(big)
-    var took = Date.now() - t0
-    compare(names(list), JSON.stringify(["contrast"]), "the entry past the cap is never read")
-    verify(took < 100, "took " + took + " ms")
-    compare(Model.CONTROLS_CAP, 16)
-  }
-
-  function test_controls_line() {
-    var r = snap(rev6({}))
-    var res = Model.reduce(r, line({ v: 1, type: "controls", camera: fhdId,
-                                     controls: [controlObj("brightness", { value: 10, stored: true })] }))
-    compare(res.outcome, "controls")
-    compare(res.record.controlsCamera, fhdId)
-    compare(names(res.record.controls), JSON.stringify(["brightness"]), "replaced whole")
-    compare(res.record.controls[0].value, 10)
-    compare(res.record.cameras.length, 2, "nothing else changes")
-    compare(r.controls.length, 4, "the old record is not modified")
-    // a state line keeps the controls
-    var s = Model.reduce(res.record, line(stateObject({ state: "active", interface_revision: 6 }))).record
-    compare(s.controls.length, 1)
-    compare(s.controlsField, "object")
-    // ignored until a snapshot
-    var gone = Model.reduce(Model.withLink("not-running"), line({ v: 1, type: "controls", camera: brioId, controls: fiveControls() }))
-    compare(gone.outcome, "ignored")
-    compare(gone.record.controls.length, 0)
-    // hostile camera id: sanitised and capped, display only
-    var long = "<img src=x>&‮"
-    for (var i = 0; i < 300; i++) long += "a"
-    var h = Model.reduce(r, line({ v: 1, type: "controls", camera: long, controls: [] })).record
-    verify(!/[<>&‮]/.test(h.controlsCamera), h.controlsCamera)
-    verify(h.controlsCamera.length <= Model.ID_CAP, h.controlsCamera.length)
-    // compared raw: ids that differ only in what sanitising strips are two cameras
-    var a = Model.reduce(r, line({ v: 1, type: "controls", camera: "cam<1>", controls: [] })).record
-    var b = Model.reduce(r, line({ v: 1, type: "controls", camera: "cam1", controls: [] })).record
-    compare(a.controlsCamera, b.controlsCamera, "the same display copy")
-    verify(a.controlsCameraId !== b.controlsCameraId, "two cameras")
-    compare(Model.reduce(r, line({ v: 1, type: "controls", camera: 7, controls: [] })).record.controlsCameraId, "")
-    compare(Model.reduce(r, line(snapshotObject({ interface_revision: 6, camera_controls: null }))).record.controlsCameraId, "")
-    compare(Model.reduce(r, line({ v: 1, type: "controls", camera: 7, controls: "x" })).record.controls.length, 0)
-    // an error line drops them with everything else
-    compare(Model.reduce(r, line({ v: 1, type: "error", code: "daemon-not-running", error: "" })).record.controls.length, 0)
-  }
-
-  function test_controls_section() {
-    compare(Model.controlsSection(Model.withLink("not-running")).visible, false)
-    var idle = Model.controlsSection(snap(rev6({})))
-    compare(idle.visible, true)
-    compare(idle.hint, "")
-    compare(idle.note, "The camera is not in use: changes are saved and apply when an app next uses it.")
-    compare(idle.controls.length, 4)
-    compare(idle.reset, true)
-    var act = Model.reduce(snap(rev6({})), line(stateObject({ state: "active", consumers: 1, interface_revision: 6 }))).record
-    compare(Model.controlsSection(act).note, "Changes apply live.", "live while active")
-    var starting = Model.reduce(snap(rev6({})), line(stateObject({ state: "starting", consumers: 1, interface_revision: 6 }))).record
-    compare(Model.controlsSection(starting).note, Model.CONTROLS_LIVE_TEXT, "live while starting: the daemon writes to the open camera")
-    verify(Model.controlsLive(starting) && Model.controlsLive(act))
-    compare(Model.controlsSection(snap(rev6({ state: "off", enabled: false }))).note, Model.CONTROLS_IDLE_TEXT, "stored while off")
-    compare(Model.controlsSection(snap(rev6({ state: "error", error: "x" }))).note, Model.CONTROLS_IDLE_TEXT, "stored on error")
-    verify(!Model.controlsLive(snap(rev6({}))), "idle is not live")
-    verify(!Model.controlsLive(Model.withLink("not-running")))
-    var noSharp = fiveControls().filter(function(c) { return c.name !== "sharpness" })
-    var lacking = Model.controlsSection(snap(rev6({ camera_controls: { camera: brioId, controls: noSharp } })))
-    compare(names(lacking.controls), JSON.stringify(["brightness", "contrast", "saturation"]))
-    compare(Model.sectionControl(lacking, "sharpness"), null)
-    compare(Model.sectionControl(lacking, "contrast").value, 40)
-    var empty = Model.controlsSection(snap(rev6({ camera_controls: { camera: "", controls: [] } })))
-    compare(empty.hint, Model.CONTROLS_EMPTY_TEXT)
-    compare(empty.reset, false)
-    compare(empty.controls.length, 0)
-    var onlyBacklight = Model.controlsSection(snap(rev6({ camera_controls: { camera: brioId, controls: [fiveControls()[4]] } })))
-    compare(onlyBacklight.hint, Model.CONTROLS_EMPTY_TEXT, "only a control the panel does not offer")
-    var cliOld = Model.controlsSection(snap({}))
-    compare(cliOld.visible, true)
-    compare(cliOld.hint, Model.CLI_NO_CONTROLS)
-    compare(cliOld.reset, false)
-    compare(Model.controlsSection(snap(rev6({ interface_revision: 5 }))).hint, Model.DAEMON_NO_CONTROLS)
-  }
-
-  function test_control_snapping() {
-    var c = { name: "brightness", min: 1, max: 10, step: 3 }   // grid 1, 4, 7, 10
-    compare(Model.snapControl(c, 1), 1)
-    compare(Model.snapControl(c, 2), 1)
-    compare(Model.snapControl(c, 3), 4)
-    compare(Model.snapControl(c, 9.4), 10)
-    var odd = { name: "brightness", min: 0, max: 10, step: 4 }   // grid 0, 4, 8; 10 is not on it
-    compare(Model.snapControl(odd, 10), 8, "clamped to the last grid point under max")
-    compare(Model.snapControl(odd, 9.9), 8)
-    compare(Model.snapControl(odd, 11), null, "out of range")
-    compare(Model.snapControl(odd, -1), null)
-    compare(Model.snapControl(odd, NaN), null)
-    compare(Model.snapControl(odd, Infinity), null)
-    compare(Model.snapControl(odd, "4"), null)
-    compare(Model.snapControl(null, 4), null)
-    compare(Model.clampControl(odd, 99), 8)
-    compare(Model.clampControl(odd, -99), 0)
-    compare(Model.clampControl(odd, undefined), null)
-    var neg = { name: "brightness", min: -64, max: 64, step: 1 }
-    compare(Model.snapControl(neg, -3.6), -4)
-    // keys: about a twentieth of the range, on the grid, at least a step
-    var u8 = { name: "sharpness", min: 0, max: 255, step: 1 }
-    compare(Model.controlKeyStep(u8), 13)
-    compare(Model.controlKeyStep({ min: 0, max: 6, step: 1 }), 1)
-    compare(Model.controlKeyStep({ min: 0, max: 200, step: 5 }), 10)
-    compare(Model.controlNudge(u8, 250, 1), 255)
-    compare(Model.controlNudge(u8, 5, -1), 0)
-    compare(Model.controlNudge(u8, 100, 1), 113)
-    compare(Model.controlNudge(u8, 100, 0), null)
-    compare(Model.controlNudge(u8, NaN, 1), null)
-  }
-
-  function test_control_intent_argv() {
-    var r = snap(rev6({ camera_controls: { camera: brioId, controls: [
-      controlObj("brightness", { min: -64, max: 64, "default": 0, value: 0 }),
-      controlObj("contrast", { min: 0, max: 10, step: 4, "default": 4, value: 4 }),
-      controlObj("saturation", {}), controlObj("backlight_compensation", { max: 1, "default": 0, value: 0 })] } }))
-    var argv = function(name, value) { return JSON.stringify(Model.intentArgv({ verb: "control", name: name, value: value, camera: brioId }, cli, r)) }
-    compare(argv("saturation", 100), JSON.stringify([cli, "controls", "set", "saturation", "100"]))
-    compare(argv("brightness", -5), JSON.stringify([cli, "controls", "set", "brightness", "-5"]))
-    compare(argv("contrast", 7), JSON.stringify([cli, "controls", "set", "contrast", "8"]), "snapped to the step")
-    compare(argv("contrast", 10), JSON.stringify([cli, "controls", "set", "contrast", "8"]), "kept on the grid under max")
-    compare(argv("saturation", 99.6), JSON.stringify([cli, "controls", "set", "saturation", "100"]))
-    compare(argv("saturation", 256), "null", "out of range")
-    compare(argv("saturation", NaN), "null")
-    compare(argv("saturation", "100"), "null", "a string value")
-    compare(argv("saturation", undefined), "null")
-    compare(argv("sharpness", 10), "null", "a control the camera lacks")
-    compare(argv("backlight_compensation", 1), "null", "not a slider of the panel")
-    compare(argv("saturation; rm -rf ~", 1), "null")
-    compare(argv("--help", 1), "null")
-    compare(argv(undefined, 1), "null")
-    compare(JSON.stringify(Model.intentArgv({ verb: "control", name: "saturation", value: 1, camera: brioId }, "omarchy-broadcast", r)), "null", "relative CLI")
-    compare(JSON.stringify(Model.intentArgv({ verb: "reset-controls", camera: brioId }, cli, r)), JSON.stringify([cli, "controls", "reset"]))
-    // bound to the camera the slider showed: the CLI writes to the active one
-    compare(JSON.stringify(Model.intentArgv({ verb: "control", name: "saturation", value: 100, camera: fhdId }, cli, r)), "null",
-            "made for another camera")
-    compare(JSON.stringify(Model.intentArgv({ verb: "control", name: "saturation", value: 100 }, cli, r)), "null", "no camera recorded")
-    compare(JSON.stringify(Model.intentArgv({ verb: "reset-controls", camera: fhdId }, cli, r)), "null", "a reset for another camera")
-    compare(JSON.stringify(Model.intentArgv({ verb: "reset-controls" }, cli, r)), "null")
-    var switched = Model.reduce(r, line({ v: 1, type: "controls", camera: fhdId, controls: [controlObj("saturation", {})] })).record
-    compare(JSON.stringify(Model.intentArgv({ verb: "control", name: "saturation", value: 100, camera: brioId }, cli, switched)), "null",
-            "queued for the old camera, refused once the controls are another's")
-    // re-checked when they run: an old daemon, a CLI without the field, unavailable
-    var olds = [snap(rev6({ interface_revision: 5 })), snap({}), snap(rev6({ camera_controls: null })), Model.withLink("not-running")]
-    for (var i = 0; i < olds.length; i++) {
-      compare(JSON.stringify(Model.intentArgv({ verb: "control", name: "brightness", value: 128, camera: olds[i].controlsCameraId }, cli, olds[i])), "null", "control " + i)
-      compare(JSON.stringify(Model.intentArgv({ verb: "reset-controls", camera: olds[i].controlsCameraId }, cli, olds[i])), "null", "reset " + i)
+  // The groups as settings_group lines: at most `per` settings a line.
+  function setLines(groups, o) {
+    var opt = merged({ rev: 5, serial: 2, camera: brioId, per: 4 }, o || {})
+    var raw = []
+    for (var g = 0; g < groups.length; g++) {
+      var parts = Math.max(1, Math.ceil(groups[g].settings.length / opt.per))
+      for (var p = 0; p < parts; p++)
+        raw.push({ v: 1, type: "settings_group", schema: 1, rev: opt.rev, serial: opt.serial, camera: opt.camera, part: p + 1, parts: parts,
+                   group: { id: groups[g].id, label: groups[g].label, settings: groups[g].settings.slice(p * opt.per, (p + 1) * opt.per) } })
     }
-    // the argv builder itself: a whitelisted name and an integer only
-    compare(JSON.stringify(Model.controlArgv(cli, "brightness", 1.5)), "null")
-    compare(JSON.stringify(Model.controlArgv(cli, "brightness", 1e21)), "null", "never an exponent")
-    compare(JSON.stringify(Model.controlArgv(cli, "zoom", 1)), "null")
-    compare(JSON.stringify(Model.resetControlsArgv("")), "null")
+    for (var i = 0; i < raw.length; i++) { raw[i].index = i; raw[i].count = raw.length }
+    return raw
+  }
+  function rev7(o) { return merged({ interface_revision: 7, settings_schema: 1, settings_revision: 5 }, o || {}) }
+  function feedAll(r, lines) {
+    var res = { record: r, outcome: "" }
+    for (var i = 0; i < lines.length; i++) res = Model.reduce(res.record, line(lines[i]))
+    return res
+  }
+  function brio(o) { return feedAll(snap(rev7(o)), setLines(brioGroups())).record }
+  function deltaLine(changes, o) {
+    return merged({ v: 1, type: "settings_delta", schema: 1, rev: 6, serial: 2, camera: brioId, changes: changes }, o || {})
+  }
+  function rowIds(set) {
+    var out = []
+    for (var g = 0; g < set.groups.length; g++) out.push(set.groups[g].id + ":" + set.groups[g].rows.length)
+    return JSON.stringify(out)
+  }
+  function groupsOf(n, perGroup) {
+    var out = []
+    for (var g = 0; g < n; g++) {
+      var settings = []
+      for (var s = 0; s < perGroup; s++) settings.push(intS("camera.g" + g + ".s" + s, "S" + s))
+      out.push({ id: "g" + g, label: "Group " + g, settings: settings })
+    }
+    return out
   }
 
-  // A drag never queues a process per move: one queued write per control.
-  function test_intent_queue_coalesces_controls() {
+  // A set is committed once every line of it has arrived, whatever their
+  // order; the parts of a group are joined.
+  function test_settings_set_assembled_across_lines() {
+    var lines = setLines(brioGroups())
+    compare(lines.length, 7, "image and exposure and focus are cut in two parts at 4 a line")
+    var r = snap(rev7({}))
+    compare(r.settings, null)
+    for (var i = 0; i < lines.length - 1; i++) {
+      var res = Model.reduce(r, line(lines[i]))
+      compare(res.outcome, "settings_group", "part " + i)
+      compare(res.record.settings, null, "nothing committed before the last line")
+      r = res.record
+    }
+    var last = Model.reduce(r, line(lines[lines.length - 1]))
+    compare(last.outcome, "settings")
+    var set = last.record.settings
+    compare(rowIds(set), JSON.stringify(["image:5", "white_balance:2", "exposure:5", "focus:6"]))
+    compare(set.rev, 5)
+    compare(set.serial, 2)
+    compare(set.camera, brioId)
+    compare(last.record.settingsAssembly, null)
+    compare(set.groups[3].label, "Focus & zoom", "an & stays in a settings label")
+    compare(set.groups[0].rows.map(function(e) { return e.id.split(".")[2] }).join(","),
+            "brightness,contrast,saturation,sharpness,backlight_compensation", "the two parts of Image joined, in order")
+  }
+
+  function test_settings_set_order_and_fields() {
+    var lines = setLines(brioGroups())
+    var r = feedAll(snap(rev7({})), lines.slice().reverse()).record
+    compare(rowIds(r.settings), JSON.stringify(["image:5", "white_balance:2", "exposure:5", "focus:6"]),
+            "lines arriving in reverse: the order is the lines' index, not their arrival")
+    compare(r.settings.groups[0].rows[4].id, "camera.image.backlight_compensation")
+  }
+
+  function test_settings_set_rows() {
+    var r = brio()
+    var t = Model.findSetting(r, "camera.white_balance.white_balance_temperature")
+    compare(t.type, "int")
+    compare(t.enabled, false)
+    compare(t.reason, "Turn off automatic white balance to change this")
+    compare(t.unit, "K")
+    compare(t.value, 2975)
+    compare(t.min + ".." + t.max + "/" + t.step, "2000..7500/1")
+    var fov = Model.findSetting(r, "camera.focus.field_of_view")
+    compare(JSON.stringify(fov.options), JSON.stringify([{ value: "90", label: "90°" }, { value: "78", label: "78°" }, { value: "65", label: "65°" }]))
+    compare(fov.value, "65")
+    compare(fov.defaultValue, "90")
+    var keep = Model.findSetting(r, "camera.exposure.keep_framerate")
+    compare(keep.value, false)
+    compare(keep.reason, "", "no reason while enabled")
+    compare(Model.findSetting(r, "camera.image.nope"), null)
+    compare(Model.findSetting(r, 7), null)
+    compare(Model.findSetting(snap(rev7({})), "camera.image.brightness"), null)
+  }
+
+  // A line of another rev, serial, camera or count starts a new set; the
+  // half-assembled one is dropped, never committed.
+  function test_settings_half_set_dropped() {
+    var old = setLines(brioGroups(), { rev: 5 })
+    var fresh = setLines(brioGroups(), { rev: 6 })
+    var r = feedAll(snap(rev7({})), old.slice(0, 3)).record
+    compare(r.settingsAssembly.received, 3)
+    r = Model.reduce(r, line(fresh[0])).record
+    compare(r.settingsAssembly.rev, 6, "a line of another rev starts over")
+    compare(r.settingsAssembly.received, 1)
+    r = feedAll(r, old.slice(3)).record
+    compare(r.settings, null, "the rest of the old set never completes it")
+    r = feedAll(r, fresh).record
+    compare(r.settings.rev, 6)
+    // another serial, another camera, another count: each starts over too
+    var other = [setLines(brioGroups(), { serial: 3 })[0], setLines(brioGroups(), { camera: fhdId })[0], setLines(brioGroups(), { per: 8 })[0]]
+    for (var i = 0; i < other.length; i++) {
+      var a = feedAll(snap(rev7({})), old.slice(0, 2)).record
+      a = Model.reduce(a, line(other[i])).record
+      compare(a.settingsAssembly.received, 1, "starts over " + i)
+    }
+    // a repeated index is ignored, the set still completes with its own lines
+    var dup = feedAll(snap(rev7({})), [old[0], old[0], old[0]])
+    compare(dup.outcome, "ignored")
+    compare(dup.record.settingsAssembly.received, 1)
+    compare(feedAll(dup.record, old.slice(1)).record.settings.rev, 5)
+    // nothing before a snapshot, nothing from another schema
+    compare(Model.reduce(Model.withLink("not-running"), line(old[0])).outcome, "ignored")
+    compare(Model.reduce(snap(rev7({})), line(merged(old[0], { schema: 2 }))).outcome, "ignored")
+  }
+
+  // Deltas apply to the committed set of their serial, from its rev on.
+  function test_settings_delta() {
+    var r = brio()
+    var res = Model.reduce(r, line(deltaLine([
+      { id: "camera.exposure.auto_exposure", value: "manual", stored: true, enabled: true, disabled_reason: "" },
+      { id: "camera.exposure.exposure_time_absolute", value: 156, stored: false, enabled: true, disabled_reason: "" }])))
+    compare(res.outcome, "settings_delta")
+    var after = res.record
+    compare(after.settings.rev, 6)
+    compare(Model.findSetting(after, "camera.exposure.auto_exposure").value, "manual")
+    compare(Model.findSetting(after, "camera.exposure.auto_exposure").stored, true)
+    var t = Model.findSetting(after, "camera.exposure.exposure_time_absolute")
+    compare(t.enabled, true, "the manual mode enabled it")
+    compare(t.reason, "")
+    compare(t.value, 156)
+    compare(Model.findSetting(r, "camera.exposure.exposure_time_absolute").enabled, false, "the old record is not modified")
+    // the second line of one change set (same rev) applies; an older rev does not
+    var same = Model.reduce(after, line(deltaLine([{ id: "camera.image.gain", value: 1 }, { id: "camera.exposure.gain", value: 9, stored: true, enabled: true, disabled_reason: "" }])))
+    compare(same.outcome, "settings_delta")
+    compare(Model.findSetting(same.record, "camera.exposure.gain").value, 9)
+    compare(Model.reduce(after, line(deltaLine([{ id: "camera.exposure.gain", value: 3 }], { rev: 5 }))).outcome, "ignored", "an older rev")
+    compare(Model.reduce(after, line(deltaLine([{ id: "camera.exposure.gain", value: 3 }], { rev: 9, serial: 3 }))).outcome, "ignored", "another serial")
+    compare(Model.reduce(after, line(deltaLine([{ id: "camera.exposure.gain", value: 3 }], { rev: 9, camera: fhdId }))).outcome, "ignored", "another camera")
+    compare(Model.reduce(after, line(deltaLine([{ id: "camera.exposure.gain", value: 3 }], { rev: 9, schema: 2 }))).outcome, "ignored", "another schema")
+    compare(Model.reduce(snap(rev7({})), line(deltaLine([]))).outcome, "ignored", "no set committed")
+    compare(Model.reduce(after, line(deltaLine([], { rev: 0 }))).outcome, "ignored")
+    // a gap in rev still applies (the CLI re-emits the set after a gap)
+    compare(Model.reduce(after, line(deltaLine([], { rev: 40 }))).record.settings.rev, 40)
+    // mistyped keys keep the row's value; an int is clamped; an enum outside its options reads ""
+    var odd = Model.reduce(same.record, line(deltaLine([
+      { id: "camera.exposure.gain", value: "9", stored: "yes", enabled: 1 },
+      { id: "camera.image.brightness", value: 9999 },
+      { id: "camera.focus.field_of_view", value: "120" },
+      { id: "camera.focus.focus_automatic_continuous", value: false, stored: true, enabled: true },
+      { id: "camera.focus.focus_absolute", enabled: true, disabled_reason: "x" },
+      { id: "camera.focus.zoom_absolute", enabled: false, disabled_reason: "<b>Busy</b> & " + new Array(200).join("z") },
+      "junk", null, { id: "-1", value: 1 }]))).record
+    compare(Model.findSetting(odd, "camera.exposure.gain").value, 9)
+    compare(Model.findSetting(odd, "camera.exposure.gain").stored, true)
+    compare(Model.findSetting(odd, "camera.image.brightness").value, 255)
+    compare(Model.findSetting(odd, "camera.focus.field_of_view").value, "")
+    compare(Model.findSetting(odd, "camera.focus.focus_automatic_continuous").value, false)
+    compare(Model.findSetting(odd, "camera.focus.focus_absolute").reason, "", "enabled: no reason")
+    var z = Model.findSetting(odd, "camera.focus.zoom_absolute")
+    compare(z.enabled, false)
+    verify(!/[<>]/.test(z.reason) && z.reason.indexOf("bBusy/b & ") === 0 && z.reason.length <= Model.SETTING_REASON_CAP, z.reason)
+  }
+
+  // settings_clear and every new picture of the daemon drop the set.
+  function test_settings_clear_and_outage() {
+    var r = brio()
+    var half = Model.reduce(r, line(setLines(brioGroups(), { rev: 9 })[0])).record
+    var c = Model.reduce(half, line({ v: 1, type: "settings_clear", rev: 9, serial: 2 }))
+    compare(c.outcome, "settings_clear")
+    compare(c.record.settings, null)
+    compare(c.record.settingsAssembly, null)
+    compare(c.record.settingsCleared, true)
+    compare(Model.settingsView(c.record, {}, {}).hint, Model.SETTINGS_EMPTY_TEXT)
+    compare(Model.settingsView(Model.reduce(c.record, line(stateObject({ active_camera: "", interface_revision: 7 }))).record, {}, {}).visible,
+            false, "no camera at all: the camera list says so")
+    compare(Model.reduce(Model.withLink("not-running"), line({ v: 1, type: "settings_clear", rev: 1, serial: 1 })).outcome, "ignored")
+    var err = Model.reduce(r, line({ v: 1, type: "error", code: "daemon-not-running", error: "" })).record
+    compare(err.settings, null)
+    var again = Model.reduce(half, line(snapshotObject(rev7({})))).record
+    compare(again.settings, null, "a snapshot starts over: its set follows")
+    compare(again.settingsAssembly, null)
+    compare(again.settingsCleared, false)
+    var kept = Model.reduce(r, line(stateObject({ state: "active", interface_revision: 7 }))).record
+    compare(rowIds(kept.settings), rowIds(r.settings), "a state line keeps the set")
+    compare(Model.reduce(r, line({ v: 1, type: "controls", camera: brioId, controls: [] })).outcome, "ignored",
+            "the revision-6 controls line is ignored")
+  }
+
+  // interface_revision >= 7 and a settings_schema this plugin reads; the
+  // three hints otherwise.
+  function test_settings_capability_rule() {
+    var ok = brio()
+    verify(Model.settingsSupported(ok))
+    compare(Model.settingsMissingText(ok), "")
+    var cases = [
+      [{}, Model.CLI_NO_SETTINGS, "absent"],
+      [{ interface_revision: 7 }, Model.CLI_NO_SETTINGS, "absent behind a revision-7 daemon"],
+      [{ interface_revision: 6, settings_schema: null, settings_revision: null }, Model.DAEMON_NO_SETTINGS, "null"],
+      [{ interface_revision: 6, settings_schema: 1 }, Model.DAEMON_NO_SETTINGS, "a revision-6 daemon"],
+      [{ interface_revision: 7, settings_schema: null }, Model.DAEMON_NO_SETTINGS, "null at 7"],
+      [{ interface_revision: 7, settings_schema: "1" }, Model.DAEMON_NO_SETTINGS, "a string"],
+      [{ interface_revision: 7, settings_schema: 1.5 }, Model.DAEMON_NO_SETTINGS, "not whole"],
+      [{ interface_revision: 7, settings_schema: 0 }, Model.DAEMON_NO_SETTINGS, "0"],
+      [{ interface_revision: 7, settings_schema: 2 }, Model.PLUGIN_OLD_SETTINGS, "newer"],
+      [{ interface_revision: 8, settings_schema: 99 }, Model.PLUGIN_OLD_SETTINGS, "much newer"],
+      [{ interface_revision: "7", settings_schema: 1 }, Model.DAEMON_NO_SETTINGS, "a revision that is not a number"]
+    ]
+    for (var i = 0; i < cases.length; i++) {
+      var r = snap(cases[i][0])
+      verify(!Model.settingsSupported(r), cases[i][2])
+      compare(Model.settingsMissingText(r), cases[i][1], cases[i][2])
+      compare(Model.settingsView(r, {}, {}).hint, cases[i][1], cases[i][2])
+      compare(Model.settingsView(r, {}, {}).groups.length, 0)
+    }
+    verify(Model.settingsSupported(snap(rev7({ interface_revision: 9 }))), "a later revision")
+    var down = Model.reduce(ok, line(stateObject({ interface_revision: 6 }))).record
+    verify(!Model.settingsSupported(down), "a daemon restarted older")
+    compare(Model.settingsMissingText(Model.withLink("not-running")), "")
+    compare(Model.settingsView(Model.withLink("not-running"), {}, {}).visible, false)
+    compare(Model.DAEMON_NO_SETTINGS, "The daemon needs updating for camera settings (omarchy-broadcastd 0.22 or newer).")
+    compare(Model.PLUGIN_OLD_SETTINGS, "Update the plugin to show these camera settings.")
+    verify(Model.CLI_NO_SETTINGS.indexOf("omarchy-broadcast 0.22") !== -1 && Model.CLI_NO_SETTINGS.indexOf("CLI") !== -1)
+  }
+
+  function test_setting_entry_validation() {
+    var hostileIds = ["Camera.image.x", "camera", "camera.a.b.c.d", "camera.image.bright ness", "camera.image.x;rm -rf ~",
+                      "-1", "--camera=x", "camera..x", "camera.image.", ".camera.x", "camera.ímage.x", "camera.image.x\n",
+                      "camera.image." + new Array(40).join("a"), 5, null, ""]
+    for (var i = 0; i < hostileIds.length; i++)
+      compare(Model.settingEntry(intS(hostileIds[i], "X")), null, JSON.stringify(hostileIds[i]))
+    var at48 = "camera.image." + new Array(36).join("a")
+    compare(at48.length, 48)
+    compare(Model.settingEntry(intS(at48, "X")).id, at48, "48 bytes is fine")
+    compare(Model.settingEntry(intS(at48 + "a", "X")), null, "49 is not")
+    compare(Model.settingEntry(merged(intS("camera.image.x", "X"), { type: "float" })), null, "an unknown type is skipped")
+    compare(Model.settingEntry(merged(intS("camera.image.x", "X"), { type: "path" })), null)
+    compare(Model.settingEntry(null), null)
+    var badInt = [
+      ["NaN", { value: NaN }], ["Infinity", { max: Infinity }], ["-Infinity", { min: -Infinity }], ["float", { value: 1.5 }],
+      ["string", { value: "128" }], ["null min", { min: null }], ["max == min", { min: 5, max: 5, value: 5, "default": 5 }],
+      ["max < min", { min: 10, max: 5 }], ["step 0", { step: 0 }], ["negative step", { step: -1 }],
+      ["1e7 steps", { min: 0, max: 10000000, step: 1 }], ["beyond int32", { max: 4294967296 }], ["huge", { max: 1e300 }],
+      ["missing default", { "default": undefined }]
+    ]
+    for (var j = 0; j < badInt.length; j++)
+      compare(Model.settingEntry(intS("camera.image.x", "X", badInt[j][1])), null, badInt[j][0])
+    compare(Model.settingEntry(intS("camera.image.x", "X", { min: 0, max: 1000000, step: 1 })).max, 1000000, "1e6 steps is fine")
+    var clamped = Model.settingEntry(intS("camera.image.x", "X", { value: -1, "default": 300 }))
+    compare(clamped.value, 0, "-1 under min: clamped")
+    compare(clamped.defaultValue, 255)
+    var neg = Model.settingEntry(intS("camera.focus.pan_absolute", "Pan", { min: -36000, max: 36000, step: 3600, value: -14400 }))
+    compare(neg.value, -14400)
+    compare(Model.settingEntry(boolS("camera.x.y", "Y", { value: "true" })), null, "a switch needs a real boolean")
+    compare(Model.settingEntry(boolS("camera.x.y", "Y", { value: false, "default": "x" })).defaultValue, false)
+    // options: values of the grammar only, no repeats, at least one
+    var opts = [{ value: "-1", label: "Minus" }, { value: "A", label: "Upper" }, { value: new Array(34).join("a"), label: "Long" },
+                { value: "ok", label: "<img src=x> & OK" }, { value: "ok", label: "Again" }, { value: 3, label: "Number" },
+                "junk", { value: "empty", label: "<>" }]
+    var e = Model.settingEntry(enumS("camera.x.mode", "Mode", opts, { value: "ok", "default": "-1" }))
+    compare(JSON.stringify(e.options), JSON.stringify([{ value: "ok", label: "img src=x & OK" }, { value: "empty", label: "empty" }]),
+            "markup characters < and > removed, an & kept, an empty label is the value")
+    compare(e.value, "ok")
+    compare(e.defaultValue, "", "a default that is no option reads as none")
+    compare(Model.settingEntry(enumS("camera.x.mode", "Mode", [{ value: "A", label: "x" }])), null, "no valid option")
+    compare(Model.settingEntry(enumS("camera.x.mode", "Mode", [{ value: "a", label: "A" }], { value: "zzz" })).value, "")
+    // labels, reasons and units: sanitised and capped; an empty label is the id
+    var long = new Array(300).join("w")
+    var l = Model.settingEntry(intS("camera.image.x", "<b>" + long, { unit: "<u>" + long, enabled: "true", disabled_reason: "<i>&" + long }))
+    verify(!/[<>]/.test(l.label + l.unit + l.reason))
+    verify(l.label.length <= Model.SETTING_LABEL_CAP && l.unit.length <= Model.SETTING_UNIT_CAP && l.reason.length <= Model.SETTING_REASON_CAP)
+    compare(l.enabled, false, "enabled only for a real true")
+    compare(Model.settingEntry(intS("camera.image.x", "<>\u202e")).label, "camera.image.x")
+    // enabled_when is the daemon's business: an unknown op, or a condition on a
+    // skipped setting, changes nothing
+    var w = Model.settingEntry(intS("camera.image.x", "X", { enabled_when: [{ id: "camera.image.skipped", op: "xor", value: 1 }] }))
+    compare(w.enabled, true)
+    var g = Model.settingEntry(intS("camera.image.y", "Y", { enabled: false, disabled_reason: "Why", enabled_when: "junk" }))
+    compare(g.enabled + ":" + g.reason, "false:Why")
+  }
+
+  // A set with an unknown type keeps everything else; a condition pointing at
+  // the skipped setting does not change what the daemon says.
+  function test_settings_unknown_type_in_a_set() {
+    var groups = brioGroups()
+    groups[0].settings.splice(1, 0, merged(intS("camera.image.future", "Future"), { type: "colour" }))
+    groups[0].settings[2].enabled_when = [{ id: "camera.image.future", op: "eq", value: true }]
+    var r = feedAll(snap(rev7({})), setLines(groups)).record
+    compare(rowIds(r.settings), JSON.stringify(["image:5", "white_balance:2", "exposure:5", "focus:6"]))
+    compare(Model.findSetting(r, "camera.image.future"), null)
+    compare(Model.findSetting(r, "camera.image.contrast").enabled, true)
+    compare(Model.settingsView(r, {}, {}).groups[0].truncation, "", "a skipped type is no truncation")
+  }
+
+  function test_settings_caps() {
+    // 20 groups of 2: 16 shown, said so
+    var many = feedAll(snap(rev7({})), setLines(groupsOf(20, 2), { per: 2 })).record
+    compare(many.settings.groups.length, 16)
+    compare(many.settings.groupsTotal, 20)
+    var v = Model.settingsView(many, {}, {})
+    compare(v.truncation, "Showing 16 of 20 groups")
+    // a group of 20 settings: 16 shown
+    var big = feedAll(snap(rev7({})), setLines(groupsOf(1, 20), { per: 8 })).record
+    compare(big.settings.groups[0].rows.length, 16)
+    compare(Model.settingsView(big, null, {}).groups[0].truncation, "Showing 16 of 20 settings")
+    compare(Model.settingsView(big, "", {}).groups[0].truncation, "", "a closed group says nothing")
+    // 64 rows in all: 5 groups of 16 leave the fifth empty and the fourth full
+    var all = feedAll(snap(rev7({})), setLines(groupsOf(5, 16), { per: 8 })).record
+    var counts = all.settings.groups.map(function(g) { return g.rows.length })
+    compare(JSON.stringify(counts), JSON.stringify([16, 16, 16, 16, 0]))
+    for (var gi = 0; gi < 5; gi++) {
+      var view = Model.settingsView(all, "g" + gi, {})
+      compare(view.groups.length, 5, "a group cut to nothing by the row cap is drawn, to say so")
+      compare(view.rowCount, gi < 4 ? 16 : 0, "one group open: its rows only")
+      compare(Model.cursorStops(all, 0, false, "camera", view).filter(function(s) { return s.kind === "setting" }).length, view.rowCount,
+              "the keyboard walks exactly the rows drawn")
+      compare(view.groups[gi].truncation, gi < 4 ? "" : "Showing 0 of 16 settings")
+    }
+    // counts no v1 producer announces: never waited for
+    var l = setLines(brioGroups())[0]
+    var hostile = [{ count: 1e9 }, { count: 65 }, { count: 0 }, { count: -1 }, { count: 2.5 }, { index: 7, count: 7 },
+                   { index: -1 }, { parts: 65 }, { part: 0 }, { part: 3, parts: 2 }, { rev: 0 }, { rev: 4294967296 },
+                   { serial: "2" }, { camera: "" }, { camera: 7 }, { group: { id: "Image", label: "x", settings: [] } },
+                   { group: { id: "image", label: "x", settings: "x" } }, { group: null }]
+    // A bad group in a good envelope is kept as a refused group (it fills its
+    // place, so the rest of the set still commits; see
+    // test_settings_prototype_keys); a bad envelope is ignored.
+    for (var i = 0; i < hostile.length; i++) {
+      var res = Model.reduce(snap(rev7({})), line(merged(JSON.parse(JSON.stringify(l)), hostile[i])))
+      compare(res.outcome, hostile[i].group !== undefined ? "settings_group" : "ignored", JSON.stringify(hostile[i]))
+    }
+    // a huge settings or changes array: bounded work, only the first entries read
+    var junk = []
+    for (var k = 0; k < 200000; k++) junk.push("junk")
+    junk[3] = intS("camera.image.brightness", "Brightness")
+    junk[Model.SETTINGS_LINE_LOOK] = intS("camera.image.contrast", "Contrast")
+    var t0 = Date.now()
+    var huge = Model.applyMessage(snap(rev7({})), ({ v: 1, type: "settings_group", schema: 1, rev: 1, serial: 1, camera: brioId,
+                                                   index: 0, count: 1, part: 1, parts: 1, group: { id: "image", label: "Image", settings: junk } })).record
+    var changes = []
+    for (var c = 0; c < 200000; c++) changes.push({ id: "camera.image.brightness", value: c })
+    var d = Model.applyMessage(huge, deltaLine(changes, { rev: 1, serial: 1 })).record
+    var took = Date.now() - t0
+    compare(rowIds(huge.settings), JSON.stringify(["image:1"]), "the entry past the look cap is never read")
+    compare(Model.findSetting(d, "camera.image.brightness").value, Model.SETTINGS_LINE_LOOK - 1, "only the first changes are applied")
+    verify(took < 100, "took " + took + " ms")
+    compare(Model.SETTINGS_GROUP_CAP + Model.SETTINGS_PER_GROUP_CAP + Model.SETTING_OPTION_CAP + Model.SETTINGS_ROW_CAP, 112)
+    // options: 20 sent, 16 kept, said so on the row
+    var twenty = []
+    for (var o = 0; o < 20; o++) twenty.push({ value: "m" + o, label: "Item " + o })
+    var groups = [{ id: "other", label: "Other", settings: [enumS("camera.other.menu", "Menu", twenty)] }]
+    var menu = Model.settingsView(feedAll(snap(rev7({})), setLines(groups)).record, {}, {}).groups[0].rows[0]
+    compare(menu.options.length, 16)
+    compare(menu.optionsNote, "Showing 16 of 20 choices")
+    compare(menu.widget, "dropdown")
+  }
+
+  function test_setting_values() {
+    var r = brio()
+    var pan = Model.findSetting(r, "camera.focus.pan_absolute")
+    compare(Model.snapSetting(pan, 14000), 14400)
+    compare(Model.snapSetting(pan, 40000), null, "out of range")
+    compare(Model.clampSetting(pan, 40000), 36000)
+    compare(Model.clampSetting(pan, -1e9), -36000)
+    compare(Model.clampSetting(pan, NaN), null)
+    compare(Model.clampSetting(pan, "1"), null)
+    compare(Model.settingKeyStep(pan), 3600)
+    compare(Model.settingKeyStep(Model.findSetting(r, "camera.image.brightness")), 13)
+    compare(Model.settingNudge(pan, 14400, 1), 18000)
+    compare(Model.settingNudge(pan, 36000, 1), 36000)
+    compare(Model.settingNudge(pan, 14400, 0), null)
+    var mode = Model.findSetting(r, "camera.exposure.auto_exposure")
+    compare(Model.settingNudge(mode, "aperture_priority", -1), null, "a choice is never written by Left/Right")
+    compare(Model.settingNudge(mode, "", 1), null)
+    compare(Model.settingNudge(Model.findSetting(r, "camera.exposure.keep_framerate"), false, 1), null)
+    compare(Model.rowValue(mode, "manual"), "manual")
+    compare(Model.rowValue(mode, "shutter_priority"), null, "not an option of this camera")
+    compare(Model.rowValue(Model.findSetting(r, "camera.exposure.keep_framerate"), "true"), null)
+    compare(Model.rowValue(Model.findSetting(r, "camera.exposure.keep_framerate"), true), true)
+    compare(Model.rowValue(pan, 13000), 14400)
+    compare(Model.rowValue(null, 1), null)
+    compare(Model.settingValueText(Model.findSetting(r, "camera.exposure.exposure_time_absolute"), 1250), "1250 ×100 µs")
+    compare(Model.settingValueText(pan, -14400), "-14400")
+    compare(Model.settingValueText(mode, "manual"), "Manual")
+    compare(Model.settingValueText(mode, "x"), Model.UNKNOWN)
+    compare(Model.shownSettingValue(pan, { "camera.focus.pan_absolute": 0 }), 0)
+    compare(Model.shownSettingValue(pan, { "camera.focus.pan_absolute": 99999 }), 36000, "clamped")
+    compare(Model.shownSettingValue(pan, { "camera.focus.pan_absolute": "x" }), 14400)
+    compare(Model.shownSettingValue(mode, { "camera.exposure.auto_exposure": "manual" }), "manual")
+    compare(Model.shownSettingValue(pan, null), 14400)
+    // the widget: few short choices are buttons, else a dropdown
+    compare(Model.settingWidget(mode), "segmented")
+    compare(Model.settingWidget(Model.findSetting(r, "camera.exposure.power_line_frequency")), "segmented")
+    compare(Model.settingWidget(Model.findSetting(r, "camera.focus.field_of_view")), "segmented")
+    compare(Model.settingWidget(pan), "slider")
+    compare(Model.settingWidget(Model.findSetting(r, "camera.exposure.keep_framerate")), "switch")
+    compare(Model.settingWidget({ type: "enum", options: [{ label: "A very long first choice" }, { label: "And a second" }] }), "dropdown")
+    compare(Model.settingWidget({ type: "action" }), "action")
+  }
+
+  // Every write: `--camera=` of the set's camera, then `--`, then id and value,
+  // each its own argv element.
+  function test_settings_argv() {
+    var r = brio()
+    var argv = function(id, value, camera) {
+      return JSON.stringify(Model.intentArgv({ verb: "setting", id: id, value: value, camera: camera === undefined ? brioId : camera }, cli, r))
+    }
+    compare(argv("camera.image.brightness", 141), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.image.brightness", "141"]))
+    compare(argv("camera.focus.pan_absolute", -14400), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.focus.pan_absolute", "-14400"]),
+            "a negative value after --")
+    compare(argv("camera.focus.pan_absolute", -14000), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.focus.pan_absolute", "-14400"]),
+            "put on the grid")
+    compare(argv("camera.focus.pan_absolute", 99999), "null", "off range")
+    compare(argv("camera.exposure.keep_framerate", true), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.exposure.keep_framerate", "true"]))
+    compare(argv("camera.exposure.keep_framerate", false), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.exposure.keep_framerate", "false"]))
+    compare(argv("camera.exposure.keep_framerate", "true"), "null", "a string is no boolean")
+    compare(argv("camera.focus.field_of_view", "78"), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.focus.field_of_view", "78"]))
+    compare(argv("camera.focus.field_of_view", "120"), "null", "not an option of this setting")
+    compare(argv("camera.exposure.auto_exposure", "shutter_priority"), "null", "an option of the catalogue, not of this camera")
+    compare(argv("camera.focus.field_of_view", "--help"), "null")
+    compare(argv("camera.image.brightness", NaN), "null")
+    compare(argv("camera.image.brightness", 1e21), "null")
+    compare(argv("camera.image.brightness", "141"), "null")
+    compare(argv("camera.white_balance.white_balance_temperature", 3000), "null", "greyed: never sent")
+    compare(argv("camera.image.nope", 1), "null", "not in the set")
+    compare(argv("camera.image.brightness; rm -rf ~", 1), "null")
+    compare(argv("camera.image.brightness", 141, fhdId), "null", "made for another camera")
+    compare(argv("camera.image.brightness", 141, ""), "null", "no camera recorded")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "camera.image.brightness", value: 1, camera: brioId }, "omarchy-broadcast", r)), "null", "relative CLI")
+    compare(JSON.stringify(Model.intentArgv({ verb: "reset-settings", camera: brioId }, cli, r)), JSON.stringify([cli, "settings", "reset", "--camera=" + brioId]))
+    compare(JSON.stringify(Model.intentArgv({ verb: "reset-settings", camera: fhdId }, cli, r)), "null")
+    compare(JSON.stringify(Model.intentArgv({ verb: "reset-settings" }, cli, r)), "null")
+    // the set moved to another camera: what was made for the Brio never runs
+    var fhd = feedAll(r, setLines(brioGroups(), { camera: fhdId, rev: 9 })).record
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "camera.image.brightness", value: 1, camera: brioId }, cli, fhd)), "null")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "camera.image.brightness", value: 1, camera: fhdId }, cli, fhd)),
+            JSON.stringify([cli, "settings", "set", "--camera=" + fhdId, "--", "camera.image.brightness", "1"]))
+    // re-checked when they run: an old daemon, a cleared set, unavailable
+    var olds = [Model.reduce(r, line(stateObject({ interface_revision: 6 }))).record,
+                Model.reduce(r, line({ v: 1, type: "settings_clear", rev: 9, serial: 2 })).record, Model.withLink("not-running")]
+    for (var i = 0; i < olds.length; i++) {
+      compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "camera.image.brightness", value: 1, camera: brioId }, cli, olds[i])), "null", "write " + i)
+      compare(JSON.stringify(Model.intentArgv({ verb: "reset-settings", camera: brioId }, cli, olds[i])), "null", "reset " + i)
+    }
+    // the builders: the camera validated as selections are, the id by its
+    // grammar, the value by its words
+    compare(JSON.stringify(Model.settingArgv(cli, "next", "camera.image.x", "1")), JSON.stringify([cli, "settings", "set", "--camera=next", "--", "camera.image.x", "1"]),
+            "a camera named next is fine in --camera=")
+    compare(Model.settingArgv(cli, "", "camera.image.x", "1"), null)
+    compare(Model.settingArgv(cli, "usb-cam…", "camera.image.x", "1"), null, "a clipped id")
+    compare(Model.settingArgv(cli, new Array(98).join("c"), "camera.image.x", "1"), null, "over the id cap")
+    compare(Model.settingArgv(cli, brioId, "-1", "1"), null)
+    compare(Model.settingArgv(cli, brioId, "camera.image.x", "1.5"), null)
+    compare(Model.settingArgv(cli, brioId, "camera.image.x", "1 2"), null)
+    compare(Model.settingArgv(cli, brioId, "camera.image.x", "-"), null)
+    compare(Model.settingArgv(cli, brioId, "camera.image.x", "--help"), null)
+    compare(Model.settingArgv(cli, brioId, "camera.image.x", ""), null)
+    compare(Model.settingArgv(cli, brioId, "camera.image.x", 1), null)
+    compare(Model.resetSettingsArgv(cli, ""), null)
+    compare(Model.resetSettingsArgv("", brioId), null)
+    // an action: only true
+    var act = { id: "camera.focus.pan_reset", type: "action", enabled: true }
+    compare(Model.settingArgvValue(act, true), "true")
+    compare(Model.settingArgvValue(act, "true"), null)
+    compare(Model.settingArgvValue(act, false), null)
+  }
+
+  // A drag never queues a process per move: one queued write per setting id.
+  function test_intent_queue_coalesces_settings() {
     var q = []
     var add = function(i) { q = Model.enqueueIntent(q, i) }
     var show = function() {
-      return JSON.stringify(q.map(function(i) { return i.verb + (i.name ? ":" + i.name + "=" + i.value : "") + (i.id ? ":" + i.id : "") }))
+      return JSON.stringify(q.map(function(i) { return i.verb + (i.verb === "setting" ? ":" + i.id + "=" + i.value : "") }))
     }
-    for (var v = 0; v < 100; v++) add({ verb: "control", name: "brightness", value: v })
-    compare(show(), JSON.stringify(["control:brightness=99"]))
-    add({ verb: "control", name: "contrast", value: 5 })
-    add({ verb: "control", name: "brightness", value: 7 })
-    compare(show(), JSON.stringify(["control:contrast=5", "control:brightness=7"]), "the newer write goes last")
+    for (var v = 0; v < 100; v++) add({ verb: "setting", id: "camera.image.brightness", value: v })
+    compare(show(), JSON.stringify(["setting:camera.image.brightness=99"]))
+    add({ verb: "setting", id: "camera.image.contrast", value: 5 })
+    add({ verb: "setting", id: "camera.image.brightness", value: 7 })
+    compare(show(), JSON.stringify(["setting:camera.image.contrast=5", "setting:camera.image.brightness=7"]), "the newer write goes last")
     add({ verb: "select", id: "a" })
     add({ verb: "next" })
-    compare(show(), JSON.stringify(["control:contrast=5", "control:brightness=7", "next"]), "the latest other ask wins")
-    add({ verb: "reset-controls" })
-    compare(show(), JSON.stringify(["next", "reset-controls"]), "a reset supersedes the queued writes")
-    add({ verb: "control", name: "saturation", value: 3 })
-    add({ verb: "reset-controls" })
-    compare(show(), JSON.stringify(["next", "reset-controls"]))
-    add({ verb: "control", name: "saturation", value: 4 })
-    compare(show(), JSON.stringify(["next", "reset-controls", "control:saturation=4"]), "a write after a reset stays after it")
+    compare(show(), JSON.stringify(["setting:camera.image.contrast=5", "setting:camera.image.brightness=7", "next"]), "the latest other ask wins")
+    add({ verb: "reset-settings" })
+    compare(show(), JSON.stringify(["next", "reset-settings"]), "a reset supersedes the queued writes")
+    add({ verb: "setting", id: "camera.image.saturation", value: 4 })
+    compare(show(), JSON.stringify(["next", "reset-settings", "setting:camera.image.saturation=4"]), "a write after a reset stays after it")
     var input = q
     Model.enqueueIntent(input, { verb: "enable", on: true })
     compare(input.length, 3, "the queue given is not modified")
-    compare(Model.enqueueIntent(q, null).length, 3)
-    compare(Model.enqueueIntent("junk", { verb: "next" }).length, 1)
-    // bounded whatever arrives
     var many = []
-    for (var i = 0; i < 1000; i++) many = Model.enqueueIntent(many, { verb: "control", name: "n" + i, value: 1 })
-    verify(many.length <= Model.INTENT_QUEUE_CAP, many.length)
-    verify(Model.queuedControl([{ verb: "control", name: "contrast", value: 1 }], "contrast"))
-    verify(!Model.queuedControl([{ verb: "reset-controls" }], "contrast"))
-    verify(!Model.queuedControl(null, "contrast"))
+    for (var i = 0; i < 1000; i++) many = Model.enqueueIntent(many, { verb: "setting", id: "camera.image.s" + i, value: 1 })
+    compare(many.length, Model.SETTING_QUEUE_CAP, "the cap counts ids")
+    compare(many[0].id, "camera.image.s0", "nothing queued is evicted: the later writes are refused")
+    verify(Model.queuedSetting([{ verb: "setting", id: "camera.image.contrast", value: 1 }], "camera.image.contrast"))
+    verify(!Model.queuedSetting([{ verb: "reset-settings" }], "camera.image.contrast"))
+    verify(!Model.queuedSetting(null, "camera.image.contrast"))
+    // on/off goes first and only a non-setting command holds the toggle
+    var w = { verb: "setting", id: "camera.image.brightness", value: 1 }
+    var o = Model.enqueueIntent([w, { verb: "setting", id: "camera.image.contrast", value: 2 }], { verb: "enable", on: false })
+    compare(JSON.stringify(o.map(function(i) { return i.verb })), JSON.stringify(["enable", "setting", "setting"]))
+    verify(!Model.toggleBlocked(w, [w, { verb: "reset-settings" }]), "setting writes do not hold the switch")
+    verify(Model.toggleBlocked(w, [w, { verb: "enable", on: false }]))
+    verify(Model.toggleBlocked({ verb: "select", id: "x" }, []))
+    // a camera change drops the queued writes and resets, keeps the rest
+    var d = [w, { verb: "reset-settings" }, { verb: "next" }]
+    compare(JSON.stringify(Model.dropSettingIntents(d)), JSON.stringify([{ verb: "next" }]))
+    compare(d.length, 3)
+    compare(Model.dropSettingIntents(null).length, 0)
   }
 
-  // On/off never waits behind slider writes: it goes first, and only a
-  // non-control command holds the toggle.
-  function test_intent_queue_on_off_first() {
-    var q = []
-    q = Model.enqueueIntent(q, { verb: "control", name: "brightness", value: 1 })
-    q = Model.enqueueIntent(q, { verb: "control", name: "contrast", value: 2 })
-    q = Model.enqueueIntent(q, { verb: "enable", on: false })
-    compare(JSON.stringify(q.map(function(i) { return i.verb })), JSON.stringify(["enable", "control", "control"]), "ahead of the writes")
-    q = Model.enqueueIntent(q, { verb: "enable", on: true })
-    compare(JSON.stringify(q.map(function(i) { return i.verb + (i.on === undefined ? "" : ":" + i.on) })),
-            JSON.stringify(["enable:true", "control", "control"]), "the latest on/off wins")
-    q = Model.enqueueIntent(q, { verb: "next" })
-    compare(JSON.stringify(q.map(function(i) { return i.verb })), JSON.stringify(["control", "control", "next"]), "other asks keep their order")
-    var ctl = { verb: "control", name: "brightness", value: 1 }
-    verify(!Model.toggleBlocked(ctl, [ctl, { verb: "reset-controls" }]), "slider writes do not hold the switch")
-    verify(!Model.toggleBlocked(null, []))
-    verify(Model.toggleBlocked({ verb: "enable", on: true }, []), "an on/off result is pending")
-    verify(Model.toggleBlocked(ctl, [ctl, { verb: "enable", on: false }]), "an on/off is queued")
-    verify(Model.toggleBlocked(null, [{ verb: "select", id: "x" }]), "another ask is queued")
-    verify(!Model.toggleBlocked("junk", "junk"))
-  }
-
-  // A camera change drops the queued writes and resets, keeps the rest.
-  function test_drop_control_intents() {
-    var q = [{ verb: "control", name: "brightness", value: 1 }, { verb: "reset-controls" }, { verb: "next" }]
-    compare(JSON.stringify(Model.dropControlIntents(q)), JSON.stringify([{ verb: "next" }]))
-    compare(q.length, 3, "the queue given is not modified")
-    compare(Model.dropControlIntents(null).length, 0)
-    compare(Model.dropControlIntents([null, 3]).length, 0)
-  }
-
-  // A draft goes on the line its own write caused, never on an earlier
-  // write's late line.
-  function test_control_line_ownership() {
-    // write N armed at line 0 owns line 1; it ended OK before its line came
-    var markN = Model.controlLineMark(0, 0)
-    compare(markN, 0)
-    compare(Model.controlWriteEnd(true, 0, markN), "settle")
-    var due = markN + 1
-    // write N+1 armed before N's line arrived: it owns line 2, not 1
-    var markN1 = Model.controlLineMark(0, due)
+  // A draft goes on the change its own write caused, never on an earlier
+  // write's late one.
+  function test_setting_line_ownership_and_drafts() {
+    var b = "camera.image.brightness"
+    var markN = Model.settingLineMark(0, 0)
+    compare(Model.settingWriteEnd(true, 0, markN), "settle")
+    var markN1 = Model.settingLineMark(0, markN + 1)
     compare(markN1, 1)
-    // N's late line arrives while N+1 runs, then N+1 ends: not its line
-    compare(Model.controlWriteEnd(true, 1, markN1), "settle", "an earlier write's line does not settle it")
-    var settling = { brightness: { value: 200, line: markN1 + 1 } }
-    var after = Model.settleWritten({ brightness: 200 }, settling, 1)
-    compare(JSON.stringify(after.drafts), JSON.stringify({ brightness: 200 }), "the draft stays: no flicker back")
-    compare(JSON.stringify(after.settling), JSON.stringify(settling))
+    var settling = {}
+    settling[b] = { value: 200, line: markN1 + 1 }
+    var drafts = {}
+    drafts[b] = 200
+    var after = Model.settleWritten(drafts, settling, 1)
+    compare(after.drafts[b], 200, "an earlier write's change does not settle it")
     after = Model.settleWritten(after.drafts, after.settling, 2)
-    compare(JSON.stringify(after.drafts), "{}", "its own line settles it, whatever it reports")
+    compare(JSON.stringify(after.drafts), "{}", "its own change settles it, whatever it reports")
     compare(JSON.stringify(after.settling), "{}")
-    // its own line came before it ended: the draft goes at the end
-    compare(Model.controlWriteEnd(true, 2, markN1), "drop")
-    compare(Model.controlWriteEnd(false, 0, 0), "drop", "a failed write")
-    compare(Model.controlWriteEnd("yes", 0, 0), "drop")
-    // the user moved on: the entry goes, the newer draft stays
-    after = Model.settleWritten({ brightness: 90 }, settling, 5)
-    compare(JSON.stringify(after.drafts), JSON.stringify({ brightness: 90 }))
+    compare(Model.settingWriteEnd(true, 2, markN1), "drop")
+    compare(Model.settingWriteEnd(false, 0, 0), "drop")
+    compare(Model.settingWriteEnd("yes", 0, 0), "drop")
+    drafts[b] = 90
+    after = Model.settleWritten(drafts, settling, 5)
+    compare(after.drafts[b], 90, "the user moved on: the newer draft stays")
     compare(JSON.stringify(after.settling), "{}")
     compare(JSON.stringify(Model.settleWritten(null, null, 1)), JSON.stringify({ drafts: {}, settling: {} }))
-    compare(Model.controlLineMark(5, 3), 5)
-    compare(Model.controlLineMark(NaN, "x"), 0)
+    compare(Model.settingLineMark(NaN, "x"), 0)
+    // drafts settle on the reported value, a row gone or greyed
+    var r = brio()
+    var d = {}
+    d["camera.image.brightness"] = 128
+    d["camera.image.contrast"] = 100
+    d["camera.white_balance.white_balance_temperature"] = 3000
+    d["camera.image.gone"] = 1
+    compare(JSON.stringify(Model.settleDrafts(d, r)), JSON.stringify({ "camera.image.contrast": 100 }))
+    compare(JSON.stringify(Model.settleDrafts(d, Model.withLink("not-running"))), "{}")
+    // withSetting: ids of the grammar, at most the row cap
+    compare(JSON.stringify(Model.withSetting({ "camera.image.a": 1, "junk key": 2 }, "camera.image.b", 3)), JSON.stringify({ "camera.image.a": 1, "camera.image.b": 3 }))
+    compare(JSON.stringify(Model.withSetting({ "camera.image.a": 1 }, "camera.image.a", undefined)), "{}")
+    compare(JSON.stringify(Model.withSetting({ "camera.image.a": 1 }, "-1", 3)), JSON.stringify({ "camera.image.a": 1 }))
+    var big = {}
+    for (var i = 0; i < 500; i++) big["camera.image.s" + i] = i
+    compare(Object.keys(Model.withSetting(big, "", undefined)).length, Model.SETTINGS_ROW_CAP)
   }
 
-  function test_control_drafts() {
-    var r = snap(rev6({}))
-    var b = Model.findControl(r, "brightness")
-    compare(Model.shownControlValue(b, {}), 128)
-    compare(Model.shownControlValue(b, { brightness: 200 }), 200, "the user's move until it is confirmed")
-    compare(Model.shownControlValue(b, { brightness: 999 }), 255, "clamped")
-    compare(Model.shownControlValue(b, { brightness: "x" }), 128)
-    compare(Model.shownControlValue(b, null), 128)
-    compare(Model.shownControlValue(null, {}), 0)
-    compare(JSON.stringify(Model.settleDrafts({ brightness: 128, saturation: 100 }, r)), JSON.stringify({ saturation: 100 }),
-            "confirmed by the reported value")
-    var noSat = Model.reduce(r, line({ v: 1, type: "controls", camera: brioId, controls: [controlObj("brightness", {})] })).record
-    compare(JSON.stringify(Model.settleDrafts({ brightness: 1, saturation: 100 }, noSat)), JSON.stringify({ brightness: 1 }),
-            "a control no longer offered")
-    compare(JSON.stringify(Model.settleDrafts({ brightness: 1 }, Model.withLink("not-running"))), "{}")
-    compare(JSON.stringify(Model.settleDrafts({ zoom: 1, brightness: 1 }, r)), JSON.stringify({ brightness: 1 }), "names of CONTROL_NAMES only")
-    compare(JSON.stringify(Model.withKey({ brightness: 1 }, "contrast", 2)), JSON.stringify({ brightness: 1, contrast: 2 }))
-    compare(JSON.stringify(Model.withKey({ brightness: 1 }, "brightness", undefined)), "{}")
-    compare(JSON.stringify(Model.withKey({ brightness: 1, junk: 3 }, "zoom", 2)), JSON.stringify({ brightness: 1 }))
+  // What the panel draws is what the keyboard walks: collapsed groups and
+  // capped rows are no stops.
+  function test_settings_view_and_stops() {
+    var r = brio({ cameras: [cameraObjects()[0]] })
+    var v = Model.settingsView(r, {}, {})
+    compare(v.visible, true)
+    compare(v.hint, "")
+    compare(v.note, Model.SETTINGS_IDLE_TEXT)
+    compare(v.reset, true)
+    compare(JSON.stringify(v.groups.map(function(g) { return g.id + ":" + g.expanded + ":" + g.rows.length })),
+            JSON.stringify(["image:true:5", "white_balance:false:0", "exposure:false:0", "focus:false:0"]), "Image open, the others closed")
+    compare(v.groups[0].glyph, Model.GLYPH_EXPANDED)
+    compare(v.groups[1].glyph, Model.GLYPH_COLLAPSED)
+    compare(v.rowCount, 5)
+    var kinds = function(view) {
+      return JSON.stringify(Model.cursorStops(r, 1, false, "camera", view).map(function(s) { return s.kind + s.index }))
+    }
+    compare(kinds(v), JSON.stringify(["switch-1", "tabs-1", "camera0", "reset-1", "group0", "setting0", "setting1", "setting2", "setting3", "setting4",
+                                      "group1", "group2", "group3"]), "Reset first: it is on the settings' title line")
+    var open = Model.settingsView(r, "exposure", {})
+    compare(kinds(open), JSON.stringify(["switch-1", "tabs-1", "camera0", "reset-1", "group0", "group1", "group2", "setting0", "setting1", "setting2",
+                                         "setting3", "setting4", "group3"]), "opening Exposure closed Image")
+    var t = Model.viewRow(open, 1)
+    compare(t.id, "camera.exposure.exposure_time_absolute")
+    compare(t.enabled + ":" + t.reason, "false:Set exposure to manual to change this", "a greyed row is drawn, with its reason, and is a stop")
+    compare(t.valueText, "1250 ×100 µs")
+    compare(Model.viewRow(open, 0).widget, "segmented")
+    compare(Model.viewRow(open, 3).widget, "switch")
+    compare(Model.viewRow(open, 9), null)
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", v)), JSON.stringify(["switch", "tabs", "effect"]),
+            "the settings are stops on the Camera tab only")
+    // a draft shows until it is confirmed
+    var d = {}
+    d["camera.image.brightness"] = 200
+    compare(Model.settingsView(r, {}, d).groups[0].rows[0].value, 200)
+    compare(Model.settingsView(r, {}, d).groups[0].rows[0].valueText, "200")
+    // live while the daemon has the camera open
+    compare(Model.settingsView(Model.reduce(r, line(stateObject({ state: "active", consumers: 1, interface_revision: 7 }))).record, {}, {}).note,
+            Model.SETTINGS_LIVE_TEXT)
+    compare(Model.settingsView(Model.reduce(r, line(stateObject({ state: "starting", consumers: 1, interface_revision: 7 }))).record, {}, {}).note,
+            Model.SETTINGS_LIVE_TEXT)
+    // a camera without an Image group opens its first group
+    var other = feedAll(snap(rev7({})), setLines([{ id: "other", label: "Other", settings: [intS("camera.other.x", "X")] },
+                                                   { id: "focus", label: "Focus", settings: [intS("camera.focus.y", "Y")] }])).record
+    compare(JSON.stringify(Model.settingsView(other, {}, {}).groups.map(function(g) { return g.expanded })), JSON.stringify([true, false]))
+    // the hint replaces everything: no stops
+    var old = snap({ cameras: [cameraObjects()[0]] })
+    compare(kinds(Model.settingsView(old, {}, {})), JSON.stringify(["switch-1", "tabs-1", "camera0"]))
+    compare(kinds(undefined), JSON.stringify(["switch-1", "tabs-1", "camera0"]))
+    verify(Model.stopHasIndex("group") && Model.stopHasIndex("setting") && Model.stopHasIndex("camera") && !Model.stopHasIndex("reset"))
+    var stops = Model.cursorStops(r, 1, true, "camera", v)
+    compare(Model.stopIndex(stops, "setting", 2), 9, "after the preview's two stops, the tab row, the camera row, Reset and the header")
+    compare(Model.stopIndex(stops, "group", 3), 14)
+    compare(Model.openGroupId({ image: true }, r.settings), "image", "anything but a group id or \"\" reads as the default")
+    compare(Model.openGroupId("nope", r.settings), "image", "a group the set does not have: the default")
+    compare(Model.openGroupId("focus", r.settings), "focus")
+    compare(Model.openGroupId("", r.settings), "", "the user closed it: none")
+    compare(Model.openGroupId("image", null), "")
   }
 
-  function test_controls_cursor_stops() {
-    var one = [cameraObjects()[0]]
-    var kinds = function(r) { return JSON.stringify(Model.cursorStops(r, 1, false, "camera").map(function(s) { return s.kind + s.index })) }
-    var r = snap(rev6({ cameras: one, denoise: false }))
-    compare(kinds(r), JSON.stringify(["switch-1", "tabs-1", "camera0", "control0", "control1", "control2", "control3", "reset-1"]))
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect")), JSON.stringify(["switch", "tabs", "effect", "denoise"]),
-            "the sliders are stops on the Camera tab only")
-    var noSharp = fiveControls().filter(function(c) { return c.name !== "sharpness" })
-    var lacking = snap(rev6({ cameras: one, camera_controls: { camera: brioId, controls: noSharp } }))
-    compare(kinds(lacking), JSON.stringify(["switch-1", "tabs-1", "camera0", "control0", "control1", "control2", "reset-1"]))
-    var noContrast = snap(rev6({ cameras: one, camera_controls: { camera: brioId, controls: [controlObj("sharpness", {}), controlObj("brightness", {})] } }))
-    compare(kinds(noContrast), JSON.stringify(["switch-1", "tabs-1", "camera0", "control0", "control3", "reset-1"]),
-            "index is the place in CONTROL_NAMES, as the rows are drawn")
-    compare(kinds(snap(rev6({ cameras: one, interface_revision: 5 }))), JSON.stringify(["switch-1", "tabs-1", "camera0"]), "old daemon")
-    compare(kinds(snap({ cameras: one })), JSON.stringify(["switch-1", "tabs-1", "camera0"]), "old CLI")
-    compare(kinds(snap(rev6({ cameras: one, camera_controls: { camera: "", controls: [] } }))), JSON.stringify(["switch-1", "tabs-1", "camera0"]))
-    var stops = Model.cursorStops(r, 1, true, "camera")
-    compare(stops[5].kind, "control", "after the preview's two stops, the tab row and the camera row")
-    compare(Model.stopIndex(stops, "control", 2), 7)
-    compare(Model.stopIndex(stops, "control", 9), -1)
-    compare(Model.stopIndex(stops, "reset", -1), 9)
-    verify(Model.stopHasIndex("control") && Model.stopHasIndex("camera") && !Model.stopHasIndex("reset"))
+  // The CLI's own bytes (crates/omarchy-broadcast/src/json.rs, the s1 sample
+  // lines): a set of two lines, then a delta that also greys an action.
+  readonly property var cliSetLines: [
+    '{"v":1,"type":"settings_group","schema":1,"rev":12,"serial":3,"camera":"usb-046d_0944","index":0,"count":2,"part":1,"parts":1,"group":{"id":"exposure","label":"Exposure","settings":[{"id":"camera.exposure.auto_exposure","label":"Exposure mode","type":"enum","value":"aperture_priority","default":"aperture_priority","stored":false,"enabled":true,"disabled_reason":"","enabled_when":[],"options":[{"value":"manual","label":"Manual"},{"value":"aperture_priority","label":"Auto"}],"hint":"segmented"},{"id":"camera.exposure.exposure_time_absolute","label":"Exposure time","type":"int","value":1250,"default":156,"stored":false,"enabled":false,"disabled_reason":"Set exposure to manual to change this","enabled_when":[{"id":"camera.exposure.auto_exposure","op":"in","value":["manual","shutter_priority"]}],"min":3,"max":2047,"step":1,"unit":"×100 µs"},{"id":"camera.exposure.keep_framerate","label":"Keep 30 fps in low light","type":"bool","value":false,"default":true,"stored":true,"enabled":true,"disabled_reason":"","enabled_when":[],"hint":"switch"}]}}',
+    '{"v":1,"type":"settings_group","schema":1,"rev":12,"serial":3,"camera":"usb-046d_0944","index":1,"count":2,"part":1,"parts":1,"group":{"id":"white_balance","label":"White balance","settings":[{"id":"camera.white_balance.do_white_balance","label":"Balance once","type":"action","stored":false,"enabled":true,"disabled_reason":"","enabled_when":[]}]}}'
+  ]
+  readonly property string cliDeltaLine: '{"v":1,"type":"settings_delta","schema":1,"rev":13,"serial":3,"camera":"usb-046d_0944","changes":[{"id":"camera.exposure.auto_exposure","value":"manual","stored":true,"enabled":true,"disabled_reason":""},{"id":"camera.exposure.exposure_time_absolute","value":1250,"stored":false,"enabled":true,"disabled_reason":""},{"id":"camera.white_balance.do_white_balance","stored":false,"enabled":false,"disabled_reason":"Not now"}]}'
+
+  function test_real_cli_lines() {
+    var r = Model.reduce(Model.emptyRecord("connecting"), line(snapshotObject(rev7({ active_camera: "usb-046d_0944" })))).record
+    verify(Model.settingsSupported(r))
+    var res = { record: r, outcome: "" }
+    for (var i = 0; i < cliSetLines.length; i++) res = Model.reduce(res.record, cliSetLines[i])
+    compare(res.outcome, "settings")
+    compare(rowIds(res.record.settings), JSON.stringify(["exposure:3", "white_balance:1"]))
+    var exp = Model.findSetting(res.record, "camera.exposure.exposure_time_absolute")
+    compare(exp.unit, "×100 µs")
+    compare(exp.enabled + ":" + exp.reason, "false:Set exposure to manual to change this")
+    compare(Model.findSetting(res.record, "camera.white_balance.do_white_balance").type, "action")
+    var d = Model.reduce(res.record, cliDeltaLine)
+    compare(d.outcome, "settings_delta")
+    compare(Model.findSetting(d.record, "camera.exposure.auto_exposure").value, "manual")
+    compare(Model.findSetting(d.record, "camera.exposure.exposure_time_absolute").enabled, true)
+    var act = Model.findSetting(d.record, "camera.white_balance.do_white_balance")
+    compare(act.enabled + ":" + act.reason, "false:Not now")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "camera.exposure.exposure_time_absolute", value: 3, camera: "usb-046d_0944" }, cli, d.record)),
+            JSON.stringify([cli, "settings", "set", "--camera=usb-046d_0944", "--", "camera.exposure.exposure_time_absolute", "3"]))
+    compare(Model.intentArgv({ verb: "setting", id: "camera.white_balance.do_white_balance", value: true, camera: "usb-046d_0944" }, cli, d.record), null,
+            "a greyed action does not run")
+    var half = Model.reduce(Model.reduce(r, cliSetLines[0]).record, cliDeltaLine)
+    compare(half.record.settings, null, "half a set: the delta has nothing to apply to")
   }
+
+  // F1/F2: a group id, an option value or a change id that names a member
+  // of Object.prototype is refused; nothing reaches the prototype, and the
+  // rest of the set commits and draws.
+  function test_settings_prototype_keys() {
+    var probes = ["total", "rows", "label", "id", "shown", "value"]
+    var clean = function(what) {
+      for (var p = 0; p < probes.length; p++) {
+        compare(({})[probes[p]], undefined, what + ": ({})." + probes[p])
+        compare(Object[probes[p]], undefined, what + ": Object." + probes[p])
+        verify(!Object.prototype.hasOwnProperty(probes[p]), what + ": Object.prototype." + probes[p])
+      }
+      var inherited = []
+      for (var k in {}) inherited.push(k)
+      compare(JSON.stringify(inherited), "[]", what + ": nothing enumerable on Object.prototype")
+    }
+    var bad = ["__proto__", "constructor", "prototype"]
+    for (var b = 0; b < bad.length; b++) {
+      var groups = brioGroups()
+      groups.splice(1, 0, { id: bad[b], label: "X", settings: [intS("camera.x.a", "A")] })
+      var res = feedAll(snap(rev7({})), setLines(groups))
+      compare(res.outcome, "settings", bad[b] + " as a group id: the rest of the set commits")
+      compare(rowIds(res.record.settings), JSON.stringify(["image:5", "white_balance:2", "exposure:5", "focus:6"]))
+      compare(Model.findSetting(res.record, "camera.x.a"), null)
+      compare(res.record.settings.groupsTotal, 5, "the refused group is counted, not drawn")
+      var v = Model.settingsView(res.record, null, {})
+      compare(v.truncation, "Showing 4 of 5 groups")
+      compare(v.groups[0].rows.length, 5, "Image still drawn")
+      clean(bad[b] + " group")
+      // as an option value: that option is skipped, the row stays
+      var g2 = brioGroups()
+      g2[2].settings[0].options = [{ value: bad[b], label: "P" }].concat(g2[2].settings[0].options)
+      var res2 = feedAll(snap(rev7({})), setLines(g2))
+      compare(res2.outcome, "settings", bad[b] + " as an option value: no throw, the set commits")
+      compare(JSON.stringify(Model.findSetting(res2.record, "camera.exposure.auto_exposure").options.map(function(o) { return o.value })),
+              JSON.stringify(["manual", "aperture_priority"]))
+      clean(bad[b] + " option")
+      // as a change id, and as a draft key
+      var d = Model.reduce(brio(), line(deltaLine([{ id: bad[b], value: 1 }, { id: "camera.image.brightness", value: 7 }])))
+      compare(d.outcome, "settings_delta")
+      compare(Model.findSetting(d.record, "camera.image.brightness").value, 7)
+      compare(Model.settingId(bad[b]), "")
+      compare(Model.optionValueOf(bad[b]), "")
+      compare(Model.groupIdOf(bad[b]), "")
+      compare(Model.ownValue({}, bad[b]), undefined, "an inherited member is no value")
+      clean(bad[b] + " delta")
+    }
+    var parsed = JSON.parse('{"__proto__": {"total": 1}, "constructor": 2, "camera.image.a": 3}')
+    var copy = Model.withSetting(parsed, "camera.image.b", 4)
+    compare(JSON.stringify(Object.keys(copy).sort()), JSON.stringify(["camera.image.a", "camera.image.b"]))
+    verify(Object.getPrototypeOf(copy) === Object.prototype, "the copy keeps its own prototype")
+    compare(copy.total, undefined)
+    compare(Model.ownValue(parsed, "camera.image.a"), 3)
+    clean("drafts")
+  }
+
+  // F3: a full queue refuses the next setting write (its draft waits, see
+  // Daemon.flushSettings); it never drops any other ask, and never evicts a
+  // queued write.
+  function test_intent_queue_cap_never_drops_an_ask() {
+    var q = []
+    for (var i = 0; i < Model.SETTING_QUEUE_CAP; i++) q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.s" + i, value: i })
+    compare(q.length, Model.SETTING_QUEUE_CAP)
+    var newWrite = { verb: "setting", id: "camera.image.new", value: 1 }
+    verify(!Model.queueTakes(q, newWrite), "a ninth id waits")
+    compare(JSON.stringify(Model.enqueueIntent(q, newWrite)), JSON.stringify(q), "refused: the queue as it was, nothing evicted")
+    verify(Model.queueTakes(q, { verb: "setting", id: "camera.image.s3", value: 9 }), "a write for a queued id replaces it")
+    compare(Model.enqueueIntent(q, { verb: "setting", id: "camera.image.s3", value: 9 }).length, Model.SETTING_QUEUE_CAP)
+    var asks = [{ verb: "enable", on: false }, { verb: "select", id: fhdId }, { verb: "next" }, { verb: "effect", effect: "blur" },
+                { verb: "denoise", on: true }]
+    for (var a = 0; a < asks.length; a++) {
+      verify(Model.queueTakes(q, asks[a]), asks[a].verb)
+      var out = Model.enqueueIntent(q, asks[a])
+      compare(out.length, Model.SETTING_QUEUE_CAP + 1, asks[a].verb + ": kept, and every write with it")
+      compare(out.filter(function(x) { return x === asks[a] }).length, 1, asks[a].verb + " survives a full queue")
+      if (asks[a].verb === "enable") compare(out[0], asks[a], "on/off goes first")
+    }
+    var reset = Model.enqueueIntent(q, { verb: "reset-settings", camera: brioId })
+    compare(JSON.stringify(reset.map(function(x) { return x.verb })), JSON.stringify(["reset-settings"]), "a reset supersedes the writes")
+    // the invariant over a long random run: at most one other ask, one reset
+    // and SETTING_QUEUE_CAP writes, and the latest other ask always queued
+    var seed = 7
+    var rnd = function(n) { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n }
+    var run = []
+    var lastOther = null
+    for (var step = 0; step < 3000; step++) {
+      var k = rnd(10)
+      var intent = k < 6 ? { verb: "setting", id: "camera.image.s" + rnd(12), value: step }
+        : (k < 7 ? { verb: "reset-settings", camera: brioId }
+          : (k < 8 ? { verb: "enable", on: rnd(2) === 1 } : (k < 9 ? { verb: "select", id: "x" + step } : { verb: "effect", effect: "none" })))
+      run = Model.enqueueIntent(run, intent)
+      if (!Model.isSettingIntent(intent)) lastOther = intent
+      if (rnd(7) === 0) {
+        if (run.length > 0 && run[0] === lastOther) lastOther = null
+        run = run.slice(1)          // a command ran
+      }
+      var writes = run.filter(function(x) { return x.verb === "setting" }).length
+      var resets = run.filter(function(x) { return x.verb === "reset-settings" }).length
+      var others = run.filter(function(x) { return !Model.isSettingIntent(x) })
+      verify(run.length <= Model.INTENT_QUEUE_CAP && writes <= Model.SETTING_QUEUE_CAP && resets <= 1 && others.length <= 1,
+             "step " + step + ": " + run.length + "/" + writes + "/" + resets + "/" + others.length)
+      if (lastOther !== null) verify(others.length === 1 && others[0] === lastOther, "step " + step + ": the latest other ask is queued")
+    }
+  }
+
+  // F5/F6: "Showing N of M" counts what is drawn; a setting of a known type
+  // that cannot be drawn is counted as not shown, and said so.
+  function test_settings_counts_match_what_is_drawn() {
+    var groups = groupsOf(20, 2)
+    groups[0].settings = [merged(intS("camera.g0.s0", "S"), { type: "colour" }), merged(intS("camera.g0.s1", "S"), { type: "colour" })]
+    var r = feedAll(snap(rev7({})), setLines(groups, { per: 2 })).record
+    var v = Model.settingsView(r, null, {})
+    compare(v.groups.length, 16)
+    compare(v.groups[0].id, "g1", "a group of unknown types only is not drawn")
+    compare(v.truncation, "Showing 16 of 19 groups", "and not counted: N is what is drawn")
+    var fixed = intS("camera.image.fixed", "Fixed", { min: 5, max: 5, value: 5, "default": 5 })
+    var fine = intS("camera.image.fine", "Fine", { min: 0, max: 10000000, step: 1 })
+    var g = [{ id: "image", label: "Image", settings: [intS("camera.image.a", "A"), fixed, fine] }]
+    var w = Model.settingsView(feedAll(snap(rev7({})), setLines(g)).record, null, {})
+    compare(w.rowCount, 1)
+    compare(w.groups[0].truncation, "Showing 1 of 3 settings", "a fixed int and one of too many steps are not shown, and said so")
+    var only = [{ id: "image", label: "Image", settings: [fixed] }, { id: "focus", label: "Focus", settings: [intS("camera.focus.f", "F")] }]
+    var o = feedAll(snap(rev7({ cameras: [] })), setLines(only)).record
+    var ov = Model.settingsView(o, null, {})
+    compare(ov.groups.length, 2, "a group of skipped rows only is drawn, to say so")
+    compare(ov.groups[0].truncation, "Showing 0 of 1 settings")
+    compare(ov.truncation, "")
+    compare(JSON.stringify(Model.cursorStops(o, 0, false, "camera", ov).map(function(s) { return s.kind + s.index })),
+            JSON.stringify(["switch-1", "tabs-1", "reset-1", "group0", "group1"]), "nothing to walk in it")
+  }
+
+  // F7: a full set older than the committed one (same serial and camera)
+  // never puts back what a delta moved on from.
+  function test_settings_older_set_ignored() {
+    var r = feedAll(snap(rev7({})), setLines(brioGroups(), { rev: 12 })).record
+    r = Model.reduce(r, line(deltaLine([{ id: "camera.exposure.auto_exposure", value: "manual" }], { rev: 13 }))).record
+    compare(r.settings.rev, 13)
+    var old = feedAll(r, setLines(brioGroups(), { rev: 12 }))
+    compare(old.outcome, "ignored")
+    compare(old.record.settings.rev, 13)
+    compare(Model.findSetting(old.record, "camera.exposure.auto_exposure").value, "manual")
+    compare(old.record.settingsAssembly, null, "nothing of it kept")
+    compare(feedAll(r, setLines(brioGroups(), { rev: 13 })).outcome, "settings", "the same rev again applies")
+    compare(feedAll(r, setLines(brioGroups(), { rev: 14 })).record.settings.rev, 14)
+    compare(feedAll(r, setLines(brioGroups(), { rev: 1, serial: 3 })).record.settings.rev, 1, "another serial is a new set")
+    compare(feedAll(r, setLines(brioGroups(), { rev: 1, camera: fhdId })).record.settings.camera, fhdId, "another camera too")
+  }
+
+  // M4: one group open at a time; M1: a row of buttons is walked by a chip
+  // cursor (the model's part; the panel's in the harness).
+  function test_settings_accordion_and_choice_cursor() {
+    var r = brio()
+    var set = r.settings
+    var opened = function(open) {
+      return JSON.stringify(Model.settingsView(r, open, {}).groups.map(function(g) { return g.expanded }))
+    }
+    compare(opened(null), JSON.stringify([true, false, false, false]), "Image open by default")
+    compare(Model.groupOpenAfter(null, set, "exposure", true), "exposure")
+    compare(opened(Model.groupOpenAfter(null, set, "exposure", true)), JSON.stringify([false, false, true, false]), "opening one closes the other")
+    compare(Model.groupOpenAfter("exposure", set, "exposure", false), "")
+    compare(opened(""), JSON.stringify([false, false, false, false]))
+    compare(Model.groupOpenAfter("exposure", set, "image", false), "exposure", "closing a closed group changes nothing")
+    compare(Model.groupOpenAfter(null, set, "image", false), "", "closing the default one")
+    var choices = [null, "", "image", "white_balance", "exposure", "focus", "nope", { image: true }, 3]
+    for (var i = 0; i < choices.length; i++)
+      verify(Model.settingsView(r, choices[i], {}).groups.filter(function(g) { return g.expanded }).length <= 1, JSON.stringify(choices[i]))
+    var v = Model.settingsView(r, "exposure", {})
+    var flicker = Model.viewRow(v, 4)
+    compare(flicker.widget, "segmented")
+    compare(flicker.selectedIndex, 2)
+    compare(Model.choiceCursorStart(flicker), 2, "lands on the current choice")
+    compare(Model.choiceCursorAfter(flicker, 2, 1), 3)
+    compare(Model.choiceCursorAfter(flicker, 3, 1), 3, "no wrap")
+    compare(Model.choiceCursorAfter(flicker, 0, -1), 0)
+    compare(Model.choiceCursorAfter(flicker, -1, -1), 1, "a cursor on no chip starts from the selected one")
+    compare(Model.choiceCursorAfter(null, 0, 1), -1)
+    compare(Model.choiceCursorStart(merged(flicker, { selectedIndex: -1 })), 0)
+    compare(Model.viewRow(v, 1).selectedIndex, -1, "not a choice")
+    compare(v.setKey, JSON.stringify([brioId, 2]))
+    var other = Model.settingsView(feedAll(snap(rev7({})), setLines(brioGroups(), { camera: fhdId })).record, "exposure", {})
+    verify(other.setKey !== v.setKey, "another camera's rows have another key, whatever their place")
+    // m7: a greyed row tells its value and why it is greyed
+    compare(Model.settingDescription(Model.viewRow(v, 1)), "Unavailable. 1250 ×100 µs. Set exposure to manual to change this")
+    compare(Model.settingDescription(Model.viewRow(v, 2)), "0")
+    compare(Model.settingDescription({ enabled: false, valueText: "", reason: "Not now" }), "Unavailable. Not now")
+    compare(Model.settingDescription(null), "")
+  }
+
   // ---- the panel tabs and the Status tab ---------------------------------------
 
   function test_panel_tab_value() {

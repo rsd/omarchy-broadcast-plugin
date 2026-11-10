@@ -33,17 +33,22 @@ widget would hide.
     Model.previewSource (the validated path); no video device and no D-Bus
     tool named anywhere; preview preferences written only from the panel's
     two user actions, through Model.settingsEntry;
-  - the camera image controls: a name reaches the command line only as a
-    word of Model.CONTROL_NAMES and a value only as a checked integer,
-    through an intent (Daemon.flushControls -> Model.controlArgv), and a
-    reset as the constant `controls reset`; each bound to the camera whose
-    controls the panel showed (Model.controlIntentBound) and dropped from
-    the queue when the controls change camera; queued writes coalesce through
-    Model.enqueueIntent; the write debounce is the Daemon's one one-shot
-    Timer, restarted only by a user's move, and the panel has no Timer; the
-    slider rows have the constant model Model.CONTROL_NAMES (a controls line
-    never rebuilds the row being dragged), use the shell's PanelSlider, and
-    the Flickable lets go of a held slider;
+  - the camera settings: a write reaches the command line only through an
+    intent re-checked when it runs (Daemon.flushSettings, runSettingAction,
+    resetSettings -> Model.settingIntentArgv / resetSettingsArgv): the
+    camera of the set the row showed in its own `--camera=` element, then
+    `--`, then the id (its grammar) and the value (one of the row's, as a
+    checked word); bound to that camera (Model.settingIntentBound) and
+    dropped from the queue when the set changes camera; queued writes
+    coalesce per id through Model.enqueueIntent; the write debounce is the
+    Daemon's one one-shot Timer, restarted only by a user's move, and the
+    panel has no Timer; the renderer (SettingsView.qml) names no setting
+    (no string literal of the id grammar in any QML file), its repeaters
+    have count models (a delta never rebuilds the row being dragged), it
+    uses the shell's PanelSlider and hands no daemon text to
+    PanelActionButton or PanelToolTip; both Flickables let go of a held
+    slider; the set's lines, options and changes are capped before they are
+    walked;
   - the bar clicks: right click turns the camera on or off through
     Model.rightClickAction (its guards, with Daemon.toggleBusy: slider writes
     never hold it), every other click opens and closes the panel;
@@ -179,8 +184,12 @@ for path, src in sources.items():
     for body in destruction_bodies(src):
         all_bodies.append(body)
         statements = [s.strip() for s in re.split(r"[;\n]", body) if s.strip()]
-        only_detach = all(re.fullmatch(r"Daemon\.detach\(\s*root\s*\)|Preview\.release\(\s*root\s*\)", s)
-                          for s in statements)
+        # SettingsView's slider gives back the panel's held count when it
+        # is destroyed mid-drag: a registration handed back, nothing stopped.
+        allowed = r"Daemon\.detach\(\s*root\s*\)|Preview\.release\(\s*root\s*\)"
+        if path.name == "SettingsView.qml":
+            allowed += r"|if \(dragging\) root\.heldChanged\(-1\)"
+        only_detach = all(re.fullmatch(allowed, s) for s in statements)
         check(f"{path.name}: onDestruction only unregisters", only_detach and statements != [], body.strip())
         for bad in ("running", "stop", "\"off\"", "bar.run", "pkill", "kill", "signal("):
             check(f"{path.name}: onDestruction has no {bad}", bad not in body, body.strip())
@@ -246,7 +255,7 @@ check("queued commands are intents re-checked when armed",
       "pendingIntents" in daemon and "pendingArgv" not in daemon and "Model.intentArgv(intent, cliPath, record)" in block(daemon, "function armCommand"))
 check("the queue changes only through Model.enqueueIntent (coalescing) and flushPending",
       re.findall(r"pendingIntents\s*=\s*([^\n]*)", daemon)
-      == ["Model.dropControlIntents(pendingIntents)", "Model.enqueueIntent(pendingIntents, intent)", "pendingIntents.slice(1)"]
+      == ["Model.dropSettingIntents(pendingIntents)", "Model.enqueueIntent(pendingIntents, intent)", "pendingIntents.slice(1)"]
       and ".push(" not in block(daemon, "function request"), str(re.findall(r"pendingIntents\s*=\s*([^\n]*)", daemon)))
 
 panel = sources[PLUGIN / "BroadcastPanel.qml"]
@@ -291,61 +300,94 @@ check("the card is 520 wide and as tall as its content (the screen is the only c
 check("no stale reference to check-source.sh (comments included)",
       all("check-source.sh" not in p.read_text(encoding="utf-8") for p in list(everything) + [PLUGIN / "manifest.json"]))
 
-# ---- camera image controls ---------------------------------------------------
-check("controlArgv only passes a word of Model.CONTROL_NAMES and a checked integer",
-      re.search(r'function controlArgv\(cli, name, value\)\s*\{\s*if \(!cliUsable\(cli\) \|\| CONTROL_NAMES\.indexOf\(name\) < 0 \|\| controlInt\(value\) === null\) return null\s*'
-                r'return \[cli, "controls", "set", name, String\(value\)\]', model) is not None
-      and 'var CONTROL_NAMES = ["brightness", "contrast", "saturation", "sharpness"]' in model)
-check("a reset is the constant `controls reset`",
-      re.search(r'function resetControlsArgv\(cli\)\s*\{\s*return cliUsable\(cli\) \? \[cli, "controls", "reset"\] : null\s*\}', model) is not None)
-check("control intents run only while the daemon offers the control, on its grid",
-      'case "control": return controlIntentBound(intent, record) ? controlIntentArgv(cli, record, intent.name, intent.value) : null' in model
-      and 'case "reset-controls": return controlsSupported(record) && controlIntentBound(intent, record) ? resetControlsArgv(cli) : null' in model
-      and "intent.camera === record.controlsCameraId" in block(model, "function controlIntentBound")
-      and "var v = snapControl(findControl(record, name), value)" in block(model, "function controlIntentArgv"))
-check("a camera change drops the queued control writes; the change is seen on the raw id",
-      "var otherCamera = record.controlsCameraId !== camera" in block(daemon, "function ingest")
-      and "if (otherCamera) dropQueuedControls()" in block(daemon, "function ingest")
-      and "var camera = record.controlsCameraId" in block(daemon, "function ingest"))
-check("Daemon requests controls only as intents from flushControls and resetControls",
-      re.findall(r'request\(\{ verb: "(control|reset-controls)"[^)]*\)', daemon) == ["control", "reset-controls"]
-      and 'request({ verb: "control", name: name, value: v, camera: record.controlsCameraId })' in block(daemon, "function flushControls")
-      and 'request({ verb: "reset-controls", camera: record.controlsCameraId })' in block(daemon, "function resetControls"))
-check("flushControls walks only Model.CONTROL_NAMES",
-      "for (var i = 0; i < Model.CONTROL_NAMES.length; i++)" in block(daemon, "function flushControls"))
+# ---- camera settings ----------------------------------------------------------
+settings_view = sources[PLUGIN / "SettingsView.qml"]
+check("settingArgv: the camera in --camera=, then --, then the id and the value, each checked",
+      re.search(r'function settingArgv\(cli, camera, id, word\)\s*\{\s*var cam = selectableId\(camera\)\s*'
+                r'if \(!cliUsable\(cli\) \|\| cam === "" \|\| settingId\(id\) === "" \|\| typeof word !== "string" \|\| !SETTING_VALUE_RE\.test\(word\)\)\s*'
+                r'return null\s*return \[cli, "settings", "set", "--camera=" \+ cam, "--", id, word\]', model) is not None
+      and 'var SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[a-z0-9_]{1,32})$/' in model
+      and 'var SETTING_ID_RE = /^[a-z0-9]+(\\.[a-z0-9_]+){1,3}$/' in model)
+check("a reset is the constant `settings reset` with the checked camera",
+      re.search(r'function resetSettingsArgv\(cli, camera\)\s*\{\s*var cam = selectableId\(camera\)\s*'
+                r'return cliUsable\(cli\) && cam !== "" \? \[cli, "settings", "reset", "--camera=" \+ cam\] : null\s*\}', model) is not None)
+check("a value is written only as a word of its row's type (Model.settingArgvValue)",
+      all(t in block(model, "function settingArgvValue") for t in (
+          'var v = settingInt(snapSetting(row, value))', 'return v === null ? null : String(v)',
+          'return typeof value === "boolean" ? (value ? "true" : "false") : null',
+          'return typeof value === "string" && optionIndex(row.options, value) >= 0 ? value : null',
+          'return value === true ? "true" : null')))
+check("setting intents run only while offered, bound to the set's camera, on an enabled row",
+      'case "setting": return settingIntentArgv(cli, record, intent)' in model
+      and 'case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null' in model
+      and "intent.camera === record.settings.camera" in block(model, "function settingIntentBound")
+      and all(t in block(model, "function settingIntentArgv") for t in (
+          "if (!settingsSupported(record) || !settingIntentBound(intent, record)) return null",
+          "if (!row || !row.enabled) return null", "var word = settingArgvValue(row, intent.value)",
+          "settingArgv(cli, record.settings.camera, row.id, word)")))
+check("a change of the set's camera drops the queued setting writes; cameras compared raw",
+      'if ((after ? after.camera : "") !== (before ? before.camera : "")) dropQueuedSettings()' in block(daemon, "function ingest")
+      and "var before = record.settings" in block(daemon, "function ingest")
+      and "camera = rawId(m.camera)" in block(model, "function settingsGroupLine"))
+check("Daemon requests settings only as intents from flushSettings, runSettingAction and resetSettings",
+      re.findall(r'request\(\{ verb: "(setting|reset-settings)"[^)]*\)', daemon) == ["setting", "setting", "reset-settings"]
+      and 'request({ verb: "setting", id: id, value: v, camera: camera })' in block(daemon, "function flushSettings")
+      and 'request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera })' in block(daemon, "function runSettingAction")
+      and 'request({ verb: "reset-settings", camera: record.settings.camera })' in block(daemon, "function resetSettings"))
+check("flushSettings walks only the drafts, bounded by Model.withSetting",
+      'var drafts = Model.withSetting(settingDrafts, "", undefined)' in block(daemon, "function flushSettings")
+      and "if (n >= SETTINGS_ROW_CAP) break" in block(model, "function withSetting"))
+check("a move is made a value of its enabled row before it is kept",
+      "var v = row && row.enabled ? Model.rowValue(row, value) : null" in block(daemon, "function moveSetting"))
 timers = re.findall(r"property Timer (\w+): Timer \{", daemon)
-check("the Daemon's timers are the backoff and the controls debounce", sorted(timers) == ["backoffTimer", "controlTimer"], str(timers))
-control_timer = block(daemon, "property Timer controlTimer")
-check("the controls debounce is a one-shot of Model.CONTROLS_DEBOUNCE_MS",
-      re.search(r"^\s*repeat:\s*false\s*$", control_timer, re.M) is not None
-      and "interval: Model.CONTROLS_DEBOUNCE_MS" in control_timer and "running:" not in control_timer
-      and "triggeredOnStart" not in control_timer, control_timer[:200])
-check("the controls debounce is (re)started only by moveControl, a user's move",
-      re.findall(r"controlTimer\.(start|restart)\(\)", daemon) == ["restart"]
-      and "controlTimer.restart()" in block(daemon, "function moveControl"))
-check("the panel moves a control only through the Daemon, by a name of Model.CONTROL_NAMES",
-      re.findall(r"Daemon\.(?:moveControl|commitControl)\(([^,]*),", panel)
-      == ["name", "controlRow.modelData", "controlRow.modelData"]
-      and "var name = Model.CONTROL_NAMES[index]" in block(panel, "function nudgeControl"),
-      str(re.findall(r"Daemon\.(?:moveControl|commitControl)\(([^,]*),", panel)))
-check("the panel resets the controls only from resetControls",
-      panel.count("Daemon.resetControls()") == 1 and "Daemon.resetControls()" in block(panel, "function resetControls"))
-# The delegate's block, and the Repeater's own lines before it.
-control_rows = block(panel, "id: controlRepeater")
-rows_at = panel.find("id: controlRepeater")
-rows_head = panel[rows_at:panel.find("delegate:", rows_at)] if rows_at >= 0 else ""
-check("the slider rows have the constant model Model.CONTROL_NAMES",
-      re.search(r"^\s*model:\s*Model\.CONTROL_NAMES\s*$", rows_head, re.M) is not None, rows_head[:200])
-check("the sliders are the shell's PanelSlider, integer, only in those rows",
-      len(re.findall(r"\bPanelSlider\s*\{", panel)) == 1 and "PanelSlider {" in control_rows
-      and re.search(r"^\s*integer:\s*true\s*$", control_rows, re.M) is not None)
-check("a held slider keeps the Flickable from taking the drag",
-      "interactive: contentHeight > height && root.slidersHeld === 0" in panel)
-check("the Camera image section is drawn only from Model.controlsSection",
-      "readonly property var controlsView: Model.controlsSection(record)" in panel
-      and re.search(r'objectName: "controlsBlock"[^}]*visible: root\.controlsView\.visible', panel) is not None)
-check("the controls list is capped before it is walked",
-      "var n = Math.min(src.length, CONTROLS_CAP)" in block(model, "function controlList"))
+check("the Daemon's timers are the backoff and the settings debounce", sorted(timers) == ["backoffTimer", "settingsTimer"], str(timers))
+settings_timer = block(daemon, "property Timer settingsTimer")
+check("the settings debounce is a one-shot of Model.CONTROLS_DEBOUNCE_MS",
+      re.search(r"^\s*repeat:\s*false\s*$", settings_timer, re.M) is not None
+      and "interval: Model.CONTROLS_DEBOUNCE_MS" in settings_timer and "running:" not in settings_timer
+      and "triggeredOnStart" not in settings_timer and "var CONTROLS_DEBOUNCE_MS = 150" in model, settings_timer[:200])
+check("the settings debounce is (re)started only by moveSetting, a user's move",
+      re.findall(r"settingsTimer\.(start|restart)\(\)", daemon) == ["restart"]
+      and "settingsTimer.restart()" in block(daemon, "function moveSetting"))
+check("no Timer in the panel or the renderer", all(re.search(r"\bTimer\b", sources[PLUGIN / n]) is None
+                                                   for n in ("BroadcastPanel.qml", "SettingsView.qml")))
+qml_writes = re.findall(r"Daemon\.(?:moveSetting|commitSetting|runSettingAction)\(([^,)]*)", panel + settings_view)
+check("QML writes a setting only by the id of a row of the view",
+      qml_writes != [] and all(w in ("row.id", "settingRow.row.id") for w in qml_writes)
+      and "var row = Model.viewRow(root.settingsView, stop)" in block(panel, "function nudgeSetting"), str(qml_writes))
+literals = [(p.name, lit) for p in plugin_qml for lit in re.findall(r'"([^"\n]*)"', sources[p])]
+named = [x for x in literals if re.fullmatch(r"[a-z0-9]+(\.[a-z0-9_]+){1,3}", x[1]) or "camera." in x[1]]
+check("no QML file names a setting (no string literal of the id grammar)", named == [], str(named))
+check("the panel resets the settings only from resetSettings",
+      panel.count("Daemon.resetSettings()") == 1 and "Daemon.resetSettings()" in block(panel, "function resetSettings")
+      and "Daemon.resetSettings" not in settings_view)
+check("the renderer's repeaters have count models (a delta never rebuilds a row)",
+      re.findall(r"^\s*model:\s*([^\n]+)$", settings_view, re.M) == ["root.view.groups.length", "groupBlock.group.rows.length"],
+      str(re.findall(r"^\s*model:\s*([^\n]+)$", settings_view, re.M)))
+check("the sliders are the shell's PanelSlider, integer, only in the renderer",
+      sum(len(re.findall(r"\bPanelSlider\s*\{", sources[p])) for p in plugin_qml) == 1
+      and len(re.findall(r"\bPanelSlider\s*\{", settings_view)) == 1
+      and re.search(r"^\s*integer:\s*true\s*$", block(settings_view, "PanelSlider {"), re.M) is not None)
+check("the renderer hands no daemon text to PanelActionButton or PanelToolTip",
+      "PanelActionButton" not in settings_view and "PanelToolTip" not in settings_view
+      and all(re.search(r"\bsettingText\(" + f, model) for f in (r"o\.label", r"s\.label", r"s\.disabled_reason", r"s\.unit", r"g\.label", r"c\.disabled_reason")))
+check("a held slider keeps both Flickables from taking the drag",
+      panel.count("interactive: contentHeight > height + 0.5 && root.slidersHeld === 0") == 1
+      and settings_view.count("interactive: contentHeight > height + 0.5 && root.slidersHeld === 0") == 1
+      and "slidersHeld: root.slidersHeld" in panel
+      and "onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }" in panel)
+check("the settings section is drawn only from Model.settingsView",
+      "readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)" in panel
+      and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible', panel) is not None
+      and "view: root.settingsView" in panel
+      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView)" in panel)
+check("the set's lines, options and changes are capped before they are walked",
+      "var n = Math.min(src.length, SETTINGS_LINE_LOOK)" in block(model, "function settingsGroupLine")
+      and "var n = Math.min(changes.length, SETTINGS_LINE_LOOK)" in block(model, "function settingsDelta")
+      and "var n = Math.min(src.length, SETTING_OPTION_CAP)" in block(model, "function settingOptions")
+      and "var count = lineIndex(m.count, 1, SETTINGS_LINES_CAP)" in block(model, "function settingsGroupLine"))
+check("the revision-6 controls code is gone (no fallback below 0.22)",
+      all(n not in model + daemon + panel for n in ("CONTROL_NAMES", "controlArgv", "controlsSection", "camera_controls", '"controls"')))
 
 # ---- every Process is in a singleton -----------------------------------------
 for path, src in sources.items():

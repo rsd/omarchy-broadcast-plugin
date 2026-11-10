@@ -129,13 +129,16 @@ function isPlainObject(value) {
 // text. Other invisible characters (soft hyphen, Hangul fillers, ...) are not
 // removed either. The input is pre-cut so a huge string costs a bounded
 // amount of work; a string that lost its tail there still ends in the
-// ellipsis, however little of it is left.
-function sanitize(value, cap) {
+// ellipsis, however little of it is left. `keepAmpersand`: an "&" stays (see
+// settingText; without "<" no markup can form, but the shell's
+// PanelActionButton and PanelToolTip still get no "&" from this plugin).
+function sanitize(value, cap, keepAmpersand) {
   if (typeof value !== "string") return ""
   var limit = Math.max(1, Math.floor(Number(cap) || 1))
   var precut = value.length > limit * 4
   var s = precut ? value.slice(0, limit * 4) : value
-  s = s.replace(/[<>&\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
+  s = s.replace(keepAmpersand === true ? /[<>\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g
+                                       : /[<>&\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
   s = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
   s = s.replace(/ {2,}/g, " ").trim()
   if (s.length > limit || (precut && s.length >= limit)) {
@@ -258,19 +261,22 @@ function emptyRecord(link, linkText) {
     camerasTruncated: false,
     camerasCapped: false,
     stats: null,
-    // The camera image controls (snapshot `camera_controls`, `controls`
-    // lines): "absent" when the snapshot has no such field (a CLI that
-    // predates them), "null" when it is null or not an object (a daemon
-    // below CONTROLS_REVISION), "object" when it was reported.
-    controlsField: "absent",
-    // The camera the controls belong to, display copy only (never an argv).
-    controlsCamera: "",
-    // The same id unsanitised (see rawId), for comparison only: what tells
-    // one camera's controls from another's, and binds a control write to the
-    // camera its slider showed.
-    controlsCameraId: "",
-    // Validated entries (see controlList), at most CONTROL_NAMES.length.
-    controls: []
+    // The snapshot's settings schema (`settings_schema`): "absent" when the
+    // snapshot has no such field (a CLI that predates the settings),
+    // "number" when it is a number (settingsSchema: that number when it is
+    // a whole one, else -1), "null" otherwise (a daemon below
+    // SETTINGS_REVISION prints null).
+    settingsField: "absent",
+    settingsSchema: -1,
+    // The committed settings set (see commitSettings): { rev, serial,
+    // camera, groups, groupsTotal }, or null. `camera` is the raw id (see
+    // rawId): what binds a write to the camera its row showed, and what
+    // every write names.
+    settings: null,
+    // A set whose settings_group lines are still arriving, or null.
+    settingsAssembly: null,
+    // A settings_clear line said there is nothing to show.
+    settingsCleared: false
   }
 }
 
@@ -413,8 +419,10 @@ function parseLine(text) {
 
 // Apply one raw line to a record. Returns { record, outcome }; `record` is the
 // same object when nothing changed. Outcomes: snapshot, state, cameras,
-// stats, controls, error, ignored (an unknown type, or a line that cannot apply in the
-// current link state), dropped, invalid, unsupported.
+// stats, settings_group (a part of a set kept), settings (a set committed),
+// settings_delta, settings_clear, error, ignored (an unknown type, such as
+// the `controls` line of interface revision 6, or a line that cannot apply
+// in the current link state), dropped, invalid, unsupported.
 function reduce(record, text) {
   var base = record || emptyRecord("connecting")
   var p = parseLine(text)
@@ -437,7 +445,11 @@ function applyMessage(record, m) {
     r = emptyRecord("ok")
     applyScalars(r, m)
     applyCameras(r, m)
-    applyCameraControls(r, m.camera_controls)
+    // A snapshot starts a new picture of the daemon: the settings set that
+    // follows it (or a settings_clear) replaces whatever was shown.
+    r.settingsField = m.settings_schema === undefined ? "absent"
+      : (typeof m.settings_schema === "number" ? "number" : "null")
+    r.settingsSchema = interfaceRevision(m.settings_schema)
     return { record: r, outcome: "snapshot" }
   case "state":
     // Unavailable until the next snapshot (docs/cli-json.md, "Writing a client").
@@ -461,12 +473,27 @@ function applyMessage(record, m) {
       gpuPercent: statNumber(m.gpu_percent)
     }
     return { record: r, outcome: "stats" }
-  case "controls":
-    // Replaces the controls whole; only a CLI that knows them prints one.
+  case "settings_group":
+    // A line of a settings set; the set is committed by its last line.
     if (!linked(record)) return { record: record, outcome: "ignored" }
     r = copyRecord(record)
-    applyCameraControls(r, { camera: m.camera, controls: m.controls })
-    return { record: r, outcome: "controls" }
+    var outcome = applySettingsGroup(r, m)
+    return outcome === "ignored" ? { record: record, outcome: outcome } : { record: r, outcome: outcome }
+  case "settings_delta":
+    if (!linked(record)) return { record: record, outcome: "ignored" }
+    var set = settingsDelta(record.settings, m)
+    if (!set) return { record: record, outcome: "ignored" }
+    r = copyRecord(record)
+    r.settings = set
+    return { record: r, outcome: "settings_delta" }
+  case "settings_clear":
+    // No camera, so nothing to show: the set and any half-assembled one go.
+    if (!linked(record)) return { record: record, outcome: "ignored" }
+    r = copyRecord(record)
+    r.settings = null
+    r.settingsAssembly = null
+    r.settingsCleared = true
+    return { record: r, outcome: "settings_clear" }
   case "error":
     // An unknown code is treated like dbus-error, as the contract asks.
     r = emptyRecord(m.code === "daemon-not-running" ? "not-running" : "unreachable",
@@ -932,10 +959,10 @@ function denoiseArgv(cli, on) {
   return [cli, "denoise", on ? DENOISE_WORDS.on : DENOISE_WORDS.off]
 }
 
-// A control request is kept as an intent, { verb, on, id, effect, name, value },
+// A control request is kept as an intent, { verb, on, id, effect, value, camera },
 // and turned into an argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera`/`effect`/`denoise`/`controls` would D-Bus-activate it) or
+// gone meanwhile (`on`/`off`/`camera`/`effect`/`denoise`/`settings` would D-Bus-activate it) or
 // with a CLI path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
@@ -945,15 +972,15 @@ function intentArgv(intent, cli, record) {
   case "next": return canNext(record) ? nextArgv(cli) : null
   case "effect": return effectSelectable(record, intent.effect) ? effectArgv(cli, intent.effect) : null
   case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null
-  case "control": return controlIntentBound(intent, record) ? controlIntentArgv(cli, record, intent.name, intent.value) : null
-  case "reset-controls": return controlsSupported(record) && controlIntentBound(intent, record) ? resetControlsArgv(cli) : null
+  case "setting": return settingIntentArgv(cli, record, intent)
+  case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null
   default: return null
   }
 }
 
 // Right click on the bar icon: "toggle", "open-panel" (unavailable: never
 // flip a state the user cannot see) or "ignore" (`busy`: a command other
-// than a camera image write is in flight or queued, see toggleBlocked; its
+// than a camera setting write is in flight or queued, see toggleBlocked; its
 // result has not arrived, so the target of a toggle is unknown; the panel
 // switch follows the same rule through its `busy`). Any other click opens
 // and closes the panel.
@@ -1299,358 +1326,894 @@ function fpsOptions(fps) {
   return out
 }
 
-// ---------------------------------------------------------------- camera image
+// ---------------------------------------------------------------- camera settings
 
-// The camera's own image controls (UVC brightness, contrast, saturation,
-// sharpness), as the daemon reports them (docs/cli-json.md: the snapshot's
-// `camera_controls`, and a `controls` line on every change). The daemon keeps
-// each camera's values and applies them at every open; a change applies live
-// while the daemon has the camera open (state `starting` or `active`) and is
-// stored for the next open otherwise.
+// The camera's settings as the daemon publishes them (D-Bus interface
+// revision 7; docs/cli-json.md: the `settings_group`, `settings_delta` and
+// `settings_clear` lines of `omarchy-broadcast watch --json`). The daemon is
+// the only authority: it decides which settings a camera has, their type,
+// range and labels, whether each can be changed now (`enabled`) and why not
+// (`disabled_reason`). The plugin draws whatever arrives through one generic
+// renderer (SettingsView.qml) that knows four types; it never names a
+// setting, and never evaluates `enabled_when` (a condition on a setting it
+// skipped, or an operator it does not know, changes nothing: `enabled` is
+// the daemon's word). The daemon keeps each camera's values and applies them
+// at every open; a change applies live while the daemon has the camera open
+// (state `starting` or `active`) and is stored for the next open otherwise.
 
-// The daemon interface revision that added the controls (obc-ipc
-// INTERFACE_REVISION 6).
-var CONTROLS_REVISION = 6
-// The controls the panel offers, in panel order: the only names ever passed
-// to `omarchy-broadcast controls set`. The daemon may report others (its
-// allowlist also has backlight_compensation); they are not shown.
-var CONTROL_NAMES = ["brightness", "contrast", "saturation", "sharpness"]
-var CONTROL_LABELS = { brightness: "Brightness", contrast: "Contrast", saturation: "Saturation", sharpness: "Sharpness" }
-// Entries of one list ever looked at; the daemon reports at most five.
-var CONTROLS_CAP = 16
-// V4L2 control values are signed 32-bit integers.
-var CONTROL_INT_MIN = -2147483648
-var CONTROL_INT_MAX = 2147483647
-// A slider writes this long after its last move, and at once on release.
+// The daemon interface revision that added the settings (obc-ipc
+// INTERFACE_REVISION 7) and the settings schema this plugin reads.
+var SETTINGS_REVISION = 7
+var SETTINGS_SCHEMA = 1
+// A setting id, an option value and a group id, exactly as the daemon's
+// grammar allows them; anything else is not a setting of a v1 producer.
+var SETTING_ID_RE = /^[a-z0-9]+(\.[a-z0-9_]+){1,3}$/
+var SETTING_ID_CAP = 48
+var OPTION_VALUE_RE = /^[a-z0-9_]{1,32}$/
+var GROUP_ID_RE = /^[a-z0-9_]{1,32}$/
+// Words the grammars above allow that must never be a key: assigning an
+// object's `__proto__` re-parents it (and reading it gives Object.prototype),
+// and `constructor` / `prototype` read inherited members of a plain object.
+// A group id or an option value that is one of them is refused outright
+// (a setting id cannot be one: it holds a dot), and every map this file keys
+// by a daemon string is prototype-free (Object.create(null)) or read through
+// ownValue() as well.
+var RESERVED_KEYS = ["__proto__", "constructor", "prototype"]
+// Display bounds, the producer's (docs/cli-json.md).
+var SETTING_LABEL_CAP = 48
+var SETTING_REASON_CAP = 96
+var SETTING_UNIT_CAP = 16
+var OPTION_LABEL_CAP = 32
+// Rendering caps (the producer's are 64 settings a camera and 16 options a
+// setting); past them the panel says "Showing N of M".
+var SETTINGS_GROUP_CAP = 16
+var SETTINGS_PER_GROUP_CAP = 16
+var SETTING_OPTION_CAP = 16
+var SETTINGS_ROW_CAP = 64
+// Lines of one set: a v1 producer puts at least one setting on a line, and
+// publishes at most 64. A set announcing more is never waited for.
+var SETTINGS_LINES_CAP = 64
+// Entries of one line ever looked at: a v1 producer puts at most 8 settings
+// on a line and at most 16 changes on a delta line.
+var SETTINGS_LINE_LOOK = 16
+// A slider of more positions than this is not drawn.
+var SETTING_STEPS_MAX = 1000000
+// Device values are signed 32-bit integers.
+var SETTING_INT_MIN = -2147483648
+var SETTING_INT_MAX = 2147483647
+var SETTING_TYPES = ["bool", "int", "enum", "action"]
+// An enum is a row of buttons while it has at most this many choices whose
+// labels together fit the row; otherwise a dropdown.
+var SEGMENTED_MAX_OPTIONS = 4
+var SEGMENTED_MAX_CHARS = 28
+// A slider (or a key) writes this long after its last move, and at once on
+// release; a switch, a choice or an action writes at once.
 var CONTROLS_DEBOUNCE_MS = 150
-// Commands waiting behind a running one (see enqueueIntent): one other ask,
-// one per control, one reset; the cap is a backstop.
-var INTENT_QUEUE_CAP = 8
-var CONTROLS_TITLE = "CAMERA IMAGE"
-var CONTROLS_RESET_LABEL = "Reset to defaults"
-var CONTROLS_RESET_TOOLTIP = "Set the controls back to the camera's defaults and forget the stored values"
-var CONTROLS_IDLE_TEXT = "The camera is not in use: changes are saved and apply when an app next uses it."
-var CONTROLS_LIVE_TEXT = "Changes apply live."
-// The states in which the daemon has the camera open and writes a control
+// Commands waiting behind a running one (see enqueueIntent): at most one
+// other ask, one reset and SETTING_QUEUE_CAP setting writes (one per id), so
+// never more than INTENT_QUEUE_CAP.
+var SETTING_QUEUE_CAP = 8
+var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + 2
+var SETTINGS_TITLE = "SETTINGS"
+var SETTINGS_RESET_LABEL = "Reset to defaults"
+var SETTINGS_RESET_TOOLTIP = "Set every setting of this camera back to its default and forget the stored values"
+var SETTINGS_IDLE_TEXT = "Not in use: changes apply when an app next uses the camera."
+var SETTINGS_LIVE_TEXT = "Changes apply live."
+var SETTINGS_EMPTY_TEXT = "This camera reports no settings."
+// The states in which the daemon has the camera open and writes a setting
 // to it at once (docs/cli-json.md, "Where a change applies").
-var CONTROLS_LIVE_STATES = ["starting", "active"]
-var CONTROLS_EMPTY_TEXT = "This camera has no brightness, contrast, saturation or sharpness control."
-// Said instead of the sliders: the CLI predates the controls (its snapshot
-// has no camera_controls field), or the CLI knows them but the running daemon
-// does not (null, or an interface revision below CONTROLS_REVISION).
-var CLI_NO_CONTROLS = "The omarchy-broadcast CLI needs updating for the camera image controls (0.19 or newer)."
-var DAEMON_NO_CONTROLS = "The daemon needs updating for the camera image controls (omarchy-broadcastd 0.19 or newer)."
+var SETTINGS_LIVE_STATES = ["starting", "active"]
+// Said instead of the settings: the CLI predates them (its snapshot has no
+// settings_schema field), the daemon does (null, or an interface revision
+// below SETTINGS_REVISION), or the daemon speaks a newer settings schema.
+var CLI_NO_SETTINGS = "The omarchy-broadcast CLI needs updating for camera settings (omarchy-broadcast 0.22 or newer)."
+var DAEMON_NO_SETTINGS = "The daemon needs updating for camera settings (omarchy-broadcastd 0.22 or newer)."
+var PLUGIN_OLD_SETTINGS = "Update the plugin to show these camera settings."
 
-// A control's number: an integer in the V4L2 range, else null.
-function controlInt(value) {
+// Group header glyphs (Material chevron down / right).
+var GLYPH_EXPANDED = String.fromCodePoint(0xF0140)
+var GLYPH_COLLAPSED = String.fromCodePoint(0xF0142)
+
+// ---- field readers
+
+// A daemon string of the settings (a label, a reason, a unit, a choice) for
+// the screen: sanitize() with its cap, keeping "&" ("Focus & zoom"). Every
+// one of them reaches only PlainText sinks: this plugin's Texts and the
+// kit's Button, ButtonGroup and Dropdown labels (PlainText in qs.Ui); none
+// is ever given to PanelActionButton or PanelToolTip, which draw AutoText.
+function settingText(value, cap) {
+  return sanitize(value, cap, true)
+}
+
+// A set's revision or serial: an integer in 1..REVISION_MAX (0 is never
+// published), else 0.
+function settingsNumber(value) {
   return typeof value === "number" && isFinite(value) && Math.floor(value) === value
-    && value >= CONTROL_INT_MIN && value <= CONTROL_INT_MAX ? value : null
+    && value >= 1 && value <= REVISION_MAX ? value : 0
 }
 
-// One entry -> { name, label, min, max, step, defaultValue, value, stored },
-// or null: a name of CONTROL_NAMES, integers for every number, min <= max,
-// step >= 1, the default and the value within [min, max].
-function controlEntry(c) {
-  if (!isPlainObject(c) || typeof c.name !== "string" || CONTROL_NAMES.indexOf(c.name) < 0) return null
-  var min = controlInt(c.min)
-  var max = controlInt(c.max)
-  var step = controlInt(c.step)
-  var def = controlInt(c["default"])
-  var value = controlInt(c.value)
-  if (min === null || max === null || step === null || def === null || value === null) return null
-  if (min > max || step < 1) return null
-  if (def < min || def > max || value < min || value > max) return null
-  return { name: c.name, label: CONTROL_LABELS[c.name], min: min, max: max, step: step,
-           defaultValue: def, value: value, stored: c.stored === true }
+function reservedKey(value) {
+  return RESERVED_KEYS.indexOf(value) >= 0
 }
 
-// Reads at most CONTROLS_CAP entries of whatever arrived (the traversal is
-// bounded, not just what is kept); a repeated name keeps its first entry.
-// The daemon's order is kept.
-function controlList(value) {
+// map[key] when `key` is a string and an own key of `map`, else undefined:
+// never an inherited member, whatever the key.
+function ownValue(map, key) {
+  return map !== null && typeof map === "object" && typeof key === "string"
+    && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined
+}
+
+// A setting id as the daemon's grammar has it, else "".
+function settingId(value) {
+  return typeof value === "string" && value.length <= SETTING_ID_CAP && SETTING_ID_RE.test(value) && !reservedKey(value) ? value : ""
+}
+
+function optionValueOf(value) {
+  return typeof value === "string" && OPTION_VALUE_RE.test(value) && !reservedKey(value) ? value : ""
+}
+
+// A group id as the daemon's grammar has it, else "".
+function groupIdOf(value) {
+  return typeof value === "string" && GROUP_ID_RE.test(value) && !reservedKey(value) ? value : ""
+}
+
+// A device integer: a whole number in the signed 32-bit range, else null.
+function settingInt(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= SETTING_INT_MIN && value <= SETTING_INT_MAX ? value : null
+}
+
+// An index in 0..max-1 (or 1..max with `base` 1), else -1.
+function lineIndex(value, base, max) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= base && value < max + base ? value : -1
+}
+
+// "Showing N of M <what>" when not all are shown, else "".
+function showingText(shown, total, what) {
+  return total > shown ? "Showing " + shown + " of " + total + " " + what : ""
+}
+
+// The options of an enum: at most SETTING_OPTION_CAP looked at; a valid,
+// new value each, with a label (its value when the label sanitises to
+// nothing). `total` counts the valid ones and those past the cap.
+function settingOptions(value) {
   var src = Array.isArray(value) ? value : []
-  var n = Math.min(src.length, CONTROLS_CAP)
+  var n = Math.min(src.length, SETTING_OPTION_CAP)
   var out = []
-  var seen = {}
+  var seen = Object.create(null)
   for (var i = 0; i < n; i++) {
-    var e = controlEntry(src[i])
-    if (!e || seen[e.name] === true) continue
-    seen[e.name] = true
-    out.push(e)
+    var o = src[i]
+    if (!isPlainObject(o)) continue
+    var v = optionValueOf(o.value)
+    if (v === "" || seen[v] === true) continue
+    seen[v] = true
+    var label = settingText(o.label, OPTION_LABEL_CAP)
+    out.push({ value: v, label: label !== "" ? label : v })
   }
+  return { options: out, total: out.length + (src.length - n) }
+}
+
+function optionIndex(options, value) {
+  var list = Array.isArray(options) ? options : []
+  for (var i = 0; i < list.length && i < SETTING_OPTION_CAP; i++) if (list[i].value === value) return i
+  return -1
+}
+
+// A value within [min, max].
+function clampInt(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+// One setting of a settings_group line -> a row, or null (skipped): an id of
+// the grammar, a known type, and for each type its fields:
+//   int     min, max, step, default, value: device integers; max > min,
+//           step > 0, at most SETTING_STEPS_MAX steps; value and default
+//           clamped into [min, max]; `unit` optional
+//   bool    value a boolean (a switch never claims a state nobody reported)
+//   enum    at least one valid option; a value (or default) that is not
+//           one of them reads as "" (no choice selected)
+//   action  nothing more
+// Unknown fields (enabled_when, hint, scope, ...) are not read. A setting
+// of a known type that is skipped (a fixed int, max == min; too many steps;
+// a field missing) still counts in its group's total (settingKnown), so the
+// group says that not all are shown; one of an unknown type does not.
+function settingEntry(s) {
+  if (!isPlainObject(s)) return null
+  var id = settingId(s.id)
+  if (id === "" || typeof s.type !== "string" || SETTING_TYPES.indexOf(s.type) < 0) return null
+  var label = settingText(s.label, SETTING_LABEL_CAP)
+  var enabled = s.enabled === true
+  var e = {
+    id: id, type: s.type, label: label !== "" ? label : id, stored: s.stored === true, enabled: enabled,
+    reason: enabled ? "" : settingText(s.disabled_reason, SETTING_REASON_CAP),
+    value: null, defaultValue: null, min: 0, max: 0, step: 0, unit: "", options: [], optionsTotal: 0
+  }
+  if (s.type === "int") {
+    var min = settingInt(s.min)
+    var max = settingInt(s.max)
+    var step = settingInt(s.step)
+    var value = settingInt(s.value)
+    var def = settingInt(s["default"])
+    if (min === null || max === null || step === null || value === null || def === null) return null
+    if (!(max > min) || !(step > 0) || (max - min) / step > SETTING_STEPS_MAX) return null
+    e.min = min
+    e.max = max
+    e.step = step
+    e.value = clampInt(value, min, max)
+    e.defaultValue = clampInt(def, min, max)
+    e.unit = settingText(s.unit, SETTING_UNIT_CAP)
+  } else if (s.type === "bool") {
+    if (typeof s.value !== "boolean") return null
+    e.value = s.value
+    e.defaultValue = s["default"] === true
+  } else if (s.type === "enum") {
+    var opts = settingOptions(s.options)
+    if (opts.options.length === 0) return null
+    e.options = opts.options
+    e.optionsTotal = opts.total
+    e.value = optionIndex(opts.options, s.value) >= 0 ? s.value : ""
+    e.defaultValue = optionIndex(opts.options, s["default"]) >= 0 ? s["default"] : ""
+  }
+  return e
+}
+
+// Whether `s` is a setting of a type this plugin draws, whether or not its
+// fields make a row.
+function settingKnown(s) {
+  return isPlainObject(s) && typeof s.type === "string" && SETTING_TYPES.indexOf(s.type) >= 0
+}
+
+// A settings_group line's message -> its validated parts, or null (the
+// line's envelope is not one a v1 producer prints; it is ignored). At most
+// SETTINGS_LINE_LOOK settings of the line are looked at; `total` counts the
+// rows kept, the known-type ones skipped, and those past the look cap. A
+// group that is not one of the grammar (its id, its label object) is kept as
+// a refused group: the line still fills its place in the set, so the rest of
+// the set commits, and the refused group is counted as not shown (`key`
+// tells the lines of one refused group apart from another's).
+function settingsGroupLine(m) {
+  if (!isPlainObject(m) || m.schema !== SETTINGS_SCHEMA) return null
+  var rev = settingsNumber(m.rev)
+  var serial = settingsNumber(m.serial)
+  var camera = rawId(m.camera)
+  var count = lineIndex(m.count, 1, SETTINGS_LINES_CAP)
+  var parts = lineIndex(m.parts, 1, SETTINGS_LINES_CAP)
+  if (rev === 0 || serial === 0 || camera === "" || count < 0 || parts < 0) return null
+  var index = lineIndex(m.index, 0, count)
+  var part = lineIndex(m.part, 1, parts)
+  if (index < 0 || part < 0) return null
+  var g = m.group
+  var envelope = { rev: rev, serial: serial, camera: camera, index: index, count: count, group: null }
+  var gid = isPlainObject(g) ? groupIdOf(g.id) : ""
+  if (gid === "") {
+    var raw = isPlainObject(g) && typeof g.id === "string" ? g.id : ""
+    envelope.group = { refused: true, key: raw !== "" && raw.length <= ID_CAP ? "=" + raw : "#" + index }
+    return envelope
+  }
+  var src = Array.isArray(g.settings) ? g.settings : []
+  var n = Math.min(src.length, SETTINGS_LINE_LOOK)
+  var rows = []
+  var skipped = 0
+  for (var i = 0; i < n; i++) {
+    var e = settingEntry(src[i])
+    if (e) rows.push(e)
+    else if (settingKnown(src[i])) skipped++
+  }
+  var label = settingText(g.label, SETTING_LABEL_CAP)
+  envelope.group = { refused: false, id: gid, label: label !== "" ? label : gid, rows: rows,
+                     total: rows.length + skipped + (src.length - n) }
+  return envelope
+}
+
+// The lines of an assembled set -> the committed set: groups in the order
+// they first appear, the parts of a group joined, a repeated setting id kept
+// once (its first row), and the caps applied: SETTINGS_PER_GROUP_CAP rows a
+// group, then SETTINGS_GROUP_CAP groups and SETTINGS_ROW_CAP rows in all, in
+// order. Each group keeps the number of its settings the daemon sent that
+// count (`total`, see settingsGroupLine), and the set the number of groups
+// (`groupsTotal`) for the "Showing N of M" lines: every group drawn, every
+// one past the cap, and every refused one; a group whose every setting is of
+// an unknown type is neither drawn nor counted. The maps are prototype-free:
+// a group or setting id is never a key of Object.prototype. At most
+// SETTINGS_LINES_CAP lines of SETTINGS_LINE_LOOK rows are walked.
+function commitSettings(a) {
+  var all = []
+  var byId = Object.create(null)
+  var seen = Object.create(null)
+  var refused = Object.create(null)
+  var refusedCount = 0
+  for (var i = 0; i < a.count && i < SETTINGS_LINES_CAP; i++) {
+    var line = a.lines[i]
+    if (line.group.refused) {
+      if (refused[line.group.key] !== true) {
+        refused[line.group.key] = true
+        refusedCount++
+      }
+      continue
+    }
+    var g = byId[line.group.id]
+    if (g === undefined) {
+      g = { id: line.group.id, label: line.group.label, rows: [], total: 0 }
+      byId[line.group.id] = g
+      all.push(g)
+    }
+    g.total += line.group.total
+    for (var r = 0; r < line.group.rows.length && r < SETTINGS_LINE_LOOK; r++) {
+      var row = line.group.rows[r]
+      if (seen[row.id] === true) { g.total--; continue }
+      seen[row.id] = true
+      if (g.rows.length < SETTINGS_PER_GROUP_CAP) g.rows.push(row)
+    }
+  }
+  var out = []
+  var counted = refusedCount
+  var rows = 0
+  for (var k = 0; k < all.length; k++) {
+    var total = Math.max(all[k].rows.length, all[k].total)
+    if (total === 0) continue
+    counted++
+    if (out.length >= SETTINGS_GROUP_CAP) continue
+    var kept = all[k].rows.slice(0, Math.max(0, SETTINGS_ROW_CAP - rows))
+    rows += kept.length
+    out.push({ id: all[k].id, label: all[k].label, rows: kept, total: total })
+  }
+  return { rev: a.rev, serial: a.serial, camera: a.camera, groups: out, groupsTotal: counted }
+}
+
+// One settings_group line applied to the record (a copy): kept in the set
+// being assembled; a line of another rev, serial, camera or count starts a
+// new set (the half-assembled one is dropped); a repeated index is ignored;
+// the set's last line commits it. A line older than the committed set (the
+// same serial and camera, a lower rev) is ignored: it would put back values
+// a delta has moved on from. Returns the outcome: "settings" (a set
+// committed), "settings_group" (a part kept), or "ignored".
+function applySettingsGroup(r, m) {
+  var line = settingsGroupLine(m)
+  if (!line) return "ignored"
+  var set = isPlainObject(r.settings) ? r.settings : null
+  if (set && set.serial === line.serial && set.camera === line.camera && line.rev < set.rev) return "ignored"
+  var a = r.settingsAssembly
+  if (!a || a.rev !== line.rev || a.serial !== line.serial || a.camera !== line.camera || a.count !== line.count) {
+    var empty = []
+    for (var i = 0; i < line.count; i++) empty.push(null)
+    a = { rev: line.rev, serial: line.serial, camera: line.camera, count: line.count, lines: empty, received: 0 }
+  }
+  if (a.lines[line.index] !== null) return "ignored"
+  var lines = a.lines.slice()
+  lines[line.index] = line
+  a = { rev: a.rev, serial: a.serial, camera: a.camera, count: a.count, lines: lines, received: a.received + 1 }
+  if (a.received < a.count) {
+    r.settingsAssembly = a
+    return "settings_group"
+  }
+  r.settingsAssembly = null
+  r.settings = commitSettings(a)
+  r.settingsCleared = false
+  return "settings"
+}
+
+// A change of a delta applied to a copy of `row`: each key only when it is
+// of the right type (an absent or mistyped key keeps the row's value); an
+// int clamped into the row's range, an enum value that is not one of its
+// options reads as "".
+function settingChanged(row, c) {
+  var out = {}
+  for (var key in row) if (Object.prototype.hasOwnProperty.call(row, key)) out[key] = row[key]
+  if (row.type === "int") {
+    var v = settingInt(c.value)
+    if (v !== null) out.value = clampInt(v, row.min, row.max)
+  } else if (row.type === "bool") {
+    if (typeof c.value === "boolean") out.value = c.value
+  } else if (row.type === "enum") {
+    if (typeof c.value === "string") out.value = optionIndex(row.options, c.value) >= 0 ? c.value : ""
+  }
+  if (typeof c.stored === "boolean") out.stored = c.stored
+  if (typeof c.enabled === "boolean") out.enabled = c.enabled
+  if (out.enabled) out.reason = ""
+  else if (typeof c.disabled_reason === "string") out.reason = settingText(c.disabled_reason, SETTING_REASON_CAP)
   return out
 }
 
-// The snapshot's `camera_controls` (undefined: the field is absent), or a
-// `controls` line's { camera, controls }.
-function applyCameraControls(r, value) {
-  if (value === undefined) {
-    r.controlsField = "absent"
-    r.controlsCamera = ""
-    r.controlsCameraId = ""
-    r.controls = []
-  } else if (!isPlainObject(value)) {
-    r.controlsField = "null"
-    r.controlsCamera = ""
-    r.controlsCameraId = ""
-    r.controls = []
-  } else {
-    r.controlsField = "object"
-    r.controlsCamera = sanitize(value.camera, ID_CAP)
-    r.controlsCameraId = rawId(value.camera)
-    r.controls = controlList(value.controls)
+// A settings_delta applied to the committed set -> a new set, or null when it
+// does not apply: no set, another schema, serial or camera, or a rev older
+// than the set's (a delta of the set's own rev applies: a large change set
+// spans several lines of one rev). At most SETTINGS_LINE_LOOK changes are
+// looked at; a change for an id the set does not show is skipped.
+function settingsDelta(set, m) {
+  if (!set || !isPlainObject(m) || m.schema !== SETTINGS_SCHEMA) return null
+  var rev = settingsNumber(m.rev)
+  if (rev === 0 || rev < set.rev || settingsNumber(m.serial) !== set.serial || rawId(m.camera) !== set.camera) return null
+  var groups = []
+  var where = Object.create(null)
+  for (var g = 0; g < set.groups.length; g++) {
+    groups.push({ id: set.groups[g].id, label: set.groups[g].label, rows: set.groups[g].rows.slice(), total: set.groups[g].total })
+    for (var r = 0; r < set.groups[g].rows.length; r++) where[set.groups[g].rows[r].id] = [g, r]
   }
+  var changes = Array.isArray(m.changes) ? m.changes : []
+  var n = Math.min(changes.length, SETTINGS_LINE_LOOK)
+  for (var i = 0; i < n; i++) {
+    var c = changes[i]
+    if (!isPlainObject(c)) continue
+    var id = settingId(c.id)
+    var at = id !== "" ? where[id] : undefined
+    if (at === undefined) continue
+    groups[at[0]].rows[at[1]] = settingChanged(groups[at[0]].rows[at[1]], c)
+  }
+  return { rev: rev, serial: set.serial, camera: set.camera, groups: groups, groupsTotal: set.groupsTotal }
 }
 
-// Whether the controls can be read and set: an available daemon whose
-// interface revision is at least CONTROLS_REVISION, through a CLI that
-// reports them (the field present as an object). An unknown revision counts
-// as no.
-function controlsSupported(record) {
-  return available(record) && record.controlsField === "object"
-    && typeof record.interfaceRevision === "number" && record.interfaceRevision >= CONTROLS_REVISION
+// ---- capability
+
+// Whether the settings can be read and set: an available daemon at interface
+// revision SETTINGS_REVISION or later, through a CLI that reports a settings
+// schema this plugin reads. An unknown revision counts as no.
+function settingsSupported(record) {
+  return available(record) && record.interfaceRevision >= SETTINGS_REVISION
+    && record.settingsField === "number" && record.settingsSchema >= 1 && record.settingsSchema <= SETTINGS_SCHEMA
 }
 
-// Why the controls cannot be set while the daemon is available: the CLI
-// line, or the daemon line once the CLI reports the field. "" otherwise.
-function controlsMissingText(record) {
-  if (!available(record) || controlsSupported(record)) return ""
-  return record.controlsField === "absent" ? CLI_NO_CONTROLS : DAEMON_NO_CONTROLS
+// Why the settings cannot be shown while the daemon is available: the CLI
+// (no settings_schema field at all), a newer schema than this plugin reads,
+// or the daemon (null, or an interface revision below SETTINGS_REVISION).
+// "" otherwise.
+function settingsMissingText(record) {
+  if (!available(record) || settingsSupported(record)) return ""
+  if (record.settingsField === "absent") return CLI_NO_SETTINGS
+  if (record.settingsField === "number" && record.interfaceRevision >= SETTINGS_REVISION
+      && record.settingsSchema > SETTINGS_SCHEMA)
+    return PLUGIN_OLD_SETTINGS
+  return DAEMON_NO_SETTINGS
 }
 
-// A control of the record by name, or null.
-function findControl(record, name) {
-  var list = record && Array.isArray(record.controls) ? record.controls : []
-  for (var i = 0; i < list.length && i < CONTROLS_CAP; i++) if (list[i].name === name) return list[i]
+// Whether the daemon has the camera open, so a setting it is given is written
+// to the camera at once: `starting` as well as `active`.
+function settingsLive(record) {
+  return available(record) && SETTINGS_LIVE_STATES.indexOf(record.state) >= 0
+}
+
+// A row of the committed set by id, or null.
+function findSetting(record, id) {
+  var set = record && isPlainObject(record.settings) ? record.settings : null
+  if (!set || typeof id !== "string") return null
+  for (var g = 0; g < set.groups.length && g < SETTINGS_GROUP_CAP; g++) {
+    var rows = set.groups[g].rows
+    for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) if (rows[r].id === id) return rows[r]
+  }
   return null
 }
 
-// Whether the daemon has the camera open, so a control it is given is
-// written to the camera at once: `starting` as well as `active`.
-function controlsLive(record) {
-  return available(record) && CONTROLS_LIVE_STATES.indexOf(record.state) >= 0
-}
+// ---- values
 
-// The panel's section: { visible, hint, note, controls, reset }.
-// `controls` are the sliders drawn (the record's, in CONTROL_NAMES order);
-// `hint` replaces them when the CLI or the daemon predates them, or the
-// camera has none; `note` says which case holds: a change applies live, or
-// waits for the next open.
-function controlsSection(record) {
-  if (!available(record)) return { visible: false, hint: "", note: "", controls: [], reset: false }
-  if (!controlsSupported(record))
-    return { visible: true, hint: controlsMissingText(record), note: "", controls: [], reset: false }
-  var list = []
-  for (var i = 0; i < CONTROL_NAMES.length; i++) {
-    var c = findControl(record, CONTROL_NAMES[i])
-    if (c) list.push(c)
-  }
-  if (list.length === 0) return { visible: true, hint: CONTROLS_EMPTY_TEXT, note: "", controls: [], reset: false }
-  return { visible: true, hint: "", note: controlsLive(record) ? CONTROLS_LIVE_TEXT : CONTROLS_IDLE_TEXT,
-           controls: list, reset: true }
-}
-
-// A section's control by name (what a slider row draws), or null.
-function sectionControl(section, name) {
-  var list = section && Array.isArray(section.controls) ? section.controls : []
-  for (var i = 0; i < list.length && i < CONTROL_NAMES.length; i++) if (list[i].name === name) return list[i]
-  return null
-}
-
-// A value on the control's grid: min + k * step, rounded to the nearest k
+// An int value on the row's grid: min + k * step, rounded to the nearest k
 // and kept within [min, max]. null for a value that is not a finite number
-// within [min, max].
-function snapControl(control, value) {
-  if (!control || typeof value !== "number" || !isFinite(value)) return null
-  if (value < control.min || value > control.max) return null
-  var kmax = Math.floor((control.max - control.min) / control.step)
-  var k = Math.max(0, Math.min(kmax, Math.round((value - control.min) / control.step)))
-  return control.min + k * control.step
+// within [min, max], or a row that is not an int.
+function snapSetting(row, value) {
+  if (!row || row.type !== "int" || typeof value !== "number" || !isFinite(value)) return null
+  if (value < row.min || value > row.max) return null
+  var kmax = Math.floor((row.max - row.min) / row.step)
+  var k = Math.max(0, Math.min(kmax, Math.round((value - row.min) / row.step)))
+  return row.min + k * row.step
 }
 
-// As snapControl, for what a slider or a key produces: clamped into range
+// As snapSetting, for what a slider or a key produces: clamped into range
 // first. null for a value that is not a finite number.
-function clampControl(control, value) {
-  if (!control || typeof value !== "number" || !isFinite(value)) return null
-  return snapControl(control, Math.max(control.min, Math.min(control.max, value)))
+function clampSetting(row, value) {
+  if (!row || row.type !== "int" || typeof value !== "number" || !isFinite(value)) return null
+  return snapSetting(row, clampInt(value, row.min, row.max))
 }
 
-// One Left/Right press: about a twentieth of the range, on the step grid,
-// at least one step.
-function controlKeyStep(control) {
-  if (!control) return 0
-  return Math.max(control.step, Math.round((control.max - control.min) / 20 / control.step) * control.step)
+// One Left/Right press on a slider: about a twentieth of the range, on the
+// step grid, at least one step.
+function settingKeyStep(row) {
+  if (!row || row.type !== "int") return 0
+  return Math.max(row.step, Math.round((row.max - row.min) / 20 / row.step) * row.step)
 }
 
-function controlNudge(control, current, direction) {
-  if (!control || typeof current !== "number" || !isFinite(current) || !(direction === 1 || direction === -1)) return null
-  return clampControl(control, current + direction * controlKeyStep(control))
+// One Left/Right press on a slider: it moves by settingKeyStep. null when
+// nothing moves, and for every other type: a choice row's Left/Right walk
+// its chip cursor (choiceCursorAfter) and write nothing until Enter or Space,
+// as the panel's other choice rows do; a dropdown opens on Enter.
+function settingNudge(row, current, direction) {
+  if (!row || row.type !== "int" || !(direction === 1 || direction === -1)) return null
+  if (typeof current !== "number" || !isFinite(current)) return null
+  return clampSetting(row, current + direction * settingKeyStep(row))
 }
 
-// The value a slider shows: the user's draft while one is unconfirmed (see
-// Daemon.controlDrafts), else what the daemon reports.
-function shownControlValue(control, drafts) {
-  if (!control) return 0
-  var d = isPlainObject(drafts) ? drafts[control.name] : undefined
-  var v = clampControl(control, d)
-  return v === null ? control.value : v
+// A value the user chose, made a value of the row: an int clamped onto its
+// grid, a strict boolean, one of the row's option values. null otherwise
+// (and always for an action: it has no value).
+function rowValue(row, value) {
+  if (!row) return null
+  if (row.type === "int") return clampSetting(row, value)
+  if (row.type === "bool") return typeof value === "boolean" ? value : null
+  if (row.type === "enum") return typeof value === "string" && optionIndex(row.options, value) >= 0 ? value : null
+  return null
 }
 
-// The drafts still unconfirmed under `record`: a draft goes once the daemon
-// reports that very value, or once its control is no longer offered.
-// Only names of CONTROL_NAMES are looked at.
-function settleDrafts(drafts, record) {
-  var out = {}
-  if (!isPlainObject(drafts)) return out
-  var supported = controlsSupported(record)
-  for (var i = 0; i < CONTROL_NAMES.length; i++) {
-    var name = CONTROL_NAMES[i]
-    if (drafts[name] === undefined) continue
-    var c = supported ? findControl(record, name) : null
-    if (c && c.value !== drafts[name]) out[name] = drafts[name]
+// The value a row shows: the user's draft while one is unconfirmed (see
+// Daemon.settingDrafts), else what the daemon reports.
+function shownSettingValue(row, drafts) {
+  if (!row) return null
+  var v = rowValue(row, ownValue(drafts, row.id))
+  return v === null ? row.value : v
+}
+
+// A value as the panel writes it: an int with its unit, an option's label.
+function settingValueText(row, value) {
+  if (!row) return ""
+  if (row.type === "int") {
+    var n = settingInt(value)
+    if (n === null) return UNKNOWN
+    return String(n) + (row.unit !== "" ? " " + row.unit : "")
   }
+  if (row.type === "enum") {
+    var at = optionIndex(row.options, value)
+    return at >= 0 ? row.options[at].label : UNKNOWN
+  }
+  if (row.type === "bool") return value === true ? "On" : "Off"
+  return ""
+}
+
+// What a screen reader is told about a row besides its label: the value it
+// shows, and for a row the daemon greys out that it is unavailable, its
+// value (what auto is doing is worth reading) and the daemon's reason.
+function settingDescription(row) {
+  if (!row) return ""
+  var value = typeof row.valueText === "string" ? row.valueText : ""
+  if (row.enabled) return value
+  var parts = ["Unavailable"]
+  if (value !== "") parts.push(value)
+  if (typeof row.reason === "string" && row.reason !== "") parts.push(row.reason)
+  return parts.join(". ")
+}
+
+// The widget an enum gets: a row of buttons while it has at most
+// SEGMENTED_MAX_OPTIONS choices whose labels fit SEGMENTED_MAX_CHARS, else a
+// dropdown.
+function settingWidget(row) {
+  if (!row) return ""
+  if (row.type === "int") return "slider"
+  if (row.type === "bool") return "switch"
+  if (row.type === "action") return "action"
+  var chars = 0
+  for (var i = 0; i < row.options.length; i++) chars += row.options[i].label.length
+  return row.options.length <= SEGMENTED_MAX_OPTIONS && chars <= SEGMENTED_MAX_CHARS ? "segmented" : "dropdown"
+}
+
+// ---- the panel's view
+
+// The group that is open: at most one at a time (an accordion, so the
+// Camera tab is never taller than its tallest group). `open` is the panel's
+// choice of this session (memory only): a group id (that group, while the
+// set has it), "" (the user closed the open group: none), or anything else,
+// a group the set does not have included (no choice): the Image group, or
+// the first group on a camera that has none. "" when none is open.
+function openGroupId(open, set) {
+  if (!isPlainObject(set) || !Array.isArray(set.groups) || set.groups.length === 0) return ""
+  if (open === "") return ""
+  var image = false
+  for (var i = 0; i < set.groups.length && i < SETTINGS_GROUP_CAP; i++) {
+    if (typeof open === "string" && set.groups[i].id === open) return open
+    if (set.groups[i].id === "image") image = true
+  }
+  return image ? "image" : set.groups[0].id
+}
+
+// The Camera tab's settings section, exactly as it is drawn:
+//   { visible, hint, note, groups, truncation, reset, rowCount, setKey }
+// groups: { id, label, index, expanded, glyph, rows, truncation }, where the
+// rows of a collapsed group are not listed; a row:
+//   { id, type, widget, label, enabled, reason, value, valueText, min, max,
+//     step, options, selectedIndex, optionsNote, stop }
+// `stop` numbers the rows drawn, top to bottom (the keyboard's stops, see
+// cursorStops). `hint` replaces everything when the settings cannot be
+// shown (an old CLI or daemon, a newer schema, a camera without settings);
+// `note` says whether a change applies live or at the next open. `open` is
+// the panel's choice of open group (openGroupId). `setKey` names the set
+// (its camera and serial): a row of another key is another camera's or
+// another structure's, whatever its place (a held slider lets go).
+function settingsView(record, open, drafts) {
+  var out = { visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "" }
+  if (!available(record)) return out
+  if (!settingsSupported(record)) {
+    out.hint = settingsMissingText(record)
+    out.visible = out.hint !== ""
+    return out
+  }
+  var set = record.settings
+  if (!isPlainObject(set)) {
+    out.hint = record.settingsCleared === true && record.activeCamera !== "" ? SETTINGS_EMPTY_TEXT : ""
+    out.visible = out.hint !== ""
+    return out
+  }
+  out.setKey = JSON.stringify([set.camera, set.serial])
+  var openId = openGroupId(open, set)
+  var stop = 0
+  for (var g = 0; g < set.groups.length && g < SETTINGS_GROUP_CAP; g++) {
+    var group = set.groups[g]
+    var expanded = group.id === openId
+    var rows = []
+    for (var r = 0; expanded && r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
+      var row = group.rows[r]
+      var value = shownSettingValue(row, drafts)
+      rows.push({
+        id: row.id, type: row.type, widget: settingWidget(row), label: row.label, enabled: row.enabled,
+        reason: row.reason, value: value, valueText: settingValueText(row, value), min: row.min, max: row.max,
+        step: row.step, options: row.options, selectedIndex: row.type === "enum" ? optionIndex(row.options, value) : -1,
+        optionsNote: showingText(row.options.length, row.optionsTotal, "choices"), stop: stop++
+      })
+    }
+    out.groups.push({
+      id: group.id, label: group.label, index: out.groups.length, expanded: expanded,
+      glyph: expanded ? GLYPH_EXPANDED : GLYPH_COLLAPSED,
+      rows: rows, truncation: expanded ? showingText(rows.length, group.total, "settings") : ""
+    })
+  }
+  out.visible = true
+  out.rowCount = stop
+  // "Showing N of M groups": N is what is drawn (commitSettings keeps only
+  // groups to draw), M counts the refused and capped ones too.
+  out.truncation = showingText(out.groups.length, set.groupsTotal, "groups")
+  if (out.groups.length === 0) {
+    out.hint = SETTINGS_EMPTY_TEXT
+    return out
+  }
+  out.note = settingsLive(record) ? SETTINGS_LIVE_TEXT : SETTINGS_IDLE_TEXT
+  out.reset = true
   return out
 }
 
-// A copy of `map` with `name` set to `value` (undefined: removed).
-function withKey(map, name, value) {
-  var out = {}
-  if (isPlainObject(map)) for (var i = 0; i < CONTROL_NAMES.length; i++) {
-    var k = CONTROL_NAMES[i]
-    if (map[k] !== undefined) out[k] = map[k]
+// The open group after the user opens (`open` true) or closes group `id`:
+// opening one closes the one open before; closing the open one leaves none
+// open (""); closing a group that is not open changes nothing. `current` and
+// the result are panel choices as openGroupId reads them.
+function groupOpenAfter(current, set, id, open) {
+  var shown = openGroupId(current, set)
+  if (open === true) return typeof id === "string" && id !== "" ? id : current
+  return id === shown ? "" : current
+}
+
+// A segmented row's chip under the keyboard after a Left/Right press
+// (`direction` -1 or 1) from `index`: within the row's options, no wrap. A
+// cursor that is on no chip yet starts from the selected one (or the first).
+function choiceCursorAfter(row, index, direction) {
+  var n = row && Array.isArray(row.options) ? Math.min(row.options.length, SETTING_OPTION_CAP) : 0
+  if (n === 0) return -1
+  var from = typeof index === "number" && index >= 0 && index < n ? index
+    : Math.max(0, typeof row.selectedIndex === "number" ? row.selectedIndex : -1)
+  return Math.max(0, Math.min(n - 1, from + (direction > 0 ? 1 : (direction < 0 ? -1 : 0))))
+}
+
+// The chip a keyboard cursor lands on when it arrives on a segmented row:
+// the selected choice, else the first.
+function choiceCursorStart(row) {
+  return row && typeof row.selectedIndex === "number" && row.selectedIndex >= 0 ? row.selectedIndex : 0
+}
+
+// The row of the view at keyboard stop `stop`, or null.
+function viewRow(view, stop) {
+  var groups = view && Array.isArray(view.groups) ? view.groups : []
+  for (var g = 0; g < groups.length && g < SETTINGS_GROUP_CAP; g++) {
+    var rows = groups[g].rows
+    for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) if (rows[r].stop === stop) return rows[r]
   }
-  if (CONTROL_NAMES.indexOf(name) < 0) return out
-  if (value === undefined) delete out[name]
-  else out[name] = value
-  return out
+  return null
 }
 
-// Only a name of CONTROL_NAMES and a decimal integer are ever passed, each
-// as its own argv element.
-function controlArgv(cli, name, value) {
-  if (!cliUsable(cli) || CONTROL_NAMES.indexOf(name) < 0 || controlInt(value) === null) return null
-  return [cli, "controls", "set", name, String(value)]
+// ---- writes
+
+// The words a value is written as: a decimal integer (a leading minus is
+// fine: it comes after `--`), true or false, or an option value.
+var SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[a-z0-9_]{1,32})$/
+
+// A value of `row` as its argv word, or null: an int put on the row's grid
+// and written by String() (a device integer has no exponent), a strict
+// boolean as true/false, an enum only as one of that row's option values, an
+// action only as true (from a real true).
+function settingArgvValue(row, value) {
+  if (!row) return null
+  if (row.type === "int") {
+    var v = settingInt(snapSetting(row, value))
+    return v === null ? null : String(v)
+  }
+  if (row.type === "bool") return typeof value === "boolean" ? (value ? "true" : "false") : null
+  if (row.type === "enum") return typeof value === "string" && optionIndex(row.options, value) >= 0 ? value : null
+  if (row.type === "action") return value === true ? "true" : null
+  return null
 }
 
-function resetControlsArgv(cli) {
-  return cliUsable(cli) ? [cli, "controls", "reset"] : null
+// The camera goes in its own `--camera=` element (validated as camera
+// selections are), the id and the value after `--`, each one argv element:
+// nothing is ever parsed as an option, and nothing reaches a shell.
+function settingArgv(cli, camera, id, word) {
+  var cam = selectableId(camera)
+  if (!cliUsable(cli) || cam === "" || settingId(id) === "" || typeof word !== "string" || !SETTING_VALUE_RE.test(word))
+    return null
+  return [cli, "settings", "set", "--camera=" + cam, "--", id, word]
 }
 
-// The argv for a control intent under `record`: the control must be offered
-// now, and the value is put on its grid; null otherwise.
-function controlIntentArgv(cli, record, name, value) {
-  if (!controlsSupported(record) || CONTROL_NAMES.indexOf(name) < 0) return null
-  var v = snapControl(findControl(record, name), value)
-  return v === null ? null : controlArgv(cli, name, v)
+function resetSettingsArgv(cli, camera) {
+  var cam = selectableId(camera)
+  return cliUsable(cli) && cam !== "" ? [cli, "settings", "reset", "--camera=" + cam] : null
+}
+
+// A setting or reset intent runs only against the camera whose settings the
+// panel showed when it was made (`camera`, the committed set's): every write
+// names that camera, and none runs once the set is another camera's.
+function settingIntentBound(intent, record) {
+  return isPlainObject(intent) && isPlainObject(record) && isPlainObject(record.settings)
+    && typeof intent.camera === "string" && intent.camera !== "" && intent.camera === record.settings.camera
+}
+
+// The argv for a setting intent ({ verb: "setting", id, value, camera })
+// under `record`: the settings are offered, the intent is bound to the set's
+// camera, the row is in the set and enabled now, and the value is one of
+// the row's; null otherwise.
+function settingIntentArgv(cli, record, intent) {
+  if (!settingsSupported(record) || !settingIntentBound(intent, record)) return null
+  var row = findSetting(record, intent.id)
+  if (!row || !row.enabled) return null
+  var word = settingArgvValue(row, intent.value)
+  return word === null ? null : settingArgv(cli, record.settings.camera, row.id, word)
+}
+
+function isSettingIntent(intent) {
+  return isPlainObject(intent) && (intent.verb === "setting" || intent.verb === "reset-settings")
+}
+
+// Whether the queue takes `intent`: anything but a setting write always; a
+// write when one for the same id is queued (it replaces that one) or fewer
+// than SETTING_QUEUE_CAP writes are. A write the queue does not take is not
+// lost: the Daemon keeps its draft unsent and writes it once a queued
+// command has run (Daemon.flushSettings). Nothing is ever evicted to make
+// room, so no other ask is dropped and no draft is left waiting on a write
+// that will never run.
+function queueTakes(queue, intent) {
+  if (!isPlainObject(intent) || intent.verb !== "setting") return true
+  var q = Array.isArray(queue) ? queue : []
+  var writes = 0
+  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++) {
+    if (!isPlainObject(q[i]) || q[i].verb !== "setting") continue
+    if (q[i].id === intent.id) return true
+    writes++
+  }
+  return writes < SETTING_QUEUE_CAP
 }
 
 // The command queue behind a running command, as a pure step: `intent`
-// added to `queue` (a new array; neither is modified). A queued control for
-// the same name is replaced by the newer one, and a reset replaces every
-// queued control and reset (it supersedes them), so a slider drag never
-// queues more than one command per control. Any other ask replaces the
-// other ask queued before it (the latest wins, as before the controls). The
-// new intent goes last, so the order of what the user did is kept, except
-// an on/off ask: it goes first, so turning the camera off never waits
-// behind slider writes.
-function isControlIntent(intent) {
-  return isPlainObject(intent) && (intent.verb === "control" || intent.verb === "reset-controls")
-}
-
+// added to `queue` (a new array; neither is modified). A queued write for
+// the same setting id is replaced by the newer one, and a reset replaces
+// every queued write and reset (it supersedes them), so a slider drag never
+// queues more than one command per setting. Any other ask replaces the
+// other ask queued before it (the latest wins). The new intent goes last, so
+// the order of what the user did is kept, except an on/off ask: it goes
+// first, so turning the camera off never waits behind slider writes. A
+// write queueTakes refuses leaves the queue as it was. So the queue holds at
+// most one other ask, one reset and SETTING_QUEUE_CAP writes: the input is
+// cut to INTENT_QUEUE_CAP as a backstop only, and nothing is ever cut from a
+// queue this function made.
 function enqueueIntent(queue, intent) {
   var q = Array.isArray(queue) ? queue.slice(0, INTENT_QUEUE_CAP) : []
-  if (!isPlainObject(intent)) return q
+  if (!isPlainObject(intent) || !queueTakes(q, intent)) return q
   var out = []
   for (var i = 0; i < q.length; i++) {
     var p = q[i]
     if (!isPlainObject(p)) continue
-    if (intent.verb === "control") {
-      if (p.verb === "control" && p.name === intent.name) continue
-    } else if (intent.verb === "reset-controls") {
-      if (isControlIntent(p)) continue
-    } else if (!isControlIntent(p)) {
+    if (intent.verb === "setting") {
+      if (p.verb === "setting" && p.id === intent.id) continue
+    } else if (intent.verb === "reset-settings") {
+      if (isSettingIntent(p)) continue
+    } else if (!isSettingIntent(p)) {
       continue
     }
     out.push(p)
   }
   if (intent.verb === "enable") out.unshift(intent)
   else out.push(intent)
-  return out.length > INTENT_QUEUE_CAP ? out.slice(out.length - INTENT_QUEUE_CAP) : out
+  return out
 }
 
-// A control or reset intent runs only against the camera whose controls the
-// panel showed when it was made (`camera`, the record's controlsCameraId):
-// the CLI writes to whatever camera is active when it runs.
-function controlIntentBound(intent, record) {
-  return isPlainObject(intent) && isPlainObject(record) && typeof intent.camera === "string"
-    && intent.camera === record.controlsCameraId
-}
-
-// The queue without its control and reset intents (a new array): what is
-// left once the controls belong to another camera.
-function dropControlIntents(queue) {
+// The queue without its setting and reset intents (a new array): what is
+// left once the settings belong to another camera.
+function dropSettingIntents(queue) {
   var q = Array.isArray(queue) ? queue.slice(0, INTENT_QUEUE_CAP) : []
-  return q.filter(function(p) { return isPlainObject(p) && !isControlIntent(p) })
+  return q.filter(function(p) { return isPlainObject(p) && !isSettingIntent(p) })
 }
 
-// Whether an on/off toggle must wait: a command other than a camera image
+// Whether an on/off toggle must wait: a command other than a camera setting
 // write is running or queued, so its result (and with it the target of the
-// toggle) has not arrived. Slider writes never hold the switch.
+// toggle) has not arrived. Setting writes never hold the switch.
 function toggleBlocked(running, queue) {
-  if (isPlainObject(running) && !isControlIntent(running)) return true
+  if (isPlainObject(running) && !isSettingIntent(running)) return true
   var q = Array.isArray(queue) ? queue : []
   for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
-    if (isPlainObject(q[i]) && !isControlIntent(q[i])) return true
+    if (isPlainObject(q[i]) && !isSettingIntent(q[i])) return true
   return false
 }
 
-// Which controls line belongs to which write. The daemon prints one
-// `controls` line after each set or reset that changes something, in the
-// order of the writes, but a line can reach the watch after the next write
-// has started. A command armed when `lines` lines have been read, while the
-// lines of finished writes are due up to `due`, owns the line numbered
-// mark + 1 (mark = controlLineMark(lines, due)); an earlier write's late
-// line never counts as its own.
-function controlLineMark(lines, due) {
+// Whether a queued intent writes setting `id`.
+function queuedSetting(queue, id) {
+  var q = Array.isArray(queue) ? queue : []
+  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
+    if (isPlainObject(q[i]) && q[i].verb === "setting" && q[i].id === id) return true
+  return false
+}
+
+// ---- drafts (the values the user moved to that the daemon has not confirmed)
+
+// A copy of `map` (setting id -> value) with `id` set to `value` (undefined:
+// removed). Only own keys that are ids of the grammar (never a reserved
+// key, see RESERVED_KEYS), at most SETTINGS_ROW_CAP of them, are copied.
+function withSetting(map, id, value) {
+  var out = {}
+  var n = 0
+  if (isPlainObject(map)) {
+    for (var k in map) {
+      if (n >= SETTINGS_ROW_CAP) break
+      if (settingId(k) === "" || !Object.prototype.hasOwnProperty.call(map, k) || map[k] === undefined) continue
+      out[k] = map[k]
+      n++
+    }
+  }
+  if (settingId(id) === "") return out
+  if (value === undefined) delete out[id]
+  else out[id] = value
+  return out
+}
+
+// The drafts still unconfirmed under `record`: a draft goes once the daemon
+// reports that very value, or once its row is no longer offered or no
+// longer enabled.
+function settleDrafts(drafts, record) {
+  var out = {}
+  if (!isPlainObject(drafts) || !settingsSupported(record)) return out
+  var d = withSetting(drafts, "", undefined)
+  for (var id in d) {
+    var row = findSetting(record, id)
+    if (row && row.enabled && row.value !== d[id]) out[id] = d[id]
+  }
+  return out
+}
+
+// Which settings change belongs to which write. The daemon publishes one
+// change (a settings_delta of a new rev) after each set or reset that
+// changes something, in the order of the writes, but it can reach the watch
+// after the next write has started. A command armed when `lines` changes
+// have been read, while the changes of finished writes are due up to `due`,
+// owns change number mark + 1 (mark = settingLineMark(lines, due)); an
+// earlier write's late change never counts as its own.
+function settingLineMark(lines, due) {
   var l = typeof lines === "number" && isFinite(lines) ? lines : 0
   var d = typeof due === "number" && isFinite(due) ? due : 0
   return Math.max(l, d)
 }
 
-// A control write is over and its draft is still the value it wrote, with
-// no newer write for that control queued: "drop" the draft now (it failed,
-// or its own controls line has been read: the slider shows what the camera
-// took), or "settle" it on its own line, still to come.
-function controlWriteEnd(ok, lines, mark) {
+// A setting write is over and its draft is still the value it wrote, with
+// no newer write for that id queued: "drop" the draft now (it failed, or
+// its own change has been read: the row shows what the camera took), or
+// "settle" it on its own change, still to come.
+function settingWriteEnd(ok, lines, mark) {
   if (ok !== true) return "drop"
   return typeof lines === "number" && typeof mark === "number" && lines > mark ? "drop" : "settle"
 }
 
-// After a controls line: `settling` maps a name to { value, line }, a write
-// that ended well and the number of the line it owns. A draft still at that
-// value goes once `lines` reaches that line, whatever the daemon reported;
-// an entry whose draft has moved on (or gone) is dropped. Returns
+// After a change: `settling` maps an id to { value, line }, a write that
+// ended well and the number of the change it owns. A draft still at that
+// value goes once `lines` reaches that change, whatever the daemon
+// reported; an entry whose draft has moved on (or gone) is dropped. Returns
 // { drafts, settling }, new objects.
 function settleWritten(drafts, settling, lines) {
-  var d = withKey(drafts, "", undefined)
+  var d = withSetting(drafts, "", undefined)
+  var s = withSetting(settling, "", undefined)
   var out = {}
-  var s = isPlainObject(settling) ? settling : {}
-  for (var i = 0; i < CONTROL_NAMES.length; i++) {
-    var name = CONTROL_NAMES[i]
-    var entry = s[name]
-    if (!isPlainObject(entry) || d[name] === undefined || d[name] !== entry.value) continue
-    if (typeof lines === "number" && lines >= entry.line) delete d[name]
-    else out[name] = entry
+  for (var id in s) {
+    var entry = s[id]
+    if (!isPlainObject(entry) || ownValue(d, id) === undefined || ownValue(d, id) !== entry.value) continue
+    if (typeof lines === "number" && lines >= entry.line) delete d[id]
+    else out[id] = entry
   }
   return { drafts: d, settling: out }
-}
-
-// Whether a queued intent sets control `name`.
-function queuedControl(queue, name) {
-  var q = Array.isArray(queue) ? queue : []
-  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
-    if (isPlainObject(q[i]) && q[i].verb === "control" && q[i].name === name) return true
-  return false
 }
 
 // ---------------------------------------------------------------- panel tabs
@@ -1663,7 +2226,7 @@ var PANEL_TAB_DEFAULT = "effect"
 var PANEL_TAB_LABELS = { effect: "Effect", camera: "Camera", status: "Status" }
 var PANEL_TAB_DESCRIPTIONS = {
   effect: "Background effect and noise removal",
-  camera: "Camera choice and camera image controls",
+  camera: "Camera choice and camera settings",
   status: "State, consumers, outputs and live figures"
 }
 
@@ -1732,16 +2295,17 @@ function statusRows(record) {
 //           switch;
 //   camera  one per rendered camera row (`cameraCount` is the count the
 //           panel draws, so the cursor and the rows always agree), Next
-//           camera when it is shown, the camera image sliders, one stop each
-//           (index: the position in CONTROL_NAMES), and Reset to defaults:
-//           exactly the ones controlsSection draws, which is what the panel
-//           draws them from;
+//           camera when it is shown, then from `settings` (the settingsView
+//           the panel draws, so collapsed groups and capped rows are no
+//           stops): Reset to defaults (on the settings' title line), each
+//           group header (index: its place in the view) and the rows of an
+//           open group (index: the row's `stop`);
 //   status  nothing (it only shows figures).
 // Nothing is a stop while the daemon is unavailable: no control is drawn. The
 // effect row is no stop either when the CLI or the daemon predates effects
 // (none of its choices can be requested), nor the noise removal switch when
 // the daemon does not report it (it is not drawn).
-function cursorStops(record, cameraCount, previewControls, tab) {
+function cursorStops(record, cameraCount, previewControls, tab, settings) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (previewControls === true) {
@@ -1757,10 +2321,13 @@ function cursorStops(record, cameraCount, previewControls, tab) {
     var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
     for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
     if (canNext(record)) stops.push({ kind: "next", index: -1 })
-    var section = controlsSection(record)
-    for (var c = 0; c < section.controls.length; c++)
-      stops.push({ kind: "control", index: CONTROL_NAMES.indexOf(section.controls[c].name) })
-    if (section.reset) stops.push({ kind: "reset", index: -1 })
+    if (isPlainObject(settings) && settings.reset === true) stops.push({ kind: "reset", index: -1 })
+    var groups = isPlainObject(settings) && Array.isArray(settings.groups) ? settings.groups : []
+    for (var g = 0; g < groups.length && g < SETTINGS_GROUP_CAP; g++) {
+      stops.push({ kind: "group", index: g })
+      var rows = Array.isArray(groups[g].rows) ? groups[g].rows : []
+      for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) stops.push({ kind: "setting", index: rows[r].stop })
+    }
   }
   return stops
 }
@@ -1771,9 +2338,10 @@ function clampCursor(index, length) {
   return Math.max(0, Math.min(length - 1, i))
 }
 
-// Rows that are one stop each (cameras, controls) are told apart by index.
+// Rows that are one stop each (cameras, group headers, settings) are told
+// apart by index.
 function stopHasIndex(kind) {
-  return kind === "camera" || kind === "control"
+  return kind === "camera" || kind === "group" || kind === "setting"
 }
 
 function stopIndex(stops, kind, index) {
