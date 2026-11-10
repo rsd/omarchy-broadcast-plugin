@@ -1,6 +1,6 @@
 # Omarchy Broadcast bar widget
 
-`br.com.dias.omarchy-broadcast` is a bar widget for the Omarchy shell (Quickshell/QML) that controls omarchy-broadcast, a virtual camera daemon with background effects and noise removal. It shows the state of the virtual camera in the bar, turns it on and off, selects the camera and the video effect, switches noise removal, shows live figures while it runs, and can show a live preview of what video apps receive.
+`br.com.dias.omarchy-broadcast` is a bar widget for the Omarchy shell (Quickshell/QML) that controls omarchy-broadcast, a virtual camera daemon with background effects and noise removal. It shows the state of the virtual camera in the bar, turns it on and off, selects the camera and the video effect, switches noise removal, adjusts the camera's own image (brightness, contrast, saturation, sharpness), shows live figures while it runs, and can show a live preview of what video apps receive.
 
 It is a client of `omarchy-broadcastd`, the daemon of the omarchy-broadcast project, and does not include it: it reads the state from the stream of `omarchy-broadcast watch --json` and sends commands through the `omarchy-broadcast` command-line client. For the preview it also runs `omarchy-broadcast preview --json`. It does not speak D-Bus itself and never opens a camera device. The stream formats are specified in `docs/cli-json.md` in the omarchy-broadcast repository; the widget requires its schema version (`v`) 1.
 
@@ -19,15 +19,16 @@ The icon follows the daemon state. Colours come from the active theme.
 | `error` | alert circle | urgent colour; the daemon reports an error |
 | unavailable | video camera, crossed out outline | dimmed; the daemon is not running, does not answer, or the CLI is missing or unsupported |
 
-- Left click turns the camera on or off. It does nothing while an earlier command is still running. While the daemon is unavailable it opens the panel instead, so that a persisted `off` is never flipped without being seen and a stopped daemon is never started by a click.
-- Right or middle click opens and closes the panel.
+- Left (or middle) click opens and closes the panel, as the shell's panel hotkey does.
+- Right click turns the camera on or off. It does nothing while an earlier on/off, camera, effect or noise removal command is still running or waiting; camera image slider writes do not hold it, and the on/off command goes ahead of any that are waiting. While the daemon is unavailable it opens the panel instead, so that a persisted `off` is never flipped without being seen and a stopped daemon is never started by a click.
+- For screen readers the icon carries the tooltip's state as its name and what each click does as its description.
 - The tooltip gives the state, and while running the camera name, the number of consumers, the effect when one is on (background blurred or background replaced) and noise removal when it is on (worded as a setting, "noise removal on", because the daemon may be unable to run it; with an effect, for example "background blurred, noise removal on"). An error text is appended when there is one. When unavailable it names the cause.
 
-The panel shows:
+The panel is 520 pixels wide and as tall as its content, so at the normal size nothing scrolls; it scrolls only on a screen too short for it. From the top:
 
 - the state, the on/off switch and the daemon's error text, if any;
 - the last failed command, if any;
-- PREVIEW, a 16:9 image of exactly what video apps receive from the virtual camera (so black while the camera is idle or while an effect is loading), refreshed live, with a Preview switch and a Preview rate selector (15 fps, the default, or 30 fps, which is smoother and closer to what apps see but uses more CPU). The section is not shown while the daemon is unavailable. Where it shows no image it shows one line instead, or an empty frame reading "Starting preview…" while the preview starts:
+- the preview, a fixed 16:9 area showing exactly what video apps receive from the virtual camera (so black while the camera is idle or while an effect is loading), refreshed live, with one row under it holding the Preview switch and the rate selector (15 fps, the default, or 30 fps, which is smoother and closer to what apps see but uses more CPU). The area is not shown while the daemon is unavailable. Where it shows no image it keeps its place and shows one line inside it ("Starting preview…" while the preview starts):
   - "Camera idle; turn on Preview to start it": the camera is on but idle and the Preview switch is off;
   - "Camera off": the privacy switch is off;
   - "Preview off": the preview is not running in any other state (for example while the camera is starting or in error) and the Preview switch is off;
@@ -35,14 +36,25 @@ The panel shows:
   - "Preview unavailable: ...": `XDG_RUNTIME_DIR` is unset, relative or holds characters the preview cannot use; the switch and the rate selector are not shown;
   - an error line, in the urgent colour: the preview process ended on its own (for example a CLI without the `preview` command, which says it needs 0.18 or newer), the stream reported an outage, or the daemon writes its frames to a different directory than this shell expects. After a failure, close and reopen the panel to retry.
   A preview setting the shell could not store still applies for the session; the panel then says "Could not save the preview setting";
-- the camera in use, the number of consumers (the total of applications holding the virtual camera device and applications linked to the optional PipeWire camera node) and the output mode;
-- the video effect: None, Blur or Replace, with the current one selected (click a choice to change it). While blurring, the blur strength is shown; while replacing, the background image path. Replace can be chosen only once the daemon has a background image; until then it is faded, the panel shows "Replace needs an image:" with the command `omarchy-broadcast effect replace --image PATH` to run in a terminal, and the Replace tooltip names the other way, `background_image` under `[effect]` in the daemon's configuration. The strength and the image are shown, not edited, here. If the `omarchy-broadcast` CLI predates video effects, every choice is faded and the panel says the CLI needs updating; if the CLI knows effects but the running daemon does not (its interface revision is below 2, as when the daemon was not restarted after an upgrade), every choice is faded and the panel says the daemon needs updating;
-- in the same section, under the effect choices, a separate Noise removal switch. Noise removal is not a fourth effect: it is a stage that applies with any effect (it runs before blur or replace, or alone with None), so it is switched on and off on its own and is not one of the choices. It hides nothing, so if the daemon cannot run it the camera keeps streaming without it and the daemon's error text says why. The switch is not shown when the `omarchy-broadcast` CLI or the running daemon does not report noise removal (both predate it; the daemon's interface revision is below 4), rather than showing an off switch that nobody reported;
-- while active, the frame rate, the p50 latency and the CPU and GPU load; a figure the daemon has not reported yet reads as a dash;
-- the list of cameras (click a row to select it) and a Next camera button when there are two or more. The producer lists at most 12 cameras; a row says when more are connected;
+- three tabs, Effect, Camera and Status, of which one is shown (the tab row is not shown while the daemon is unavailable). The panel remembers the last one chosen (the `panelTab` setting, see [Configuration](#configuration)) and opens on Effect the first time;
 - when the daemon is unavailable, the reason and, where it helps, a command to copy. The plugin shows these commands and never runs them.
 
-Keyboard, once the panel is open: Up/Down or j/k move the cursor over the on/off switch, the Preview switch and the Preview rate row (both only where the preview works), the effect row (unless the CLI or the daemon predates effects), the Noise removal switch (when it is shown), the cameras and Next camera (the first press only shows the cursor), Left/Right or h/l move between the choices of the Preview rate and effect rows (arriving on a row lands on the current choice), Enter or Space activates, Tab switches to the neighbouring panel, Escape closes.
+The Effect tab:
+
+- BACKGROUND, the video effect: None, Blur or Replace, with the current one selected (click a choice to change it). While blurring, the blur strength is shown; while replacing, the background image path. Replace can be chosen only once the daemon has a background image; until then it is faded, the panel shows "Replace needs an image:" with the command `omarchy-broadcast effect replace --image PATH` to run in a terminal, and the Replace tooltip names the other way, `background_image` under `[effect]` in the daemon's configuration. The strength and the image are shown, not edited, here. If the `omarchy-broadcast` CLI predates video effects, every choice is faded and the panel says the CLI needs updating; if the CLI knows effects but the running daemon does not (its interface revision is below 2, as when the daemon was not restarted after an upgrade), every choice is faded and the panel says the daemon needs updating;
+- under it, a separate Noise removal switch. Noise removal is not a fourth effect: it is a stage that applies with any effect (it runs before blur or replace, or alone with None), so it is switched on and off on its own and is not one of the choices. It hides nothing, so if the daemon cannot run it the camera keeps streaming without it and the daemon's error text says why. The switch is not shown when the `omarchy-broadcast` CLI or the running daemon does not report noise removal (both predate it; the daemon's interface revision is below 4), rather than showing an off switch that nobody reported.
+
+The Camera tab:
+
+- CAMERAS, the list of cameras (click a row to select it) and a Next camera button when there are two or more. The producer lists at most 12 cameras; a row says when more are connected;
+- CAMERA IMAGE: a slider for each of Brightness, Contrast, Saturation and Sharpness that the camera has, with its current value, and a "Reset to defaults" button; see [Camera image](#camera-image). A slider the camera lacks is not shown. Under its header the section says which case holds: "Changes apply live." while the daemon has the camera open (state `starting` or `active`), otherwise "The camera is not in use: changes are saved and apply when an app next uses it." If the camera has none of the four, the section says so; if the `omarchy-broadcast` CLI or the running daemon predates the controls, it says which one needs updating and shows no slider.
+
+The Status tab:
+
+- the state, the camera in use, the number of consumers and, while the daemon's PipeWire output is on, the same number by kind in a "Used by" row (Apps: applications holding the virtual camera device; PipeWire: links to the PipeWire camera node; Preview: preview leases), the output mode, the state of the PipeWire output (`off`, `ready`, `streaming`, ...) and the daemon's D-Bus interface revision ("D-Bus API") (the daemon reports no version number of its own); a value not reported reads as a dash;
+- LIVE, while active: the frame rate, the p50 latency and the CPU and GPU load; a figure the daemon has not reported yet reads as a dash.
+
+Keyboard, once the panel is open: Up/Down or j/k move the cursor over the on/off switch, the Preview switch and the rate row (both only where the preview works), the tab row, then the controls of the tab shown: on Effect the effect row (unless the CLI or the daemon predates effects) and the Noise removal switch (when it is shown); on Camera the cameras, Next camera, each camera image slider that is shown and Reset to defaults; Status has none (the first press only shows the cursor). On the tab row Left/Right or h/l change the tab; on the rate and effect rows they move between the choices (arriving on a row lands on the current choice); on a slider they move it by about a twentieth of its range. 1, 2 and 3 show the Effect, Camera and Status tab from anywhere in the panel. Enter or Space activates, Tab switches to the neighbouring panel, Escape closes.
 
 ## Requirements
 
@@ -50,6 +62,7 @@ Keyboard, once the panel is open: Up/Down or j/k move the cursor over the on/off
 - A CLI whose `watch --json` prints schema version (`v`) 1. A line with a higher version is reported as "Unsupported omarchy-broadcast version"; any other value is refused as malformed.
 - For the video effects, a running daemon with interface revision 2 or later; for noise removal, interface revision 4 or later (the CLI then reports a `denoise` field). With an older daemon the widget still shows the state and switches the camera; it fades the effect choices or hides the Noise removal switch.
 - For the preview, omarchy-broadcast 0.18.0 or newer: a CLI with the `preview` command and a running daemon with interface revision 5 or later. With an older CLI or daemon the panel says so, and the rest of the plugin works as before.
+- For the camera image controls, omarchy-broadcast and omarchy-broadcastd 0.19.0 or newer: a CLI whose snapshot reports `camera_controls` and that has the `controls` command, and a running daemon with D-Bus interface revision 6 or later. With an older CLI or daemon the panel says which one needs updating, and the rest of the plugin works as before.
 - The Omarchy shell (Quickshell) with the plugin system, and `omarchy` on `PATH`.
 - A theme-aware Nerd Font for the icons, as the rest of the bar uses.
 
@@ -85,11 +98,11 @@ omarchy bar put  br.com.dias.omarchy-broadcast --after omarchy.clock
 
 ## Configuration
 
-Three settings.
+Four settings.
 
 `cliPath` is the absolute path of the `omarchy-broadcast` binary. A leading `~/` means the home directory. A bare name such as `omarchy-broadcast` or a relative path is refused, because a command would then run relative to whatever directory the shell has. It is empty by default.
 
-`previewEnabled` (default off) is the panel's Preview switch. On: the preview runs whenever a panel is open, and starts the camera if it is not already running. Off: the preview runs only while another application already uses the virtual camera. `previewFps` (default 15) is the Preview rate, 15 or 30; any other value reads as 15. Both are stored when you change them in the panel, and only then: the plugin writes its settings on a user action, never to store a default or a read value.
+`previewEnabled` (default off) is the panel's Preview switch. On: the preview runs whenever a panel is open, and starts the camera if it is not already running. Off: the preview runs only while another application already uses the virtual camera. `previewFps` (default 15) is the Preview rate, 15 or 30; any other value reads as 15. `panelTab` (default `effect`) is the tab the panel shows: `effect`, `camera` or `status`; any other value reads as `effect`. All three are stored when you change them in the panel, and only then: the plugin writes its settings on a user action, never to store a default or a read value. A change the shell cannot store (no bar-layout entry to write) holds until the shell restarts; for the preview settings the panel says so.
 
 The binary is resolved in this order:
 
@@ -104,9 +117,9 @@ A binary found on `PATH` wins over the development-build fallback; set `cliPath`
 - One `omarchy-broadcast watch --json` process serves every bar (every monitor). There is no polling: the daemon pushes each change, and the widget is exactly as fresh as the stream.
 - The process starts when the first widget appears and stops when the last one goes away.
 - When it exits, it is started again after 1 s, doubling up to 30 s. The delay returns to 1 s only after a watch has run for 30 s, so a watch that dies right after its first line does not restart every second.
-- Commands (`on`, `off`, `camera -- <id>`, `camera next`, `effect none|blur|replace`, `denoise on|off`) run as argument lists, never through a shell, and time out after 30 s. A new click is ignored while one runs. The camera id is passed as one argument after `--`. The effect is always one of the three fixed words, and noise removal one of `on` and `off`; nothing the daemon reports is passed back on the command line.
-- Text from the daemon (camera names, errors, the background image path) is shown as plain text, stripped of markup, control, bidi and invisible formatting characters (the zero-width joiner and non-joiner stay, so emoji sequences and Persian or Arabic words display correctly), and shortened. The background image path is shown inside a left-to-right Unicode isolate, so right-to-left text in a file name cannot reorder the row or reverse the path. An effect name the plugin does not know selects no choice and is reported as such; a blur strength outside 0 to 1 reads as a dash. The producer already limits a line to 4096 bytes and the camera list to 12; the plugin drops a line over 8192 characters and restarts the watch.
-- Reads never start the daemon. The commands `on`, `off`, `camera`, `effect` and `denoise` start it through D-Bus activation if you installed that file (see "Service presence and activation" in `docs/dbus-api.md` in the omarchy-broadcast repository); the widget avoids sending them while the daemon is known to be down.
+- Commands (`on`, `off`, `camera -- <id>`, `camera next`, `effect none|blur|replace`, `denoise on|off`, `controls set NAME VALUE`, `controls reset`) run as argument lists, never through a shell, and time out after 30 s. A new click is ignored while one runs; the camera image sliders and Reset to defaults instead wait behind it (see [Camera image](#camera-image)). The camera id is passed as one argument after `--`. The effect is always one of the three fixed words, noise removal one of `on` and `off`, a control name one of `brightness`, `contrast`, `saturation` and `sharpness`, and a control value a decimal integer within the range the daemon reports for that control, on its step; nothing else the daemon reports is passed back on the command line.
+- Text from the daemon (camera names, errors, the background image path) is shown as plain text, stripped of markup, control, bidi and invisible formatting characters (the zero-width joiner and non-joiner stay, so emoji sequences and Persian or Arabic words display correctly), and shortened. The background image path is shown inside a left-to-right Unicode isolate, so right-to-left text in a file name cannot reorder the row or reverse the path. An effect name the plugin does not know selects no choice and is reported as such; a blur strength outside 0 to 1 reads as a dash. The producer already limits a line to 4096 bytes and the camera list to 12; the plugin drops a line over 8192 characters and restarts the watch. Of a list of camera controls it reads at most 16 entries, and keeps an entry only when every number in it is an integer, its minimum is not above its maximum, its step is at least 1 and its default and value lie within the range.
+- Reads never start the daemon. The commands `on`, `off`, `camera`, `effect`, `denoise` and `controls` start it through D-Bus activation if you installed that file (see "Service presence and activation" in `docs/dbus-api.md` in the omarchy-broadcast repository); the widget avoids sending them while the daemon is known to be down.
 
 When the daemon stops or restarts, the stream says so and the icon shows "unavailable" until the daemon is back; no action is needed. If the watch itself ends, the panel names the exit status or signal and the retry delay.
 
@@ -120,6 +133,16 @@ The preview shows the frames the daemon writes for the virtual camera, so it is 
 - The plugin never opens the camera device and never speaks D-Bus. The command runs as an argument list, with no shell, and `N` is only ever 15 or 30. Frames are read from one fixed file, `$XDG_RUNTIME_DIR/omarchy-broadcast/preview.jpg`; every frame line the CLI prints is checked to name exactly that path, and any other is dropped, as is a frame that is not newer than the last. Each new frame is loaded under a new URL, so it is never served from a cache.
 - The stream format and the daemon side are described in `docs/cli-json.md` and `docs/adr/0019-live-preview.md` in the omarchy-broadcast repository.
 - Trade-off: the plugin drops a line over 8192 characters and stops the preview, but a line that never ends is buffered until it does, as for the watch stream. The producer is your own CLI, from your own installation, and it caps its lines.
+
+## Camera image
+
+Many webcams leave the factory, or another application, with image settings far from neutral: sharpness at its maximum draws halos around edges, a high saturation makes skin look sunburnt. The CAMERA IMAGE section of the Camera tab sets the camera's own controls (UVC brightness, contrast, saturation and sharpness), which change the picture before any effect runs.
+
+- Each slider shows the control's current value and spans the range the camera reports, in its steps. Dragging writes the value about 150 ms after the hand stops and once more on release, so a drag runs a few commands, not one per pixel; while a command runs, later moves of the same slider replace each other and only the last one is sent after it. A write or reset still waiting when the active camera changes is dropped, never applied to the other camera. While you hold a slider, news from the daemon does not move it.
+- While the daemon has the camera open (state `starting` or `active`), a change applies at once, and the preview above shows it. In any other state the daemon stores the value and applies it the next time the camera opens. The note under the section header says which case holds.
+- Reset to defaults sets every control back to the default the camera reports, and the daemon forgets the stored values.
+- The daemon, not the plugin, keeps the values: per camera, across restarts, and it applies them each time it opens that camera, whichever client set them. The plugin stores nothing; the same settings are reachable with `omarchy-broadcast controls`.
+- Only brightness, contrast, saturation and sharpness are offered. A control the daemon reports beyond those (backlight compensation) is left alone here.
 
 ## Troubleshooting
 
@@ -144,6 +167,10 @@ The preview shows the frames the daemon writes for the virtual camera, so it is 
 | omarchy-broadcast preview exited / stopped / could not be started ... Reopen the panel to retry. | the preview process ended | reopen the panel; if it repeats, run `omarchy-broadcast preview --json` in a terminal |
 | omarchy-broadcastd writes its preview elsewhere than this shell expects | the daemon and the shell have different `XDG_RUNTIME_DIR` values | start both from the same session environment |
 | Preview unavailable: ... | `XDG_RUNTIME_DIR` is unset, relative or unusable in the shell's environment | fix the shell's environment |
+| The omarchy-broadcast CLI needs updating for the camera image controls | the `omarchy-broadcast` CLI predates them (its snapshot has no `camera_controls`) | update the CLI and the daemon to 0.19.0 or newer |
+| The daemon needs updating for the camera image controls | the CLI knows them, but the running omarchy-broadcastd reports an interface revision below 6 | update omarchy-broadcastd to 0.19.0 or newer, or restart it if it is already updated: `systemctl --user restart omarchy-broadcastd` |
+| This camera has no brightness, contrast, saturation or sharpness control | the camera exposes none of the four, or no camera is in use | not an error |
+| A camera image slider jumps back after you let go, and an error shows | the daemon refused the value; the slider shows what the camera has | the text after the colon is the daemon's reason |
 | Could not save the preview setting | the shell stored neither the Preview switch nor the rate | the choice holds for this session; check the plugin's entry in the bar layout |
 | D-Bus failure | the CLI could not reach the session bus | check `DBUS_SESSION_BUS_ADDRESS` in the shell's environment |
 | Command failed with status N | any other exit status | run the same `omarchy-broadcast` command in a terminal |
@@ -156,11 +183,11 @@ The preview shows the frames the daemon writes for the virtual camera, so it is 
 Run from the root of the checkout. None of the tests needs omarchy-broadcast, except the optional cases noted below. All commands are read-only with respect to your shell and your configuration; none starts or touches the running shell.
 
 ```sh
-# Unit tests of the logic (Model.js): reducer, caps, tooltips, argument lists, effects, noise removal, the preview (run rule, argument list, frame lines, placeholder texts, settings), path resolution
+# Unit tests of the logic (Model.js): reducer, caps, tooltips, argument lists, effects, noise removal, the camera image controls (parsing, caps, capability rule, snapping, argument lists, the command queue), the preview (run rule, argument list, frame lines, placeholder texts, settings), the panel tabs (stored value, keyboard stops) and the Status rows, the click actions, path resolution
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner \
     -input br.com.dias.omarchy-broadcast/tests/tst_model.qml
 
-# Source invariants (plain text everywhere, no shell strings, no polling timer, manifest id, effect and noise removal whitelists, the preview's single process, argument list and fixed frame path)
+# Source invariants (plain text everywhere, no shell strings, no polling timer, manifest id, effect, noise removal and camera control whitelists, the command queue and slider debounce, the preview's single process, argument list and fixed frame path, the click mapping, the tab setting and the panel's size)
 python3 -I br.com.dias.omarchy-broadcast/tests/check-source.py
 
 # qmllint on every QML file, import errors fatal
@@ -180,7 +207,7 @@ OMARCHY_BROADCAST_CLI=/absolute/path/to/omarchy-broadcast br.com.dias.omarchy-br
 ```
 
 - `qmltestrunner` and `qmllint` come from Qt 6 (`/usr/lib/qt6/bin`, package `qt6-declarative` on Arch). `lint.sh` and `run-harness.sh` also need the Omarchy shell modules, by default in `/usr/share/omarchy/shell`; set `OMARCHY_SHELL` to use another copy, such as the `shell/` directory of a checkout of the Omarchy repository.
-- `run-harness.sh` builds its own directory (under `$TMPDIR`, or `--work DIR` if that is empty or an earlier harness directory), runs a separate offscreen Quickshell with the fake CLI `tests/fake-omarchy-broadcast` (which also prints a preview stream and writes real JPEG frames into the harness's own runtime directory, never yours), and removes nothing outside it. It prints `ALL OK` and exits 0 on success. `--screens DIR` keeps the screenshots. Its text-layout checks need a font installed (Omarchy's default is JetBrains Mono Nerd Font).
+- `run-harness.sh` builds its own directory (under `$TMPDIR`, or `--work DIR` if that is empty or an earlier harness directory), runs a separate offscreen Quickshell with the fake CLI `tests/fake-omarchy-broadcast` (which also reports and sets camera image controls, prints a preview stream and writes real JPEG frames into the harness's own runtime directory, never yours), and removes nothing outside it. It prints `ALL OK` and exits 0 on success. `--screens DIR` keeps the screenshots. Its text-layout checks need a font installed (Omarchy's default is JetBrains Mono Nerd Font).
 - The CLI resolver cases run against scratch directory trees the harness builds, so the harness does not depend on where this checkout lives. With `OMARCHY_BROADCAST_CLI` set to the absolute path of a real `omarchy-broadcast` binary, one more case checks that the resolver finds it through a symlinked plugin directory; the resolver only prints the path, and nothing executes the binary in this mode. Without the variable that case prints a `SKIP` line and does not count as a failure.
 - `--live` takes the CLI from `OMARCHY_BROADCAST_CLI` and the daemon from `OMARCHY_BROADCASTD` (default: `omarchy-broadcastd` in the same directory as the CLI), and refuses to run without them. It starts its own `omarchy-broadcastd` with a scratch configuration and state, opens the virtual camera for a few seconds with `gst-launch-1.0` and stops everything again. It refuses to run if `br.com.dias.OmarchyBroadcast` already has an owner on the session bus, and it needs the "Omarchy Broadcast" v4l2loopback device (`docs/setup/loopback.md` in the omarchy-broadcast repository).
 - Continuous integration (`.github/workflows/ci.yml`) runs all of the above except `--live` and the real-CLI case in an Arch Linux container, against the shell modules of a pinned Omarchy release.
@@ -194,7 +221,7 @@ omarchy plugin remove br.com.dias.omarchy-broadcast
 
 If you linked the plugin, deleting the link has the same effect: `rm ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast`. If a placement is left in the bar layout, remove it with the shell's bar commands (`omarchy bar --help`) and reload the shell.
 
-The plugin starts no service of its own and writes no files, except that the shell stores a preview setting you change in the panel in the plugin's bar-layout entry. The processes it owns are the `watch` child and, while a panel is open, the `preview` child; both end with the shell (they exit when their output pipe closes or on SIGTERM). Removing the plugin does not touch the daemon; to stop and uninstall that, see "Stop, disable, uninstall" in `docs/setup/daemon.md` in the omarchy-broadcast repository.
+The plugin starts no service of its own and writes no files, except that the shell stores a preview setting or the tab you choose in the panel in the plugin's bar-layout entry. The processes it owns are the `watch` child and, while a panel is open, the `preview` child; both end with the shell (they exit when their output pipe closes or on SIGTERM). Removing the plugin does not touch the daemon; to stop and uninstall that, see "Stop, disable, uninstall" in `docs/setup/daemon.md` in the omarchy-broadcast repository.
 
 ## Notes for maintainers and marketplace review
 
@@ -207,7 +234,7 @@ The plugin starts no service of its own and writes no files, except that the she
 
 The plugin's version is the `version` field of `br.com.dias.omarchy-broadcast/manifest.json`. It started at 0.16.0, the omarchy-broadcast release it was split from, and is independent of the omarchy-broadcast version from then on: the two are released separately, and matching numbers carry no meaning.
 
-Compatibility is set by the interface, not by version numbers. The plugin needs an `omarchy-broadcast` CLI whose `watch --json` output is schema version (`v`) 1, specified in `docs/cli-json.md` in the omarchy-broadcast repository; the video effects need a daemon interface revision of 2 or later and noise removal one of 4 or later and the preview one of 5 or later, with a CLI that has `preview --json` (see [Requirements](#requirements)). A change of the schema version requires a new release of the plugin.
+Compatibility is set by the interface, not by version numbers. The plugin needs an `omarchy-broadcast` CLI whose `watch --json` output is schema version (`v`) 1, specified in `docs/cli-json.md` in the omarchy-broadcast repository; the video effects need a daemon interface revision of 2 or later, noise removal one of 4 or later, the preview one of 5 or later, with a CLI that has `preview --json`, and the camera image controls one of 6 or later, with a CLI that reports `camera_controls` (see [Requirements](#requirements)). A change of the schema version requires a new release of the plugin.
 
 ## Licence
 
