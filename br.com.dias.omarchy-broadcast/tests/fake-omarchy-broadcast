@@ -16,17 +16,26 @@
 #     two reads (a line, or a character, cut across a read boundary);
 #   - if $FAKE_OB_DIR/watch-exit exists, the watch exits with that status
 #     right after the snapshot (a watch that dies after connecting).
-#   - camera image controls: if $FAKE_OB_DIR/controls-mode exists, every
-#     snapshot line it prints (from snapshot or feed) that has no
-#     camera_controls field gets one, by the mode's first word:
-#       absent  none (a CLI that predates the controls)
-#       null    "camera_controls":null (a daemon below interface revision 6)
-#       list    {"camera":C,"controls":[...]} from controls-state (no lines:
-#               an empty list; leave a control out: a camera lacking it)
-#     where controls-state holds one control per line,
-#     `name min max step default value stored` (stored 0 or 1), and C is the
-#     first line of controls-camera. The harness's own snapshot lines may
-#     carry the field themselves; those are printed as they are.
+#   - camera settings: if $FAKE_OB_DIR/settings-mode exists, every snapshot
+#     line it prints (from snapshot or feed) is followed, by the mode's first
+#     word, by:
+#       list   the settings set of settings-state, as settings_group lines
+#              (rev from settings-rev, serial from settings-serial, camera
+#              from settings-camera; at most settings-per-line settings a
+#              line, default 4, so a group of more is cut into parts)
+#       clear  a settings_clear line
+#       none   nothing (a daemon below interface revision 7)
+#     settings-state holds one setting per line, fields separated by "|":
+#       group|group label|id|type|label|value|default|stored|min|max|step|
+#       unit|options|master|when|reason|fixed
+#     options as value:Label,value:Label (enum); a setting with a master
+#     (another setting's id) is enabled only while the master's value is one
+#     of `when` (comma-separated), else greyed with `reason`; fixed 1: always
+#     greyed (a read-only control). Values: decimal (int), true/false (bool),
+#     an option value (enum), - (action).
+#     A feed line that is exactly {"fake":"settings-set"} is not printed:
+#     the settings set is, alone, as the real CLI prints it after a serial
+#     change (it reads the settings again, with no snapshot before them).
 #
 # `preview --json [--fps 15|30]`: as the real CLI's preview stream, without a
 # daemon. Any other fps (or argument) is a usage error, exit 2. It writes into
@@ -42,14 +51,18 @@
 #     prints `{"v":1,"type":"frame","seq":N,"path":P}`, seq from 1.
 # On SIGTERM/SIGINT/SIGHUP it removes the frame files and exits 0.
 #
-# `controls set NAME VALUE` and `controls reset`: as the other commands below
-# (delay, stderr, exit), after a usage check (exit 2: wrong arguments, or a
-# VALUE that is not a decimal integer). When the exit status is 0 and
-# controls-state exists, it is the daemon: an unknown NAME or a VALUE out of
-# range is refused (exit 1, a message on stderr); otherwise the value is
-# stored (reset: every value back to its default, nothing stored) and the
-# new `controls` line is appended to the feed, as the daemon's signal would
-# reach a watch. Without controls-state the harness writes the reaction.
+# `settings set --camera=ID -- SETTING VALUE` and `settings reset
+# --camera=ID`: as the other commands below (delay, stderr, exit), after a
+# usage check (exit 2: any other shape). When the exit status is 0 and
+# settings-state exists, it is the daemon: another camera than
+# settings-camera, an unknown id, a greyed setting, or a value that is not
+# one of the setting's (an int off its range or step, a bool that is not
+# true/false, an enum that is not an option, an action value that is not
+# true) is refused (exit 1, a message on stderr); otherwise the value is
+# stored (reset: every value back to its default, nothing stored), the rev
+# moves on, and the settings_delta lines are appended to the feed, as the
+# daemon's signal would reach a watch: the setting written and every
+# setting whose enabled state changed with it (reset: all, 16 a line).
 #
 # Any other command (`on`, `off`, `camera -- <id>`, `camera next`,
 # `effect none|blur|replace`, `denoise on|off`): sleeps $FAKE_OB_DIR/delay
@@ -70,33 +83,112 @@ log=$dir/log
   printf '\n'
 } >> "$log"
 
-# The controls of controls-state as the CLI prints them:
-# {"camera":C,"controls":[...]}.
-controls_object() {
-  camera=$(head -n 1 -- "$dir/controls-camera" 2>/dev/null || true)
-  awk -v camera="$camera" '
-    BEGIN { printf "{\"camera\":\"%s\",\"controls\":[", camera; sep = "" }
-    NF == 7 {
-      printf "%s{\"name\":\"%s\",\"min\":%s,\"max\":%s,\"step\":%s,\"default\":%s,\"value\":%s,\"stored\":%s}",
-        sep, $1, $2, $3, $4, $5, $6, ($7 == 1 ? "true" : "false")
-      sep = ","
+# The awk functions shared by the settings emulation: the state is read
+# into f[k, field] (k = 1..n), val[id], typ[id], row[id]; en[k] says whether
+# setting k is enabled under the values in val.
+# shellcheck disable=SC2016 # an awk program: its $ fields are awk's, not the shell's
+SETTINGS_AWK='
+function jstr(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+function jval(t, v) { if (t == "int") return v + 0; if (t == "bool") return (v == "true" ? "true" : "false"); return jstr(v) }
+function enabled(k,   m, i, nw, ws) {
+  if (f[k, 17] == "1") return 0
+  m = f[k, 14]
+  if (m == "") return 1
+  nw = split(f[k, 15], ws, ",")
+  for (i = 1; i <= nw; i++) if (val[m] == ws[i]) return 1
+  return 0
+}
+function setting(k,   s, t, i, n, os, kv, w, nw, ws, mt) {
+  t = f[k, 4]
+  s = "{\"id\":" jstr(f[k, 3]) ",\"label\":" jstr(f[k, 5]) ",\"type\":" jstr(t) ",\"scope\":\"camera\",\"stored\":" (f[k, 8] == "1" ? "true" : "false")
+  s = s ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16])
+  w = ""
+  if (f[k, 14] != "") {
+    mt = typ[f[k, 14]]
+    nw = split(f[k, 15], ws, ",")
+    if (nw == 1) w = "{\"id\":" jstr(f[k, 14]) ",\"op\":\"eq\",\"value\":" jval(mt, ws[1]) "}"
+    else {
+      w = "{\"id\":" jstr(f[k, 14]) ",\"op\":\"in\",\"value\":["
+      for (i = 1; i <= nw; i++) w = w (i > 1 ? "," : "") jval(mt, ws[i])
+      w = w "]}"
     }
-    END { printf "]}" }' "$dir/controls-state" 2>/dev/null
+  }
+  s = s ",\"enabled_when\":[" w "]"
+  if (t != "action") s = s ",\"value\":" jval(t, f[k, 6]) ",\"default\":" jval(t, f[k, 7])
+  if (t == "int") {
+    s = s ",\"min\":" (f[k, 9] + 0) ",\"max\":" (f[k, 10] + 0) ",\"step\":" (f[k, 11] + 0)
+    if (f[k, 12] != "") s = s ",\"unit\":" jstr(f[k, 12])
+    s = s ",\"hint\":\"slider\""
+  }
+  if (t == "bool") s = s ",\"hint\":\"switch\""
+  if (t == "enum") {
+    n = split(f[k, 13], os, ",")
+    s = s ",\"options\":["
+    for (i = 1; i <= n; i++) { split(os[i], kv, ":"); s = s (i > 1 ? "," : "") "{\"value\":" jstr(kv[1]) ",\"label\":" jstr(kv[2]) "}" }
+    s = s "],\"hint\":\"segmented\""
+  }
+  return s "}"
+}
+function change(k,   s) {
+  s = "{\"id\":" jstr(f[k, 3])
+  if (f[k, 4] != "action") s = s ",\"value\":" jval(f[k, 4], f[k, 6])
+  return s ",\"stored\":" (f[k, 8] == "1" ? "true" : "false") ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16]) "}"
+}
+function load(   i) { n++; for (i = 1; i <= 17; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
+function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 17; i++) s = s "|" f[k, i]; return s }
+'
+
+setting_file() { head -n 1 -- "$dir/$1" 2>/dev/null || echo "$2"; }
+
+# The settings set of settings-state as settings_group lines.
+settings_set() {
+  awk -F'|' -v camera="$(setting_file settings-camera "")" -v rev="$(setting_file settings-rev 1)" \
+      -v serial="$(setting_file settings-serial 1)" -v per="$(setting_file settings-per-line 4)" "$SETTINGS_AWK"'
+    NF >= 16 { load() }
+    END {
+      for (k = 1; k <= n; k++) en[k] = enabled(k)
+      lines = 0
+      k = 1
+      while (k <= n) {
+        start = k
+        while (k <= n && f[k, 1] == f[start, 1]) k++
+        parts = int((k - start + per - 1) / per)
+        for (p = 1; p <= parts; p++) {
+          lines++
+          ls[lines] = start + (p - 1) * per
+          le[lines] = start + p * per - 1
+          if (le[lines] > k - 1) le[lines] = k - 1
+          lp[lines] = p
+          lq[lines] = parts
+        }
+      }
+      for (i = 1; i <= lines; i++) {
+        s = ""
+        for (j = ls[i]; j <= le[i]; j++) s = s (j > ls[i] ? "," : "") setting(j)
+        printf "{\"v\":1,\"type\":\"settings_group\",\"schema\":1,\"rev\":%d,\"serial\":%d,\"camera\":%s,\"index\":%d,\"count\":%d,\"part\":%d,\"parts\":%d,\"group\":{\"id\":%s,\"label\":%s,\"settings\":[%s]}}\n",
+          rev, serial, jstr(camera), i - 1, lines, lp[i], lq[i], jstr(f[ls[i], 1]), jstr(f[ls[i], 2]), s
+      }
+    }' "$dir/settings-state"
 }
 
-# stdin -> stdout, adding camera_controls to snapshot lines per controls-mode.
-with_controls() {
-  mode=$(head -n 1 -- "$dir/controls-mode" 2>/dev/null || echo absent)
-  case $mode in
-    null) add=',"camera_controls":null' ;;
-    list) add=',"camera_controls":'$(controls_object) ;;
-    *) add="" ;;
+# After a snapshot line: the settings set, a settings_clear, or nothing.
+settings_after_snapshot() {
+  case $(setting_file settings-mode none) in
+    list) settings_set ;;
+    clear) printf '{"v":1,"type":"settings_clear","rev":%s,"serial":%s}\n' "$(setting_file settings-rev 1)" "$(setting_file settings-serial 1)" ;;
   esac
-  if [ -z "$add" ]; then
-    cat
-  else
-    # ENVIRON, not -v: awk would read backslash escapes in a -v value.
-    ADD=$add awk '/"type":"snapshot"/ && !/"camera_controls"/ { sub(/}$/, ""); $0 = $0 ENVIRON["ADD"] "}" } { print }'
+}
+
+# Line $2 of file $1, then what follows a snapshot line (or, for the
+# settings-set marker, only the set).
+emit_line() {
+  if [ -f "$dir/settings-mode" ] && sed -n "${2}p" -- "$1" | grep -qx '{"fake":"settings-set"}'; then
+    settings_set
+    return
+  fi
+  sed -n "${2}p" -- "$1"
+  if [ -f "$dir/settings-mode" ] && sed -n "${2}p" -- "$1" | grep -q '"type":"snapshot"'; then
+    settings_after_snapshot
   fi
 }
 
@@ -111,51 +203,86 @@ if [ "${1:-}" = "watch" ] && [ "${2:-}" = "--json" ]; then
     cat "$dir/snapshot.2" 2>/dev/null
   fi
   if [ -f "$dir/snapshot" ]; then
-    if [ -f "$dir/controls-mode" ]; then with_controls < "$dir/snapshot"; else cat "$dir/snapshot"; fi
+    lines=$(wc -l < "$dir/snapshot")
+    i=0
+    while [ "$i" -lt "$lines" ]; do
+      i=$((i + 1))
+      emit_line "$dir/snapshot" "$i"
+    done
   fi
   [ -f "$dir/watch-exit" ] && exit "$(cat "$dir/watch-exit")"
   while :; do
     total=$(wc -l < "$feed")
     while [ "$n" -lt "$total" ]; do
       n=$((n + 1))
-      if [ -f "$dir/controls-mode" ]; then sed -n "${n}p" "$feed" | with_controls; else sed -n "${n}p" "$feed"; fi
+      emit_line "$feed" "$n"
     done
     sleep 0.05
   done
 fi
 
-if [ "${1:-}" = "controls" ]; then
+if [ "${1:-}" = "settings" ]; then
   case ${2:-} in
     set)
-      [ $# -eq 4 ] || { echo "fake: usage: controls set NAME VALUE" >&2; exit 2; }
-      case $4 in
-        ''|-|*[!0-9-]*|?*-*) echo "fake: invalid value '$4' for '<VALUE>'" >&2; exit 2 ;;
-      esac ;;
+      [ $# -eq 6 ] && [ "$4" = "--" ] || { echo "fake: usage: settings set --camera=ID -- SETTING VALUE" >&2; exit 2; }
+      case $3 in --camera=?*) ;; *) echo "fake: usage: settings set --camera=ID -- SETTING VALUE" >&2; exit 2 ;; esac ;;
     reset)
-      [ $# -eq 2 ] || { echo "fake: usage: controls reset" >&2; exit 2; } ;;
-    *) echo "fake: usage: controls set NAME VALUE | controls reset" >&2; exit 2 ;;
+      [ $# -eq 3 ] || { echo "fake: usage: settings reset --camera=ID" >&2; exit 2; }
+      case $3 in --camera=?*) ;; *) echo "fake: usage: settings reset --camera=ID" >&2; exit 2 ;; esac ;;
+    *) echo "fake: usage: settings set|reset" >&2; exit 2 ;;
   esac
   [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
   [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
   status=0
   [ -f "$dir/exit" ] && status=$(cat "$dir/exit")
-  [ "$status" -eq 0 ] && [ -f "$dir/controls-state" ] || exit "$status"
-  state=$dir/controls-state
-  if [ "$2" = set ]; then
-    awk -v name="$3" -v value="$4" '
-      NF == 7 && $1 == name { found = 1; if (value + 0 < $2 + 0 || value + 0 > $3 + 0) bad = 1; $6 = value + 0; $7 = 1 }
-      { print }
-      END { exit (!found ? 3 : (bad ? 4 : 0)) }' "$state" > "$state.tmp"
-    case $? in
-      0) ;;
-      3) rm -f -- "$state.tmp"; echo "omarchy-broadcast: the camera has no control $3" >&2; exit 1 ;;
-      *) rm -f -- "$state.tmp"; echo "omarchy-broadcast: $4 is out of range for $3" >&2; exit 1 ;;
-    esac
-  else
-    awk 'NF == 7 { $6 = $5; $7 = 0 } { print }' "$state" > "$state.tmp"
-  fi
+  [ "$status" -eq 0 ] && [ -f "$dir/settings-state" ] || exit "$status"
+  camera=${3#--camera=}
+  [ "$camera" = "$(setting_file settings-camera "")" ] || { echo "omarchy-broadcast: no camera $camera" >&2; exit 1; }
+  state=$dir/settings-state
+  rev=$(($(setting_file settings-rev 1) + 1))
+  serial=$(setting_file settings-serial 1)
+  deltas=$dir/settings-delta.tmp
+  : > "$deltas"
+  if [ "$2" = set ]; then id=$5 value=$6; else id="" value=""; fi
+  awk -F'|' -v id="$id" -v value="$value" -v reset="$([ "$2" = reset ] && echo 1)" -v out="$deltas" \
+      -v head="{\"v\":1,\"type\":\"settings_delta\",\"schema\":1,\"rev\":$rev,\"serial\":$serial,\"camera\":" \
+      -v camera="$camera" "$SETTINGS_AWK"'
+    NF >= 16 { load() }
+    END {
+      for (k = 1; k <= n; k++) before[k] = enabled(k)
+      if (reset == "1") {
+        for (k = 1; k <= n; k++) { f[k, 6] = f[k, 7]; f[k, 8] = "0"; val[f[k, 3]] = f[k, 7] }
+      } else {
+        if (!(id in row)) { print "omarchy-broadcast: the camera has no setting " id > "/dev/stderr"; exit 3 }
+        k = row[id]
+        if (!before[k]) { print "omarchy-broadcast: " f[k, 16] > "/dev/stderr"; exit 4 }
+        t = f[k, 4]
+        ok = 0
+        if (t == "int") ok = value ~ /^-?[0-9]+$/ && value + 0 >= f[k, 9] + 0 && value + 0 <= f[k, 10] + 0 && (value - f[k, 9]) % f[k, 11] == 0
+        else if (t == "bool") ok = value == "true" || value == "false"
+        else if (t == "action") ok = value == "true"
+        else { no = split(f[k, 13], os, ","); for (i = 1; i <= no; i++) { split(os[i], kv, ":"); if (kv[1] == value) ok = 1 } }
+        if (!ok) { print "omarchy-broadcast: invalid value " value " for " id > "/dev/stderr"; exit 5 }
+        if (t != "action") { f[k, 6] = (t == "int" ? value + 0 : value); f[k, 8] = "1"; val[id] = f[k, 6] }
+      }
+      for (k = 1; k <= n; k++) en[k] = enabled(k)
+      m = 0
+      for (k = 1; k <= n; k++) if (reset == "1" || f[k, 3] == id || en[k] != before[k]) { m++; ch[m] = change(k) }
+      for (i = 1; i <= m; i += 16) {
+        s = ""
+        for (j = i; j <= m && j < i + 16; j++) s = s (j > i ? "," : "") ch[j]
+        print head jstr(camera) ",\"changes\":[" s "]}" > out
+      }
+      for (k = 1; k <= n; k++) print state_line(k)
+    }' "$state" > "$state.tmp"
+  case $? in
+    0) ;;
+    *) rm -f -- "$state.tmp" "$deltas"; exit 1 ;;
+  esac
   mv -f -- "$state.tmp" "$state"
-  printf '{"v":1,"type":"controls",%s\n' "$(controls_object | sed 's/^{//')" >> "$dir/feed"
+  echo "$rev" > "$dir/settings-rev"
+  cat "$deltas" >> "$dir/feed"
+  rm -f -- "$deltas"
   exit 0
 fi
 

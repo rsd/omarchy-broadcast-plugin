@@ -19,7 +19,7 @@ import "Model.js" as Model
 // new instance and strands this one, which then has no readers and stays
 // silent. Nothing here polls: the stream is event-driven, and the only timers
 // are one-shots: the respawn backoff after the watch exits on its own, and
-// the camera image sliders' write debounce, started only by a user's move.
+// the camera settings' write debounce, started only by a user's move.
 //
 // Settings. allowMultiple is false, so the widgets attached here are the same
 // layout entry drawn once per monitor and carry the same `cliPath`; the most
@@ -39,7 +39,7 @@ Singleton {
   // A command is running or queued: its result has not arrived yet.
   property bool commandBusy: false
   // An on/off toggle waits (the bar's right click, the panel switch): a
-  // command other than a camera image write is running or queued. Slider
+  // command other than a camera setting write is running or queued. Setting
   // writes never hold it; an on/off ask goes ahead of them in the queue.
   readonly property bool toggleBusy: Model.toggleBlocked(runningIntent, pendingIntents)
 
@@ -91,24 +91,29 @@ Singleton {
   property int commandExitCode: 0
   property var commandStderr: Model.firstLineStart()
 
-  // ---- camera image controls -------------------------------------------------
-  // name -> the value a slider (or a key) moved to that the daemon has not
-  // confirmed yet. The panel shows it instead of the reported value, so a
-  // slider is not pulled back by a controls line about an earlier write.
-  // Names of Model.CONTROL_NAMES only. Replaced whole on every change.
-  property var controlDrafts: ({})
-  // name -> the value last requested for it, so a write is never repeated.
-  property var controlSent: ({})
-  // name -> { value, line }: its last write succeeded and owns controls
-  // line number `line`, still to come; that line settles a draft still at
-  // the value, whatever the daemon reports (Model.settleWritten).
-  property var controlSettling: ({})
-  // Controls lines read; the number up to which the lines of finished
-  // writes are due; the mark of the running command (Model.controlLineMark):
-  // it owns line mark + 1, so an earlier write's late line is not its own.
-  property int controlLines: 0
-  property int controlLinesDue: 0
+  // ---- camera settings -------------------------------------------------------
+  // setting id -> the value a slider, a key, a switch or a choice moved to
+  // that the daemon has not confirmed yet. The panel shows it instead of the
+  // reported value, so a row is not pulled back by a delta about an earlier
+  // write. Ids of the grammar only (Model.withSetting), at most
+  // Model.SETTINGS_ROW_CAP. Replaced whole on every change.
+  property var settingDrafts: ({})
+  // id -> the value last requested for it, so a write is never repeated.
+  property var settingSent: ({})
+  // id -> { value, line }: its last write succeeded and owns change number
+  // `line`, still to come; that change settles a draft still at the value,
+  // whatever the daemon reports (Model.settleWritten).
+  property var settingSettling: ({})
+  // Changes read (a delta of a new rev, or the same set again); the number
+  // up to which the changes of finished writes are due; the mark of the
+  // running command (Model.settingLineMark): it owns change mark + 1, so an
+  // earlier write's late change is not its own.
+  property int settingLines: 0
+  property int settingLinesDue: 0
   property int commandLineMark: 0
+  // A draft was left unsent because the queue held Model.SETTING_QUEUE_CAP
+  // writes (Model.queueTakes): flushSettings runs again once a command ends.
+  property bool settingsDeferred: false
 
   onWatchWantedChanged: Qt.callLater(root.syncWatch)
 
@@ -293,81 +298,87 @@ Singleton {
     var result = Model.reduce(record, line)
     if (result.outcome === "dropped") droppedLines++
     else if (result.outcome === "invalid" || result.outcome === "ignored") ignoredLines++
-    // Compared raw: two ids that differ only in what sanitising strips are
-    // still two cameras.
-    var camera = record.controlsCameraId
+    // Cameras are compared raw: two ids that differ only in what sanitising
+    // strips are still two cameras.
+    var before = record.settings
     if (result.record !== record) record = result.record
     if (result.outcome === "snapshot") commandError = ""
-    var otherCamera = record.controlsCameraId !== camera
-    // The controls are another camera's: no queued write or reset made for
-    // the one shown before runs against it.
-    if (otherCamera) dropQueuedControls()
-    if (result.outcome === "snapshot" || (result.outcome === "controls" && otherCamera)) {
-      // A fresh picture of the daemon, or another camera: nothing of the
-      // user's pending moves applies to it, and no line is still due.
-      clearControlDrafts()
-      controlLinesDue = controlLines
-    } else if (result.outcome === "controls") {
-      controlLines++
-      var settled = Model.settleWritten(controlDrafts, controlSettling, controlLines)
-      controlSettling = settled.settling
-      settleControlDrafts(settled.drafts)
-      // Nothing written is still unconfirmed: no line is due any more (the
-      // daemon prints none for a write that changed nothing).
-      if (Object.keys(controlDrafts).length === 0 && !controlWritePending()) controlLinesDue = controlLines
-    } else if (result.outcome === "error") {
-      // Unavailable: no control is offered until the next snapshot.
-      clearControlDrafts()
-      controlLinesDue = controlLines
+    var after = record.settings
+    // The settings are another camera's, or none: no queued write or reset
+    // made for the camera shown before runs against it (each also names its
+    // camera, see Model.settingIntentBound).
+    if ((after ? after.camera : "") !== (before ? before.camera : "")) dropQueuedSettings()
+    var sameSet = !!before && !!after && before.camera === after.camera && before.serial === after.serial
+    if (result.outcome === "snapshot" || result.outcome === "error" || result.outcome === "settings_clear"
+        || (result.outcome === "settings" && !sameSet)) {
+      // A fresh picture of the daemon, another camera or another structure:
+      // nothing of the user's pending moves applies to it, and no change is
+      // still due.
+      clearSettingDrafts()
+      settingLinesDue = settingLines
+    } else if (result.outcome === "settings_delta" || result.outcome === "settings") {
+      // One more change read when the set's rev moved (a large change set is
+      // several delta lines of one rev; the same set again after a missed
+      // delta counts too).
+      if (after.rev > before.rev) settingLines++
+      var settled = Model.settleWritten(settingDrafts, settingSettling, settingLines)
+      settingSettling = settled.settling
+      settleSettingDrafts(settled.drafts)
+      // Nothing written is still unconfirmed: no change is due any more (the
+      // daemon publishes none for a write that changed nothing).
+      if (Object.keys(settingDrafts).length === 0 && !settingWritePending()) settingLinesDue = settingLines
     }
   }
 
-  // A control or reset write is running or queued.
-  function controlWritePending() {
-    if (runningIntent && Model.isControlIntent(runningIntent)) return true
-    for (var i = 0; i < pendingIntents.length; i++) if (Model.isControlIntent(pendingIntents[i])) return true
+  // A setting or reset write is running or queued.
+  function settingWritePending() {
+    if (runningIntent && Model.isSettingIntent(runningIntent)) return true
+    for (var i = 0; i < pendingIntents.length; i++) if (Model.isSettingIntent(pendingIntents[i])) return true
     return false
   }
 
-  function dropQueuedControls() {
+  function dropQueuedSettings() {
     var before = pendingIntents.length
-    pendingIntents = Model.dropControlIntents(pendingIntents)
+    pendingIntents = Model.dropSettingIntents(pendingIntents)
     droppedIntents += before - pendingIntents.length
     commandBusy = commandProc.running || commandArmed || pendingIntents.length > 0
   }
 
   // Drafts the record confirms (or no longer offers) go, with what was sent
   // for them.
-  function settleControlDrafts(drafts) {
+  function settleSettingDrafts(drafts) {
     var next = Model.settleDrafts(drafts, record)
-    var sent = controlSent
-    for (var i = 0; i < Model.CONTROL_NAMES.length; i++) {
-      var name = Model.CONTROL_NAMES[i]
-      if (next[name] === undefined && !Model.queuedControl(pendingIntents, name)
-          && !(runningIntent && runningIntent.verb === "control" && runningIntent.name === name))
-        sent = Model.withKey(sent, name, undefined)
+    var sent = Model.withSetting(settingSent, "", undefined)
+    for (var id in sent) {
+      if (Model.ownValue(next, id) === undefined && !Model.queuedSetting(pendingIntents, id)
+          && !(runningIntent && runningIntent.verb === "setting" && runningIntent.id === id))
+        sent = Model.withSetting(sent, id, undefined)
     }
-    controlDrafts = next
-    controlSent = sent
+    settingDrafts = next
+    settingSent = sent
   }
 
-  function clearControlDrafts() {
-    controlTimer.stop()
-    controlDrafts = ({})
-    controlSent = ({})
-    controlSettling = ({})
+  function clearSettingDrafts() {
+    settingsTimer.stop()
+    settingsDeferred = false
+    settingDrafts = ({})
+    settingSent = ({})
+    settingSettling = ({})
   }
 
   // ---- commands --------------------------------------------------------------
 
-  // An intent ({ verb, on, id, effect, name, value }) becomes an argv only
+  // An intent ({ verb, on, id, effect, value, camera }) becomes an argv only
   // when it runs: see Model.intentArgv. Behind a running command the queue
-  // keeps the latest other ask, the latest value per control and the latest
-  // reset (Model.enqueueIntent): a slider drag never queues a process per
-  // move.
+  // keeps the latest other ask, the latest value per setting id and the
+  // latest reset (Model.enqueueIntent): a slider drag never queues a process
+  // per move, and one id never has more than one write in flight.
   function request(intent) {
     if (!Model.intentArgv(intent, cliPath, record)) return false
     if (commandProc.running || commandArmed) {
+      // Only a setting write is ever refused here (a full queue, see
+      // Model.queueTakes); flushSettings keeps the draft of one for later.
+      if (!Model.queueTakes(pendingIntents, intent)) return false
       pendingIntents = Model.enqueueIntent(pendingIntents, intent)
       commandBusy = true
       return true
@@ -383,7 +394,7 @@ Singleton {
     commandArmed = true
     commandBusy = true
     runningIntent = intent
-    commandLineMark = Model.controlLineMark(controlLines, controlLinesDue)
+    commandLineMark = Model.settingLineMark(settingLines, settingLinesDue)
     lastCommand = argv
     commandProc.command = argv
     commandProc.running = true
@@ -397,7 +408,7 @@ Singleton {
     // Re-checked now: the daemon may have gone, or the CLI path changed.
     if (!armCommand(intent)) {
       droppedIntents++
-      if (intent.verb === "control") controlEnded(intent, false)
+      if (intent.verb === "setting") settingEnded(intent, false)
       commandBusy = pendingIntents.length > 0
       // The next one, on the next turn (one at a time, never a same-turn loop).
       if (pendingIntents.length > 0) Qt.callLater(root.flushPending)
@@ -414,34 +425,40 @@ Singleton {
     else if (commandExitCode === 0) commandError = ""
     else commandError = Model.commandFailureText(commandExitCode, commandStderr.text, cliPath)
     var ok = started && commandExitCode === 0
-    if (intent && intent.verb === "control") controlEnded(intent, ok)
-    // A write that went through owes the line after its mark.
-    if (ok && Model.isControlIntent(intent)) controlLinesDue = Math.max(controlLinesDue, commandLineMark + 1)
+    if (intent && intent.verb === "setting") settingEnded(intent, ok)
+    // A write that went through owes the change after its mark.
+    if (ok && Model.isSettingIntent(intent)) settingLinesDue = Math.max(settingLinesDue, commandLineMark + 1)
     commandBusy = pendingIntents.length > 0
     // The retry is deferred to the next turn, never a same-turn re-arm.
     if (pendingIntents.length > 0) Qt.callLater(root.flushPending)
-  }
-
-  // A control write is over. Its draft stays while a newer write for the
-  // same control is still to run, or the user has moved on from its value.
-  // Otherwise (Model.controlWriteEnd): failed, the draft goes (the slider
-  // shows the reported value again, and the panel the error); succeeded,
-  // the controls line it owns settles it, or has already (the draft goes
-  // now: the daemon reports what the camera took). A line of an earlier
-  // write never does.
-  function controlEnded(intent, ok) {
-    var name = intent.name
-    if (Model.queuedControl(pendingIntents, name) || controlDrafts[name] !== intent.value) return
-    if (Model.controlWriteEnd(ok, controlLines, commandLineMark) === "drop") {
-      controlDrafts = Model.withKey(controlDrafts, name, undefined)
-      controlSent = Model.withKey(controlSent, name, undefined)
-    } else {
-      controlSettling = Model.withKey(controlSettling, name, { value: intent.value, line: commandLineMark + 1 })
+    // Drafts the full queue did not take are written now there is room (the
+    // next queued command is armed first: the room is behind it).
+    if (settingsDeferred) {
+      settingsDeferred = false
+      Qt.callLater(root.flushSettings)
     }
   }
 
-  // The bar's right click. Ignored while an on/off or other non-control
-  // command is running or queued (toggleBusy); slider writes do not hold it.
+  // A setting write is over. Its draft stays while a newer write for the
+  // same id is still to run, or the user has moved on from its value.
+  // Otherwise (Model.settingWriteEnd): failed, the draft goes (the row shows
+  // the reported value again, and the panel the error); succeeded, the
+  // change it owns settles it, or has already (the draft goes now: the
+  // daemon reports what the camera took). A change of an earlier write never
+  // does. An action has no draft.
+  function settingEnded(intent, ok) {
+    var id = intent.id
+    if (Model.queuedSetting(pendingIntents, id) || Model.ownValue(settingDrafts, id) !== intent.value) return
+    if (Model.settingWriteEnd(ok, settingLines, commandLineMark) === "drop") {
+      settingDrafts = Model.withSetting(settingDrafts, id, undefined)
+      settingSent = Model.withSetting(settingSent, id, undefined)
+    } else {
+      settingSettling = Model.withSetting(settingSettling, id, { value: intent.value, line: commandLineMark + 1 })
+    }
+  }
+
+  // The bar's right click. Ignored while an on/off or other non-setting
+  // command is running or queued (toggleBusy); setting writes do not hold it.
   function toggleEnabled() {
     if (Model.rightClickAction(record, toggleBusy) !== "toggle") return false
     return request({ verb: "enable", on: !record.enabled })
@@ -470,57 +487,76 @@ Singleton {
     return request({ verb: "denoise", on: on === true })
   }
 
-  // A slider moved (or a key nudged it) to `value`: kept as a draft, put on
-  // the control's grid, and written CONTROLS_DEBOUNCE_MS after the last move.
-  // Nothing for a control the daemon does not offer now.
-  function moveControl(name, value) {
-    var v = Model.clampControl(Model.controlsSupported(record) ? Model.findControl(record, name) : null, value)
+  // A row moved (a slider, a key, a switch, a choice) to `value`: kept as a
+  // draft, made a value of the row (Model.rowValue: an int on its grid,
+  // a strict boolean, one of its options), and written
+  // CONTROLS_DEBOUNCE_MS after the last move. Nothing for a setting the
+  // daemon does not offer now, or one it greys out.
+  function moveSetting(id, value) {
+    var row = Model.settingsSupported(record) ? Model.findSetting(record, id) : null
+    var v = row && row.enabled ? Model.rowValue(row, value) : null
     if (v === null) return false
-    controlDrafts = Model.withKey(controlDrafts, name, v)
-    controlTimer.restart()
+    settingDrafts = Model.withSetting(settingDrafts, row.id, v)
+    settingsTimer.restart()
     return true
   }
 
-  // The slider was released: the draft is written at once.
-  function commitControl(name, value) {
-    if (!moveControl(name, value)) return false
-    controlTimer.stop()
-    flushControls()
+  // The slider was released, the switch flipped or the choice clicked: the
+  // draft is written at once.
+  function commitSetting(id, value) {
+    if (!moveSetting(id, value)) return false
+    settingsTimer.stop()
+    flushSettings()
     return true
   }
 
-  // Each draft not written yet becomes a control intent; the queue keeps one
-  // per control behind a running command.
-  function flushControls() {
-    for (var i = 0; i < Model.CONTROL_NAMES.length; i++) {
-      var name = Model.CONTROL_NAMES[i]
-      var v = controlDrafts[name]
-      if (v === undefined || v === controlSent[name]) continue
-      // Bound to the camera the slider showed (Model.controlIntentBound).
-      if (request({ verb: "control", name: name, value: v, camera: record.controlsCameraId })) {
-        controlSent = Model.withKey(controlSent, name, v)
+  // Each draft not written yet becomes a setting intent, bound to the camera
+  // of the set the row showed; the queue keeps one per id behind a running
+  // command. A draft the queue cannot take now (Model.SETTING_QUEUE_CAP
+  // writes are waiting, none for its id) stays a draft, unsent: it is not
+  // dropped and not marked sent, and commandEnded calls this again. Walks
+  // only the drafts (at most Model.SETTINGS_ROW_CAP ids).
+  function flushSettings() {
+    var drafts = Model.withSetting(settingDrafts, "", undefined)
+    var camera = record.settings ? record.settings.camera : ""
+    for (var id in drafts) {
+      var v = drafts[id]
+      if (v === Model.ownValue(settingSent, id)) continue
+      if ((commandProc.running || commandArmed) && !Model.queueTakes(pendingIntents, { verb: "setting", id: id })) {
+        settingsDeferred = true
+        continue
+      }
+      if (request({ verb: "setting", id: id, value: v, camera: camera })) {
+        settingSent = Model.withSetting(settingSent, id, v)
       } else {
-        controlDrafts = Model.withKey(controlDrafts, name, undefined)
-        controlSent = Model.withKey(controlSent, name, undefined)
+        settingDrafts = Model.withSetting(settingDrafts, id, undefined)
+        settingSent = Model.withSetting(settingSent, id, undefined)
       }
     }
   }
 
-  // Every control back to the camera's default; what the user had not
+  // An action row (a button): run once, now; it has no value to draft.
+  function runSettingAction(id) {
+    var row = Model.settingsSupported(record) ? Model.findSetting(record, id) : null
+    if (!row || row.type !== "action" || !row.enabled) return false
+    return request({ verb: "setting", id: row.id, value: true, camera: record.settings.camera })
+  }
+
+  // Every setting of the camera back to its default; what the user had not
   // written yet is dropped with the queued writes (Model.enqueueIntent).
-  function resetControls() {
-    if (!request({ verb: "reset-controls", camera: record.controlsCameraId })) return false
-    clearControlDrafts()
+  function resetSettings() {
+    if (!record.settings || !request({ verb: "reset-settings", camera: record.settings.camera })) return false
+    clearSettingDrafts()
     return true
   }
 
   // ---- children ------------------------------------------------------------
 
-  // One-shot: started (restarted) only by moveControl, a user's move.
-  property Timer controlTimer: Timer {
+  // One-shot: started (restarted) only by moveSetting, a user's move.
+  property Timer settingsTimer: Timer {
     interval: Model.CONTROLS_DEBOUNCE_MS
     repeat: false
-    onTriggered: root.flushControls()
+    onTriggered: root.flushSettings()
   }
 
   property Timer backoffTimer: Timer {

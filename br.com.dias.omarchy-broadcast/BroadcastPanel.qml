@@ -11,8 +11,10 @@ import "Model.js" as Model
 // 16:9 area with its switch and rate on one row under it, then three tabs:
 //   Effect  the background effect (None, Blur, Replace), what it uses and the
 //           Replace hint, and the noise removal switch;
-//   Camera  the camera list and Next camera, then the camera image sliders
-//           with Reset to defaults (or the hint that replaces them);
+//   Camera  the camera list and Next camera, then the camera's settings as
+//           the daemon publishes them (SettingsView: groups that open and
+//           close, a widget per type, Reset to defaults), or the hint that
+//           replaces them;
 //   Status  state, camera, consumers (by kind where the daemon splits them),
 //           output mode, PipeWire output, the daemon's interface revision,
 //           and the live figures while active.
@@ -28,16 +30,24 @@ import "Model.js" as Model
 // apps receive: black while the camera is idle or an effect loads. Opening the
 // panel never starts the camera.
 //
-// The card is sized to its content (see BarWidget.qml); the Flickable only
-// scrolls when the screen is too short for it.
+// The card is sized to its content (see BarWidget.qml); the panel's
+// Flickable only scrolls when the screen is too short for the part above the
+// camera settings. One settings group is open at a time, so the tab is never
+// taller than its tallest group; past the screen's room (`contentRoom`) the
+// groups scroll on their own, inside the Camera tab, under the settings'
+// title line that holds Reset to defaults (never scrolled away), so opening
+// a group never scrolls the whole panel.
 //
 // Keyboard, as in the shell's own panels (PanelKeyCatcher, CursorSurface):
 // the first arrow key shows the cursor on the on/off switch; Up/Down (or k/j)
 // then walk the switch, the Preview switch, the preview-rate row, the tab row
 // and the stops of the tab shown (Model.cursorStops); Left/Right (or h/l)
-// change the tab on the tab row, walk the preview-rate and effect choices and
-// move a slider; 1, 2 and 3 show the Effect, Camera and Status tab from
-// anywhere; Enter or Space activates; Escape closes; Tab moves to the
+// change the tab on the tab row, walk the preview-rate, effect and a
+// setting's choices (nothing is written until Enter or Space), move a
+// slider, and open (Right) or close (Left) a settings group; 1, 2 and 3 show
+// the Effect, Camera and Status tab from anywhere; Enter or Space activates
+// (a group header opens or closes, a choice is made, a dropdown opens its
+// list, a switch flips, an action runs); Escape closes; Tab moves to the
 // neighbouring panel. The mouse moves the same cursor, so only one highlight
 // is ever drawn.
 Item {
@@ -51,6 +61,9 @@ Item {
   // so a widget re-injected with the same entry never undoes a choice the
   // shell could not store.
   property string storedTab: Model.PANEL_TAB_DEFAULT
+  // The card's room for this content on the screen (the popup's available
+  // height less its padding); 0: unknown, no cap. Bounds the settings area.
+  property real contentRoom: 0
 
   signal closeRequested()
   signal switchRequested(int direction)
@@ -78,9 +91,12 @@ Item {
   readonly property var preview: Preview.placeholder
   readonly property bool previewControls: Model.previewControlsShown(record, Preview.pathReason)
   readonly property var fpsOptions: Model.fpsOptions(Preview.fps)
-  // The camera image section: which sliders, the hint or the idle note.
-  readonly property var controlsView: Model.controlsSection(record)
-  // A slider is held: the Flickable must not take the drag over.
+  // The settings group open: this panel's choice of the session (memory
+  // only): a group id, "" for none, null for the default (Model.openGroupId).
+  property var settingsOpen: null
+  // The camera settings exactly as drawn (and as the cursor walks them).
+  readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)
+  // A slider is held: the Flickables must not take the drag over.
   property int slidersHeld: 0
 
   // ---- the tab shown ----------------------------------------------------------
@@ -90,7 +106,7 @@ Item {
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab)
+  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
@@ -101,6 +117,8 @@ Item {
   property int fpsCursor: 0
   // The tab under the cursor while the tab row holds it.
   property int tabCursor: 0
+  // The choice under the cursor while a setting's row of buttons holds it.
+  property int choiceCursor: -1
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -123,8 +141,25 @@ Item {
   function setCursor(kind, index) {
     var i = Model.stopIndex(stops, kind, index)
     if (i < 0) return
+    var moved = !cursorActive || Model.clampCursor(cursorIndex, stops.length) !== i
     cursorActive = true
     cursorIndex = i
+    if (moved) landOnSetting()
+  }
+
+  // Arriving on a setting's row of buttons lands on its current choice, as
+  // on the effect and frame-rate rows.
+  function landOnSetting() {
+    var stop = currentStop
+    var row = stop && stop.kind === "setting" ? Model.viewRow(root.settingsView, stop.index) : null
+    choiceCursor = row && row.widget === "segmented" ? Model.choiceCursorStart(row) : -1
+  }
+
+  // The mouse is over chip `index` of the row at stop `stop`.
+  function setChoiceCursor(stop, index) {
+    setCursor("setting", stop)
+    var row = Model.viewRow(root.settingsView, stop)
+    if (row && row.widget === "segmented" && index >= 0 && index < row.options.length) choiceCursor = index
   }
 
   // The effect row takes the cursor on the choice under the mouse.
@@ -156,16 +191,21 @@ Item {
       fpsCursor = Math.max(0, Model.PREVIEW_FPS_CHOICES.indexOf(Preview.fps))
     if (currentStop && currentStop.kind === "tabs")
       tabCursor = Math.max(0, Model.PANEL_TABS.indexOf(tab))
+    landOnSetting()
     scrollCursorIntoView()
   }
 
-  // Left/Right: the effect and frame-rate rows lay out horizontally, a
-  // slider moves, and the tab row changes the tab at once (a tab runs
-  // nothing, so there is nothing to confirm).
+  // Left/Right: the effect, frame-rate and a setting's choices lay out
+  // horizontally (the cursor walks them; Enter or Space chooses), a slider
+  // moves, a group header opens (Right) or closes (Left), and the tab row
+  // changes the tab at once (a tab runs nothing, so there is nothing to
+  // confirm). A dropdown row takes no Left/Right: Enter opens its list.
   function moveCursorH(dx) {
     if (dx === 0 || !currentStop) return
-    if (currentStop.kind === "control")
-      nudgeControl(currentStop.index, dx)
+    if (currentStop.kind === "setting")
+      moveSettingH(currentStop.index, dx)
+    else if (currentStop.kind === "group")
+      setGroupOpen(currentStop.index, dx > 0)
     else if (currentStop.kind === "effect")
       effectCursor = Model.clampCursor(effectCursor + (dx > 0 ? 1 : -1), Model.EFFECTS.length)
     else if (currentStop.kind === "fps")
@@ -236,26 +276,72 @@ Item {
     return Daemon.setDenoise(root.record.denoise !== true)
   }
 
-  // A key moves the slider at Model.CONTROL_NAMES[index] by about a twentieth
-  // of its range, from the value it shows; written as a slider move is.
-  function nudgeControl(index, dx) {
-    var name = Model.CONTROL_NAMES[index]
-    var control = Model.sectionControl(root.controlsView, name)
-    if (!control || !root.available) return false
-    var value = Model.controlNudge(control, Model.shownControlValue(control, Daemon.controlDrafts), dx > 0 ? 1 : -1)
-    return value !== null && Daemon.moveControl(name, value)
+  // Left/Right on a setting: a row of buttons walks its chip cursor (no
+  // write), a slider moves (nudgeSetting).
+  function moveSettingH(stop, dx) {
+    var row = Model.viewRow(root.settingsView, stop)
+    if (!row || !row.enabled || !root.available) return false
+    if (row.widget === "segmented") {
+      root.choiceCursor = Model.choiceCursorAfter(row, root.choiceCursor, dx)
+      return true
+    }
+    return row.widget === "slider" && nudgeSetting(stop, dx)
+  }
+
+  // A key moves the slider at keyboard stop `stop` by about a twentieth of
+  // its range, from the value it shows; written as a slider move is
+  // (Daemon.moveSetting: a draft, then the debounce). Nothing for a greyed
+  // row.
+  function nudgeSetting(stop, dx) {
+    var row = Model.viewRow(root.settingsView, stop)
+    if (!row || !row.enabled || !root.available) return false
+    var value = Model.settingNudge(row, row.value, dx > 0 ? 1 : -1)
+    return value !== null && Daemon.moveSetting(row.id, value)
+  }
+
+  // Enter or Space on a setting: the choice under the chip cursor is made, a
+  // dropdown opens its list, a switch flips, an action runs (a slider moves
+  // with Left/Right). Nothing for a greyed row, or the choice already made.
+  function activateSetting(stop) {
+    var row = Model.viewRow(root.settingsView, stop)
+    if (!row || !row.enabled || !root.available) return false
+    if (row.widget === "segmented") {
+      var option = row.options[root.choiceCursor]
+      return !!option && option.value !== row.value && Daemon.commitSetting(row.id, option.value)
+    }
+    if (row.widget === "dropdown") return settingsBlock.openChoices(stop)
+    if (row.widget === "switch") return Daemon.commitSetting(row.id, row.value !== true)
+    if (row.widget === "action") return Daemon.runSettingAction(row.id)
+    return false
+  }
+
+  // A group of the view opened or closed, by its place in the view: one is
+  // open at a time (Model.groupOpenAfter). A cursor on its header stays on
+  // it, though the rows of the group closed above it are gone.
+  function setGroupOpen(index, open) {
+    var group = root.settingsView.groups[index]
+    if (!group || group.expanded === open) return
+    var onHeader = hasCursor("group", index)
+    root.settingsOpen = Model.groupOpenAfter(root.settingsOpen, root.record.settings, group.id, open)
+    if (onHeader) setCursor("group", index)
+    scrollItemIntoView(settingsBlock.groupItem(index), true)
+  }
+
+  function toggleGroup(id) {
+    var groups = root.settingsView.groups
+    for (var i = 0; i < groups.length; i++) if (groups[i].id === id) return setGroupOpen(i, !groups[i].expanded)
   }
 
   // Queued behind a running command rather than refused: it replaces the
-  // slider writes still to run (Model.enqueueIntent).
-  function resetControls() {
-    if (!root.available || !root.controlsView.reset) return false
-    return Daemon.resetControls()
+  // setting writes still to run (Model.enqueueIntent).
+  function resetSettings() {
+    if (!root.available || !root.settingsView.reset) return false
+    return Daemon.resetSettings()
   }
 
   // Same rule as the bar's right click: no toggle while an on/off or other
-  // non-control command's result is still to come (ToggleSwitch's `busy`
-  // swallows the click the same way); camera image writes never hold it.
+  // non-setting command's result is still to come (ToggleSwitch's `busy`
+  // swallows the click the same way); camera setting writes never hold it.
   function toggleSwitch() {
     if (!root.available || Daemon.toggleBusy) return false
     return Daemon.setEnabled(!root.record.enabled)
@@ -270,7 +356,9 @@ Item {
     else if (stop.kind === "tabs") chooseTab(tabCursor)
     else if (stop.kind === "effect") chooseEffect(effectCursor)
     else if (stop.kind === "denoise") toggleDenoise()
-    else if (stop.kind === "reset") resetControls()
+    else if (stop.kind === "reset") resetSettings()
+    else if (stop.kind === "group") setGroupOpen(stop.index, !(root.settingsView.groups[stop.index] || {}).expanded)
+    else if (stop.kind === "setting") activateSetting(stop.index)
     else if (stop.kind === "camera") {
       var row = cameraRepeater.itemAt(stop.index)
       if (row) row.choose()
@@ -278,19 +366,26 @@ Item {
   }
 
   // Only does anything when the screen is too short for the card (the
-  // Flickable then scrolls); at the normal size everything is in view.
-  function scrollItemIntoView(item) {
+  // Flickable then scrolls); at the normal size everything is in view. A
+  // settings row or header is first brought into view in the settings'
+  // own Flickable, then that area in the panel's.
+  function scrollItemIntoView(item, inner) {
     if (!item) return
     Qt.callLater(function() {
       if (!item) return
-      var margin = Style.space(6)
-      var top = item.mapToItem(flick.contentItem, 0, 0).y
-      var bottom = top + item.height
-      var maxY = Math.max(0, flick.contentHeight - flick.height)
-      if (top < flick.contentY + margin) flick.contentY = Math.max(0, top - margin)
-      else if (bottom > flick.contentY + flick.height - margin)
-        flick.contentY = Math.min(maxY, bottom + margin - flick.height)
+      if (inner === true) scrollWithin(settingsBlock.flick, item)
+      scrollWithin(flick, inner === true ? settingsBlock.flick : item)
     })
+  }
+
+  function scrollWithin(f, item) {
+    var margin = Style.space(6)
+    var top = item.mapToItem(f.contentItem, 0, 0).y
+    var bottom = top + item.height
+    var maxY = Math.max(0, f.contentHeight - f.height)
+    if (top < f.contentY + margin) f.contentY = Math.max(0, top - margin)
+    else if (bottom > f.contentY + f.height - margin)
+      f.contentY = Math.min(maxY, bottom + margin - f.height)
   }
 
   function scrollCursorIntoView() {
@@ -300,8 +395,9 @@ Item {
     else if (stop.kind === "preview") scrollItemIntoView(previewLine)
     else if (stop.kind === "fps") scrollItemIntoView(fpsLine)
     else if (stop.kind === "tabs") scrollItemIntoView(tabRow)
-    else if (stop.kind === "control") scrollItemIntoView(controlRepeater.itemAt(stop.index))
-    else if (stop.kind === "reset") scrollItemIntoView(resetButton)
+    else if (stop.kind === "group") scrollItemIntoView(settingsBlock.groupItem(stop.index), true)
+    else if (stop.kind === "setting") scrollItemIntoView(settingsBlock.rowItem(stop.index), true)
+    else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "denoise") scrollItemIntoView(denoiseLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
@@ -383,7 +479,7 @@ Item {
       clip: true
       boundsBehavior: Flickable.StopAtBounds
       flickableDirection: Flickable.VerticalFlick
-      interactive: contentHeight > height && root.slidersHeld === 0
+      interactive: contentHeight > height + 0.5 && root.slidersHeld === 0
       ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
       // Inset from the clipped edges, so a row's border is never shaved.
@@ -935,7 +1031,7 @@ Item {
             }
           }
 
-          // ---- Camera: the cameras, then the camera's own image controls
+          // ---- Camera: the cameras, then the camera's settings
           Column {
             id: cameraTab
             objectName: "cameraTab"
@@ -1087,159 +1183,47 @@ Item {
               onClicked: Daemon.nextCamera()
             }
 
-            // ---- camera image: the camera's own controls. While the daemon
-            // has the camera open (starting or active) a change applies at
-            // once and shows in the preview above; otherwise the daemon stores
-            // it for the next open. The note under the header says which.
+            // ---- camera settings: what the daemon publishes for the camera.
+            // While the daemon has the camera open (starting or active) a
+            // change applies at once and shows in the preview above;
+            // otherwise the daemon stores it for the next open (the note
+            // says which). Last in the tab, so its top is known before its
+            // height: past the screen's room its groups scroll, alone.
             Column {
-              id: controlsBlock
-              objectName: "controlsBlock"
+              id: settingsArea
+              objectName: "settingsArea"
               width: parent.width
               spacing: Style.space(10)
-              visible: root.controlsView.visible
+              visible: root.settingsView.visible
 
               PanelSeparator { foreground: root.foreground }
-              PanelSectionHeader {
-                text: Model.CONTROLS_TITLE
+
+              SettingsView {
+                id: settingsBlock
+                objectName: "settingsView"
+                // Where this section starts in the panel's column: everything
+                // above it is laid out first, so this never depends on the
+                // section's own height.
+                readonly property real areaTop: tabBlock.y + cameraTab.y + settingsArea.y + y
+                width: parent.width
+                room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
+                bar: root.bar
+                view: root.settingsView
+                cursorStop: root.currentStop
+                choiceCursor: root.choiceCursor
+                keyCatcher: catcher
+                slidersHeld: root.slidersHeld
                 foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              // Which case holds: changes apply live, or are saved for the
-              // next open.
-              Text {
-                objectName: "controlsNote"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.controlsView.note
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              // Instead of the sliders: the CLI or the daemon predates them, or
-              // the camera has none of them.
-              Text {
-                objectName: "controlsHint"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.controlsView.hint
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              // The rows have a fixed model, the four names, and a row is drawn
-              // only while its control is reported: a controls line changes what
-              // a row shows, never rebuilds it, so the slider under the mouse
-              // stays the same item through a drag. While it is held, the
-              // shell's PanelSlider shows its own position, not the record's.
-              Column {
-                width: parent.width
-                spacing: Style.space(2)
-
-                Repeater {
-                  id: controlRepeater
-                  objectName: "controlRepeater"
-                  model: Model.CONTROL_NAMES
-                  delegate: CursorSurface {
-                    id: controlRow
-                    required property string modelData
-                    required property int index
-                    readonly property var control: Model.sectionControl(root.controlsView, modelData)
-                    readonly property int shownValue: Model.shownControlValue(control, Daemon.controlDrafts)
-                    readonly property var heldValue: slider.dragging ? Model.clampControl(control, slider.liveValue) : null
-                    objectName: "controlRow-" + modelData
-                    visible: control !== null
-                    width: parent ? parent.width : 0
-                    implicitHeight: slider.implicitHeight + Style.spacing.controlGap
-                    hasCursor: root.hasCursor("control", index)
-                    outline: true
-                    foreground: root.foreground
-                    fill: root.hoverFill
-                    Accessible.role: Accessible.Slider
-                    Accessible.name: control ? control.label : ""
-                    Accessible.description: String(heldValue !== null ? heldValue : shownValue)
-                    // A row hidden mid-drag (another camera, another tab) loses
-                    // the mouse grab, and the shell's PanelSlider has no cancel
-                    // handler: let go here, or the Flickable would stay locked.
-                    onVisibleChanged: if (!visible && slider.dragging) {
-                      slider.dragging = false
-                      slider.liveValue = slider.value
-                    }
-
-                    Text {
-                      id: controlLabel
-                      objectName: "controlLabel-" + controlRow.modelData
-                      textFormat: Text.PlainText
-                      x: Style.space(6)
-                      width: Style.space(84)
-                      anchors.verticalCenter: parent.verticalCenter
-                      elide: Text.ElideRight
-                      text: controlRow.control ? controlRow.control.label : ""
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                    }
-                    PanelSlider {
-                      id: slider
-                      objectName: "controlSlider-" + controlRow.modelData
-                      bar: root.bar
-                      anchors.left: controlLabel.right
-                      anchors.leftMargin: Style.space(6)
-                      anchors.right: controlValue.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.verticalCenter: parent.verticalCenter
-                      minimum: controlRow.control ? controlRow.control.min : 0
-                      maximum: controlRow.control ? controlRow.control.max : 1
-                      step: controlRow.control ? controlRow.control.step : 1
-                      integer: true
-                      value: controlRow.shownValue
-                      onDraggingChanged: root.slidersHeld = Math.max(0, root.slidersHeld + (dragging ? 1 : -1))
-                      onMoved: function(v) { Daemon.moveControl(controlRow.modelData, v) }
-                      onReleased: function(v) { Daemon.commitControl(controlRow.modelData, v) }
-                    }
-                    Text {
-                      id: controlValue
-                      objectName: "controlValue-" + controlRow.modelData
-                      textFormat: Text.PlainText
-                      anchors.right: parent.right
-                      anchors.rightMargin: Style.space(6)
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: Style.space(36)
-                      horizontalAlignment: Text.AlignRight
-                      text: String(controlRow.heldValue !== null ? controlRow.heldValue : controlRow.shownValue)
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    HoverHandler {
-                      onHoveredChanged: if (hovered) root.setCursor("control", controlRow.index)
-                    }
-                  }
-                }
-              }
-
-              Button {
-                id: resetButton
-                objectName: "controlsReset"
-                visible: root.controlsView.reset
-                text: Model.CONTROLS_RESET_LABEL
-                tooltipText: Model.CONTROLS_RESET_TOOLTIP
-                bordered: true
-                hasCursor: root.hasCursor("reset", -1)
-                foreground: root.foreground
+                dim: root.dim
+                faint: root.faint
                 accent: root.accent
+                hoverFill: root.hoverFill
                 fontFamily: root.fontFamily
-                Accessible.role: Accessible.Button
-                Accessible.name: Model.CONTROLS_RESET_LABEL
-                Accessible.description: Model.CONTROLS_RESET_TOOLTIP
-                onHovered: function(on) { if (on) root.setCursor("reset", -1) }
-                onClicked: root.resetControls()
+                onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
+                onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
+                onGroupToggled: function(id) { root.toggleGroup(id) }
+                onResetRequested: root.resetSettings()
+                onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
               }
             }
           }

@@ -155,6 +155,9 @@ BarWidget {
         bar: root.bar
         opened: root.opened
         storedTab: root.storedTab
+        // The card's room for the content on this screen: past it the
+        // camera settings scroll inside the Camera tab, not the panel.
+        contentRoom: panel.availableCardHeight > 0 ? Math.max(0, panel.availableCardHeight - panel.padding * 2) : 0
         onCloseRequested: root.close()
         onSettingsRequested: function(values) { root.persistSettings(values) }
         onSwitchRequested: function(direction) { root.switchPanel(direction) }

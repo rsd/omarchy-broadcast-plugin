@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
-  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace), a noise removal switch, camera image controls (brightness, contrast, saturation, sharpness; need omarchy-broadcast 0.19.0), a live preview and live stream figures.",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, background effect selector (none, blur, replace), a noise removal switch, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom; need omarchy-broadcast 0.22.0), a live preview and live stream figures.",
   "kinds": [
     "bar-widget"
   ],

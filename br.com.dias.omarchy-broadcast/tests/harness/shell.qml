@@ -1609,7 +1609,7 @@ ShellRoot {
     }, function() { return S().record.cameras.length === 3 })
 
     previewScenario()
-    controlsScenario()
+    settingsScenario()
 
     // the resolver itself: PATH first, then the development build behind a
     // symlink (in the scratch development tree, not the plugin's checkout)
@@ -2238,373 +2238,690 @@ ShellRoot {
     h.step("layout: back to the " + back + " tab", function() { h.tab(A(), back) })
   }
 
-  // ---- camera image controls (mock): capability, sliders, writes, reset ----------
+  // ---- camera settings (mock): capability, the generic renderer, writes, reset ---
   //
-  // The fake adds camera_controls to every snapshot it prints, from its
-  // controls-mode and controls-state files, and answers `controls set|reset`
-  // by updating controls-state and printing the `controls` line on the feed.
-  function controlsScenario() {
+  // The fake follows every snapshot it prints with the settings set of its
+  // settings-state (settings-mode list), cut at settings-per-line settings a
+  // line, and answers `settings set|reset` by updating settings-state and
+  // printing the settings_delta lines on the feed, as the daemon's signal
+  // reaches a watch: a write that flips a dependent setting carries both.
+
+  // One settings-state line: group|label|id|type|label|value|default|stored|
+  // min|max|step|unit|options|master|when|reason|fixed.
+  function stateRow(group, groupLabel, id, type, label, value, def, o) {
+    var x = o || {}
+    var f = function(v) { return v === undefined ? "" : String(v) }
+    return [group, groupLabel, id, type, label, f(value), f(def), x.stored ? "1" : "0", f(x.min), f(x.max), f(x.step), f(x.unit),
+            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : ""].join("|")
+  }
+  // The MX Brio as the daemon publishes it (its starting values).
+  function brioState() {
+    var img = function(id, label, v, d, o) {
+      var m = { min: 0, max: 255, step: 1 }
+      for (var k in o) m[k] = o[k]
+      return stateRow("image", "Image", "camera.image." + id, "int", label, v, d, m)
+    }
+    return [
+      img("brightness", "Brightness", 128, 128), img("contrast", "Contrast", 128, 128), img("saturation", "Saturation", 128, 128),
+      img("sharpness", "Sharpness", 128, 128), img("backlight_compensation", "Backlight compensation", 1, 1, { max: 1 }),
+      stateRow("white_balance", "White balance", "camera.white_balance.white_balance_automatic", "bool", "Automatic white balance", "true", "true"),
+      stateRow("white_balance", "White balance", "camera.white_balance.white_balance_temperature", "int", "Temperature", 2975, 5000,
+               { min: 2000, max: 7500, step: 1, unit: "K", master: "camera.white_balance.white_balance_automatic", when: "false",
+                 reason: "Turn off automatic white balance to change this" }),
+      stateRow("exposure", "Exposure", "camera.exposure.auto_exposure", "enum", "Exposure mode", "aperture_priority", "aperture_priority",
+               { options: "manual:Manual,aperture_priority:Auto" }),
+      stateRow("exposure", "Exposure", "camera.exposure.exposure_time_absolute", "int", "Exposure time", 1250, 156,
+               { min: 3, max: 2047, step: 1, unit: "×100 µs", master: "camera.exposure.auto_exposure", when: "manual,shutter_priority",
+                 reason: "Set exposure to manual to change this" }),
+      stateRow("exposure", "Exposure", "camera.exposure.gain", "int", "Gain", 0, 0, { min: 0, max: 255, step: 1 }),
+      stateRow("exposure", "Exposure", "camera.exposure.keep_framerate", "bool", "Keep 30 fps in low light", "false", "true"),
+      stateRow("exposure", "Exposure", "camera.exposure.power_line_frequency", "enum", "Anti-flicker", "60hz", "60hz",
+               { options: "disabled:Off,50hz:50 Hz,60hz:60 Hz,auto:Auto" }),
+      stateRow("focus", "Focus & zoom", "camera.focus.focus_automatic_continuous", "bool", "Continuous autofocus", "true", "true"),
+      stateRow("focus", "Focus & zoom", "camera.focus.focus_absolute", "int", "Focus", 40, 0,
+               { min: 0, max: 255, step: 1, master: "camera.focus.focus_automatic_continuous", when: "false",
+                 reason: "Turn off continuous autofocus to change this" }),
+      stateRow("focus", "Focus & zoom", "camera.focus.zoom_absolute", "int", "Zoom", 100, 100, { min: 100, max: 500, step: 1 }),
+      stateRow("focus", "Focus & zoom", "camera.focus.pan_absolute", "int", "Pan", 14400, 0, { min: -36000, max: 36000, step: 3600 }),
+      stateRow("focus", "Focus & zoom", "camera.focus.tilt_absolute", "int", "Tilt", -14400, 0, { min: -36000, max: 36000, step: 3600 }),
+      stateRow("focus", "Focus & zoom", "camera.focus.pan_reset", "action", "Recentre pan", "-", "-"),
+      stateRow("focus", "Focus & zoom", "camera.focus.tilt_reset", "action", "Recentre tilt", "-", "-"),
+      stateRow("focus", "Focus & zoom", "camera.focus.field_of_view", "enum", "Field of view", "65", "90", { options: "90:90°,78:78°,65:65°" })
+    ]
+  }
+
+  function settingsScenario() {
     var A = function() { return h.widgetA }
     var S = function() { return h.widgetA.service }
     var P = function() { return h.widgetA.previewService }
     var C = function() { return h.content(A()) }
-    var full = ["brightness 0 255 1 128 128 0", "contrast 0 255 1 32 32 0", "saturation 0 255 1 128 179 0",
-                "sharpness 0 255 1 128 255 0", "backlight_compensation 0 1 1 0 0 0"]
-    var rev6 = function(o) {
-      var m = { interface_revision: 6, loopback_consumers: 0, pipewire_consumers: 0, preview_consumers: 0, pipewire_output: "ready" }
+    var rev7 = function(o) {
+      var m = { interface_revision: 7, settings_schema: 1, settings_revision: 5, loopback_consumers: 0, pipewire_consumers: 0,
+                preview_consumers: 0, pipewire_output: "ready" }
       for (var k in o) m[k] = o[k]
       return m
     }
-    var value = function(name) { var c = h.model.findControl(S().record, name); return c ? c.value : null }
-    var setArgs = function() { return h.newLogArgs().filter(function(a) { return a[0] === "controls" }) }
-    var rowShown = function(name) { var r = h.find(A(), "controlRow-" + name); return !!r && r.visible }
-    var shown = function(name) { var t = h.find(A(), "controlValue-" + name); return t ? t.text : "" }
-    var kinds = function() { return C().stops.map(function(st) { return st.kind + (st.kind === "control" ? st.index : "") }).join(",") }
-    // The section's bottom in view, for a grab: only moves anything on a
-    // screen too short for the card (at the normal size nothing scrolls).
-    var showControls = function() {
-      var flick = h.find(A(), "panelFlick")
-      var block = h.find(A(), "controlsBlock")
-      var bottom = block.y + block.height + 8
-      flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height, bottom - flick.height))
+    var value = function(id) { var r = h.model.findSetting(S().record, id); return r ? r.value : null }
+    var row = function(id) { return h.find(A(), "setting-" + id) }
+    var shown = function(id) { var r = row(id); return !!r && r.visible }
+    var setArgs = function() { return h.newLogArgs().filter(function(a) { return a[0] === "settings" }) }
+    var write = function(id, v) { return ["settings", "set", "--camera=" + brioId, "--", id, String(v)] }
+    var kinds = function() {
+      return C().stops.map(function(st) { return st.kind + (st.index >= 0 ? st.index : "") }).join(",")
     }
-    var slider = function(name) { return h.find(A(), "controlSlider-" + name) }
+    var header = function(id) { return h.find(A(), "settingsGroupHeader-" + id) }
+    var click = function(item) { keys.mouseClick(item, item.width / 2, item.height / 2) }
+    var chip = function(id, label) {
+      var group = h.find(A(), "settingChoices-" + id)
+      var kids = group ? group.children : []
+      for (var i = 0; i < kids.length; i++) if (kids[i].text === label) return kids[i]
+      return null
+    }
+    var stopOf = function(id) { var r = row(id); return r ? r.row.stop : -1 }
+    // The panel's choice of open group, as a header click makes it.
+    var openOnly = function(ids) { C().settingsOpen = ids.length > 0 ? ids[0] : "" }
+    var noInnerScroll = function(label) {
+      var f = h.find(A(), "settingsFlick")
+      h.check(label + ": the settings do not scroll (" + Math.round(f.contentHeight) + " in " + Math.round(f.height) + ")",
+              !f.interactive && f.contentHeight <= f.height + 0.5, f.contentHeight + " in " + f.height)
+      h.eq(label + ": no scroll cue", h.find(A(), "settingsMoreBelow").visible, false)
+    }
+    var openGroups = function() { return C().settingsView.groups.filter(function(g) { return g.expanded }).map(function(g) { return g.id }).join(",") }
+    // M3: the one highlight of the row at stop `id` ("row", "chip:<label>",
+    // "dropdown", "button", or "" for none).
+    var highlights = function(id) {
+      var out = []
+      var r = row(id)
+      if (r && r.hasCursor) out.push("row")
+      var group = h.find(A(), "settingChoices-" + id)
+      var kids = group ? group.children : []
+      for (var i = 0; i < kids.length; i++) if (kids[i].hasCursor === true) out.push("chip:" + kids[i].text)
+      var dd = h.find(A(), "settingDropdown-" + id)
+      if (dd && dd.hasCursor) out.push("dropdown")
+      var b = h.find(A(), "settingAction-" + id)
+      if (b && b.hasCursor) out.push("button")
+      var sw = h.find(A(), "settingSwitch-" + id)
+      if (sw && sw.hasCursor) out.push("switch")
+      return out.join(",")
+    }
+    var within = function(item, ancestor) {
+      for (var p = item; p; p = p.parent) if (p === ancestor) return true
+      return false
+    }
 
-    h.step("controls: a revision-6 daemon, four controls and backlight compensation", function() {
-      h.writeFile("controls-state", full)
-      h.writeFile("controls-camera", [brioId])
-      h.writeFile("controls-mode", ["list"])
+    h.step("settings: a revision-7 daemon with the MX Brio", function() {
+      h.writeFile("settings-state", brioState())
+      h.writeFile("settings-camera", [brioId])
+      h.writeFile("settings-rev", ["5"])
+      h.writeFile("settings-serial", ["2"])
+      h.writeFile("settings-per-line", ["4"])
+      h.writeFile("settings-mode", ["list"])
       h.removeFile("delay")
       h.removeFile("stderr")
       h.writeFile("exit", ["0"])
-      h.feed([snapshotLine(rev6({}))])
-    }, function() { return S().record.controlsField === "object" && S().record.controls.length === 4 && h.writerIdle() })
-    h.step("controls: open the panel on the Camera tab", function() { A().open(); h.tab(A(), "camera") }, function() { return C() !== null })
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 4 && h.writerIdle() })
+    h.step("settings: open the panel on the Camera tab", function() { A().open(); h.tab(A(), "camera") }, function() { return C() !== null })
     h.wait(300)
-    h.step("controls: idle, four sliders and the note", function() {
-      h.eq("section shown", h.find(A(), "controlsBlock").visible, true)
-      h.eq("brightness row", rowShown("brightness"), true)
-      h.eq("contrast row", rowShown("contrast"), true)
-      h.eq("saturation row", rowShown("saturation"), true)
-      h.eq("sharpness row", rowShown("sharpness"), true)
-      h.eq("no backlight compensation row", h.find(A(), "controlRow-backlight_compensation"), null)
-      h.eq("labels", h.find(A(), "controlLabel-brightness").text + "," + h.find(A(), "controlLabel-sharpness").text, "Brightness,Sharpness")
-      h.eq("values shown", [shown("brightness"), shown("contrast"), shown("saturation"), shown("sharpness")].join(","), "128,32,179,255")
-      h.eq("slider at the reported value", slider("saturation").value, 179)
-      h.eq("slider range", slider("sharpness").minimum + ".." + slider("sharpness").maximum, "0..255")
-      h.eq("idle note", h.find(A(), "controlsNote").text, "The camera is not in use: changes are saved and apply when an app next uses it.")
-      h.eq("idle note shown", h.find(A(), "controlsNote").visible, true)
-      var noteKids = h.find(A(), "controlsBlock").children
-      var noteAt = function(name) { for (var i = 0; i < noteKids.length; i++) if (noteKids[i].objectName === name) return i; return -1 }
-      h.check("the note sits right under the header", noteAt("controlsNote") === 2 && h.find(A(), "controlsNote").y
-              < h.find(A(), "controlRow-brightness").mapToItem(h.find(A(), "controlsBlock"), 0, 0).y, noteAt("controlsNote"))
-      h.eq("no hint", h.find(A(), "controlsHint").visible, false)
-      h.eq("reset shown", h.find(A(), "controlsReset").visible, true)
-      h.eq("reset label", h.find(A(), "controlsReset").text, "Reset to defaults")
-      h.eq("cursor stops", kinds(), "switch,preview,fps,tabs,camera,camera,camera,next,control0,control1,control2,control3,reset")
-      var block = h.find(A(), "controlsBlock")
-      var kids = block.parent.children
-      var at = function(name) { for (var i = 0; i < kids.length; i++) if (kids[i].objectName === name) return i; return -1 }
-      h.check("on the Camera tab, after the cameras and Next camera", block.parent.objectName === "cameraTab"
-              && at("controlsBlock") > at("camerasBlock") && at("controlsBlock") > at("nextCameraButton"),
-              block.parent.objectName + ": " + at("camerasBlock") + "," + at("nextCameraButton") + "," + at("controlsBlock"))
-      h.fits(A(), "Camera tab, preview off")
-      showControls()
+    h.step("settings: drawn from the set, Image open, the rest closed", function() {
+      var set = S().record.settings
+      h.eq("assembled from seven lines into four groups", set.groups.map(function(g) { return g.id + ":" + g.rows.length }).join(","),
+           "image:5,white_balance:2,exposure:5,focus:8")
+      h.eq("the section's title", h.find(A(), "settingsTitle").text + "/" + h.find(A(), "settingsTitle").visible, "SETTINGS/true")
+      var hl = h.find(A(), "settingsGroupLabel-image"), rl = h.find(A(), "settingLabel-camera.image.brightness")
+      h.eq("a group's label is aligned with its rows' labels", Math.round(hl.mapToItem(C(), 0, 0).x), Math.round(rl.mapToItem(C(), 0, 0).x))
+      h.check("Reset to defaults is outside the scrolling area", !within(h.find(A(), "settingsReset"), h.find(A(), "settingsFlick")))
+      h.check("on the settings' title line", Math.abs(h.find(A(), "settingsReset").mapToItem(C(), 0, h.find(A(), "settingsReset").height / 2).y
+              - h.find(A(), "settingsTitle").mapToItem(C(), 0, h.find(A(), "settingsTitle").height / 2).y) < 2)
+      h.eq("area shown", h.find(A(), "settingsArea").visible, true)
+      h.eq("group labels", ["image", "white_balance", "exposure", "focus"].map(function(g) {
+        return h.find(A(), "settingsGroupLabel-" + g).text }).join(","), "Image,White balance,Exposure,Focus & zoom")
+      h.eq("Image rows", ["brightness", "contrast", "saturation", "sharpness", "backlight_compensation"].map(function(n) {
+        return shown("camera.image." + n) }).join(","), "true,true,true,true,true")
+      h.eq("closed groups draw no rows", row("camera.white_balance.white_balance_temperature"), null)
+      h.eq("labels", h.find(A(), "settingLabel-camera.image.brightness").text + "," + h.find(A(), "settingLabel-camera.image.backlight_compensation").text,
+           "Brightness,Backlight compensation")
+      h.eq("value", h.find(A(), "settingValue-camera.image.brightness").text, "128")
+      h.eq("slider range", h.find(A(), "settingSlider-camera.image.contrast").minimum + ".." + h.find(A(), "settingSlider-camera.image.contrast").maximum, "0..255")
+      h.eq("idle note", h.find(A(), "settingsNote").text, "Not in use: changes apply when an app next uses the camera.")
+      h.eq("no hint", h.find(A(), "settingsHint").visible, false)
+      h.eq("reset shown", h.find(A(), "settingsReset").visible, true)
+      h.eq("cursor stops: the rows drawn", kinds(),
+           "switch,preview,fps,tabs,camera0,camera1,camera2,next,reset,group0,setting0,setting1,setting2,setting3,setting4,group1,group2,group3")
+      h.eq("accessible row", row("camera.image.brightness").Accessible.name, "Brightness")
+      h.eq("accessible header", header("exposure").Accessible.name + "/" + header("exposure").Accessible.description, "Exposure/Collapsed")
+      h.fits(A(), "Camera tab with the MX Brio, Image open")
+      noInnerScroll("Image open")
     })
-    h.grabStep(function() { return A().popup }, "c1-idle-note.png")
+    h.grabStep(function() { return A().popup }, "s1-camera-default.png")
     layoutGrabs("nopreview", "camera")
 
-    // the keyboard walks the rows that are drawn; Left/Right move a slider
-    h.step("controls: the keyboard reaches the contrast slider", function() {
+    // the keyboard walks the rows that are drawn; Right moves a slider
+    h.step("settings: the keyboard reaches the brightness slider", function() {
       h.find(A(), "panelFlick").contentY = 0
       h.markLog()
       h.key(Qt.Key_Down)                              // shows the cursor
-      // preview, fps, the tab row, three cameras, Next camera, brightness, contrast
-      for (var i = 0; i < 9; i++) h.key(Qt.Key_Down)
-    }, function() { return C().currentStop && C().currentStop.kind === "control" })
-    h.step("controls: Right nudges contrast, written once after the debounce", function() {
-      h.eq("cursor on contrast", JSON.stringify(C().currentStop), JSON.stringify({ kind: "control", index: 1 }))
-      h.eq("contrast row has the cursor", h.find(A(), "controlRow-contrast").hasCursor, true)
+      // preview, fps, the tab row, three cameras, Next camera, Reset, Image, brightness
+      for (var i = 0; i < 10; i++) h.key(Qt.Key_Down)
+    }, function() { return C().currentStop && C().currentStop.kind === "setting" })
+    h.step("settings: Right nudges brightness, written once after the debounce, with -- before id and value", function() {
+      h.eq("cursor on brightness", JSON.stringify(C().currentStop), JSON.stringify({ kind: "setting", index: 0 }))
+      h.eq("brightness row has the cursor", row("camera.image.brightness").hasCursor, true)
       h.key(Qt.Key_Right)
       h.key("l")
-      h.eq("shown at once (a draft)", shown("contrast"), "58")
+      h.eq("shown at once (a draft)", h.find(A(), "settingValue-camera.image.brightness").text, "154")
       h.eq("nothing written yet", setArgs().length, 0)
-    }, function() { return setArgs().length >= 1 && value("contrast") === 58 }, 3000)
-    h.step("controls: one write for two presses, confirmed by the stream", function() {
-      h.eq("writes", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "contrast", "58"]]))
-      h.eq("draft settled", JSON.stringify(S().controlDrafts), "{}")
-      h.eq("shown", shown("contrast"), "58")
-      h.eq("stored by the fake", h.model.findControl(S().record, "contrast").stored, true)
+    }, function() { return setArgs().length >= 1 && value("camera.image.brightness") === 154 }, 3000)
+    h.step("settings: one write for two presses, confirmed by the delta", function() {
+      h.eq("writes", JSON.stringify(setArgs()), JSON.stringify([write("camera.image.brightness", 154)]))
+      h.eq("draft settled", JSON.stringify(S().settingDrafts), "{}")
+      h.eq("stored by the fake", h.model.findSetting(S().record, "camera.image.brightness").stored, true)
+      h.eq("rev moved", S().record.settings.rev, 6)
     })
 
-    // starting: the daemon has the camera open and writes a change at once
-    h.step("controls: starting", function() {
-      h.feed([stateLine(rev6({ state: "starting", consumers: 1, loopback_consumers: 1 }))])
-    }, function() { return S().record.state === "starting" })
-    h.step("controls: live while starting", function() {
-      h.eq("live note", h.find(A(), "controlsNote").text, "Changes apply live.")
-      h.eq("shown", h.find(A(), "controlsNote").visible, true)
+    // a group header opens and closes, by key and by click
+    h.step("settings: Up to the Image header, Enter closes it", function() {
+      h.key(Qt.Key_Up)
+      h.eq("on the header", JSON.stringify(C().currentStop), JSON.stringify({ kind: "group", index: 0 }))
+      h.key(Qt.Key_Return)
+    }, function() { return !shown("camera.image.brightness") })
+    h.step("settings: closed; the stops follow; Space opens it again", function() {
+      h.eq("stops", kinds(), "switch,preview,fps,tabs,camera0,camera1,camera2,next,reset,group0,group1,group2,group3")
+      h.eq("cursor kept on the header", JSON.stringify(C().currentStop), JSON.stringify({ kind: "group", index: 0 }))
+      h.key(Qt.Key_Space)
+    }, function() { return shown("camera.image.brightness") })
+    h.step("settings: Left closes, Right opens", function() {
+      h.key(Qt.Key_Left)
+      h.eq("closed", C().settingsView.groups[0].expanded, false)
+      h.key(Qt.Key_Right)
+      h.eq("open", C().settingsView.groups[0].expanded, true)
+      h.eq("nothing written by the headers", setArgs().length, 1)
+    })
+    h.step("settings: click White balance", function() { click(header("white_balance")) },
+           function() { return shown("camera.white_balance.white_balance_temperature") })
+    h.wait(200)
+    h.step("settings: one group open at a time: White balance closed Image", function() {
+      h.eq("open", openGroups(), "white_balance")
+      h.eq("Image's rows are gone", row("camera.image.brightness"), null)
+      C().setCursor("group", 1)
+      h.key(Qt.Key_Down)
+      h.eq("a switch row draws the one highlight (not the switch)", highlights("camera.white_balance.white_balance_automatic"), "row")
+    })
+    h.step("settings: the greyed temperature shows its reason and takes no input", function() {
+      var t = row("camera.white_balance.white_balance_temperature")
+      var reason = h.find(A(), "settingReason-camera.white_balance.white_balance_temperature")
+      h.eq("reason shown", reason.visible, true)
+      h.eq("reason", reason.text, "Turn off automatic white balance to change this")
+      h.eq("accessible description: unavailable, the value and the reason", t.Accessible.description,
+           "Unavailable. 2975 K. Turn off automatic white balance to change this")
+      h.eq("its widget is disabled", h.find(A(), "settingWidget-camera.white_balance.white_balance_temperature").enabled, false)
+      // M6: only the control fades; the label is dim (not faint), the value
+      // and the reason keep full opacity, the reason in the panel's hint size
+      var temp = "camera.white_balance.white_balance_temperature"
+      h.eq("the slider fades", h.find(A(), "settingSlider-" + temp).opacity, 0.45)
+      h.eq("the widget's box does not", h.find(A(), "settingWidget-" + temp).opacity, 1)
+      h.eq("the value does not", h.find(A(), "settingValue-" + temp).opacity, 1)
+      h.eq("the label is the dim colour (not faint)", String(h.find(A(), "settingLabel-" + temp).color), String(C().dim))
+      h.eq("the reason's size is the panel's hint size", reason.font.pixelSize, h.find(A(), "settingsNote").font.pixelSize)
+      h.eq("unit", h.find(A(), "settingValue-camera.white_balance.white_balance_temperature").text, "2975 K")
+      h.eq("the switch above it is on", h.find(A(), "settingSwitch-camera.white_balance.white_balance_automatic").checked, true)
+      h.eq("no reason under an enabled row", h.find(A(), "settingReason-camera.white_balance.white_balance_automatic").visible, false)
+      C().setCursor("setting", stopOf("camera.white_balance.white_balance_temperature"))
+      h.markLog()
+      h.key(Qt.Key_Right)
+      h.eq("a key moves nothing", JSON.stringify(S().settingDrafts), "{}")
+      h.eq("a greyed write is refused", S().moveSetting("camera.white_balance.white_balance_temperature", 3000), false)
     })
 
-    // live: another app uses the camera, so the preview runs too
-    h.step("controls: active", function() {
-      h.feed([stateLine(rev6({ state: "active", consumers: 1, loopback_consumers: 1 }))])
-    }, function() { return S().record.state === "active" && P().running && P().frames >= 2 }, 8000)
-    h.step("controls: live, the live note", function() {
-      h.eq("live note", h.find(A(), "controlsNote").text, "Changes apply live.")
-      h.eq("live note shown", h.find(A(), "controlsNote").visible, true)
-      h.eq("sliders kept", rowShown("brightness") && rowShown("sharpness"), true)
-      h.eq("controls kept through the state line", S().record.controls.length, 4)
-      h.eq("the frame shows", h.find(A(), "previewImage").visible, true)
-      h.fits(A(), "Camera tab, preview on")
-      showControls()
+    // Exposure: the greyed exposure time, then Manual enables it
+    h.step("settings: only Exposure open", function() { openOnly(["exposure"]) }, function() { return shown("camera.exposure.exposure_time_absolute") })
+    h.wait(250)
+    h.step("settings: exposure time greyed with its reason", function() {
+      h.eq("reason", h.find(A(), "settingReason-camera.exposure.exposure_time_absolute").text, "Set exposure to manual to change this")
+      h.eq("reason shown", h.find(A(), "settingReason-camera.exposure.exposure_time_absolute").visible, true)
+      h.eq("unit", h.find(A(), "settingValue-camera.exposure.exposure_time_absolute").text, "1250 ×100 µs")
+      h.eq("the mode is Auto", h.find(A(), "settingChoices-camera.exposure.auto_exposure").value, "aperture_priority")
+      h.eq("anti-flicker: four choices", h.find(A(), "settingChoices-camera.exposure.power_line_frequency").options.length, 4)
+      h.eq("keep framerate off", h.find(A(), "settingSwitch-camera.exposure.keep_framerate").checked, false)
+      h.fits(A(), "Exposure open")
+      noInnerScroll("Exposure open")
+      h.markLog()
     })
-    h.grabStep(function() { return A().popup }, "c1-live-four-sliders.png")
-    h.step("controls: live figures for the Status tab", function() {
-      h.feed(['{"v":1,"type":"stats","fps":30.0,"latency_p50_ms":38.4,"cpu_percent":5.2,"gpu_percent":11.0}'])
-    }, function() { return S().record.stats !== null })
-    layoutGrabs("preview", "camera")
-    h.step("controls: the Status rows in plain words", function() {
-      var rows = C().statusRows.map(function(r) { return r.label + "=" + r.value })
-      h.check("consumers by kind", rows.indexOf("Used by=Apps 1 \u00b7 PipeWire 0 \u00b7 Preview 0") >= 0, JSON.stringify(rows))
-      h.check("the D-Bus API revision", rows.indexOf("D-Bus API=revision 6") >= 0, JSON.stringify(rows))
+    h.grabStep(function() { return A().popup }, "s1-exposure-greyed.png")
+    // M1/M3: Left/Right walk a chip cursor that starts on the choice made;
+    // nothing is written until Enter
+    h.step("settings: the cursor on Anti-flicker lands on 60 Hz, one highlight", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.exposure.power_line_frequency"))
+      h.eq("one highlight: the chip of the current choice", highlights("camera.exposure.power_line_frequency"), "chip:60 Hz")
+      h.key(Qt.Key_Left)
+      h.key("h")
+      h.eq("the cursor walked to Off", highlights("camera.exposure.power_line_frequency"), "chip:Off")
+      h.eq("60 Hz still the choice", h.find(A(), "settingChoices-camera.exposure.power_line_frequency").value, "60hz")
+      h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
+      h.mark = Date.now()
+    }, function() { return Date.now() - h.mark > 400 })
+    h.step("settings: walking wrote nothing", function() {
+      h.eq("no command", setArgs().length, 0)
+      h.eq("still on Off", highlights("camera.exposure.power_line_frequency"), "chip:Off")
+    })
+    h.grabStep(function() { return A().popup }, "s1-keyboard-enum.png")
+    h.step("settings: Enter chooses Off", function() { h.key(Qt.Key_Return) },
+           function() { return value("camera.exposure.power_line_frequency") === "disabled" && !S().commandBusy }, 4000)
+    h.step("settings: one write, Off", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.exposure.power_line_frequency", "disabled")]))
+      h.eq("Off selected", h.find(A(), "settingChoices-camera.exposure.power_line_frequency").value, "disabled")
+      h.key(Qt.Key_Return)
+      h.eq("Enter on the choice made writes nothing more", JSON.stringify(S().settingDrafts), "{}")
+      h.markLog()
+    })
+    h.step("settings: click Manual", function() { click(chip("camera.exposure.auto_exposure", "Manual")) },
+           function() { return value("camera.exposure.auto_exposure") === "manual" && !S().commandBusy }, 4000)
+    h.wait(250)
+    h.step("settings: the fake's delta enabled exposure time", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.exposure.auto_exposure", "manual")]))
+      var t = h.model.findSetting(S().record, "camera.exposure.exposure_time_absolute")
+      h.eq("enabled", t.enabled, true)
+      h.eq("reason gone", h.find(A(), "settingReason-camera.exposure.exposure_time_absolute").visible, false)
+      h.eq("widget enabled", h.find(A(), "settingWidget-camera.exposure.exposure_time_absolute").enabled, true)
+      h.eq("Manual selected", h.find(A(), "settingChoices-camera.exposure.auto_exposure").value, "manual")
+      h.eq("no draft left", JSON.stringify(S().settingDrafts), "{}")
+    })
+    h.grabStep(function() { return A().popup }, "s1-exposure-manual.png")
+    h.step("settings: Left on the exposure mode walks to Manual and writes nothing; on exposure time it moves", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.exposure.auto_exposure"))
+      h.key(Qt.Key_Left)
+      h.eq("no draft for a walk", JSON.stringify(S().settingDrafts), "{}")
+      h.eq("the walk stops at the end", highlights("camera.exposure.auto_exposure"), "chip:Manual")
+      C().setCursor("setting", stopOf("camera.exposure.exposure_time_absolute"))
+      h.key(Qt.Key_Right)
+    }, function() { return setArgs().length === 1 && value("camera.exposure.exposure_time_absolute") === 1352 }, 3000)
+    h.step("settings: exposure time written", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.exposure.exposure_time_absolute", 1352)]))
+    })
+
+    // Focus & zoom: the field of view's buttons, a negative value after --, a switch
+    h.step("settings: only Focus & zoom open", function() { openOnly(["focus"]) }, function() { return shown("camera.focus.field_of_view") })
+    h.wait(250)
+    h.step("settings: Focus & zoom alone open, with its two Recentre buttons", function() {
+      h.eq("open", openGroups(), "focus")
+      h.eq("rows", C().settingsView.groups[3].rows.length, 8)
+      h.eq("the buttons", h.find(A(), "settingAction-camera.focus.pan_reset").text + "," + h.find(A(), "settingAction-camera.focus.tilt_reset").text,
+           "Recentre pan,Recentre tilt")
+      C().setCursor("setting", stopOf("camera.focus.pan_reset"))
+      h.eq("an action row: the button draws the one highlight", highlights("camera.focus.pan_reset"), "button")
+      C().setCursor("setting", stopOf("camera.focus.zoom_absolute"))
+      h.eq("a slider row: the row draws it", highlights("camera.focus.zoom_absolute"), "row")
+      h.check("a switch row's label takes the room the switch leaves",
+              h.find(A(), "settingLabel-camera.focus.focus_automatic_continuous").width > row("camera.focus.focus_automatic_continuous").width * 0.6,
+              h.find(A(), "settingLabel-camera.focus.focus_automatic_continuous").width + " of " + row("camera.focus.focus_automatic_continuous").width)
+      C().cursorActive = false
+    })
+    h.grabStep(function() { return A().popup }, "s1-focus-actions.png")
+    h.step("settings: the field of view is three buttons, 65 selected", function() {
+      var fov = h.find(A(), "settingChoices-camera.focus.field_of_view")
+      h.eq("choices", fov.options.map(function(o) { return o.label }).join(","), "90°,78°,65°")
+      h.eq("selected", fov.value, "65")
+      h.eq("65 lit", chip("camera.focus.field_of_view", "65°").selected, true)
+      h.eq("focus greyed", h.find(A(), "settingReason-camera.focus.focus_absolute").text, "Turn off continuous autofocus to change this")
+      h.eq("pan value", h.find(A(), "settingValue-camera.focus.pan_absolute").text, "14400")
+      h.eq("tilt value", h.find(A(), "settingValue-camera.focus.tilt_absolute").text, "-14400")
+      h.fits(A(), "Focus & zoom open (the largest group, two actions included)")
+      noInnerScroll("Focus & zoom open")
+      h.note("height: card " + A().popup.contentHeight + " in " + Math.round(A().popup.availableCardHeight))
+    })
+    h.grabStep(function() { return A().popup }, "s1-focus-fov.png")
+    h.step("settings: Left on tilt writes a negative value after --", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.focus.tilt_absolute"))
+      h.key(Qt.Key_Left)
+    }, function() { return setArgs().length === 1 && value("camera.focus.tilt_absolute") === -18000 }, 3000)
+    h.step("settings: tilt argv", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([["settings", "set", "--camera=" + brioId, "--", "camera.focus.tilt_absolute", "-18000"]]))
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.focus.focus_automatic_continuous"))
+      h.key(Qt.Key_Return)
+    }, function() { return value("camera.focus.focus_automatic_continuous") === false && !S().commandBusy }, 3000)
+    h.wait(200)
+    h.step("settings: Enter flipped continuous autofocus; focus is enabled", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.focus_automatic_continuous", "false")]))
+      h.eq("focus enabled", h.model.findSetting(S().record, "camera.focus.focus_absolute").enabled, true)
+      h.eq("switch off", h.find(A(), "settingSwitch-camera.focus.focus_automatic_continuous").checked, false)
+      h.markLog()
+      click(chip("camera.focus.field_of_view", "90°"))
+    }, function() { return value("camera.focus.field_of_view") === "90" }, 3000)
+    h.step("settings: the field of view chosen by a click", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.field_of_view", "90")]))
     })
 
     // a drag: one write for the whole move, at its end
-    h.step("controls: drag saturation", function() {
-      showControls()
+    h.step("settings: drag zoom", function() {
       h.markLog()
-      var sl = slider("saturation")
-      var y = sl.height / 2
-      keys.mousePress(sl, sl.width * 0.2, y)
-      for (var i = 3; i <= 8; i++) keys.mouseMove(sl, sl.width * i / 10, y, -1, Qt.LeftButton)
-    }, function() { return slider("saturation").dragging })
-    h.step("controls: release", function() {
-      var sl = slider("saturation")
-      h.notes.dragged = h.model.clampControl(h.model.findControl(S().record, "saturation"), sl.liveValue)
-      h.eq("the panel does not scroll under a held slider", h.find(A(), "panelFlick").interactive, false)
+      var sl = h.find(A(), "settingSlider-camera.focus.zoom_absolute")
+      keys.mousePress(sl, sl.width * 0.2, sl.height / 2)
+      for (var i = 3; i <= 8; i++) keys.mouseMove(sl, sl.width * i / 10, sl.height / 2, -1, Qt.LeftButton)
+    }, function() { return h.find(A(), "settingSlider-camera.focus.zoom_absolute").dragging })
+    h.step("settings: release", function() {
+      var sl = h.find(A(), "settingSlider-camera.focus.zoom_absolute")
+      h.notes.dragged = h.model.clampSetting(h.model.findSetting(S().record, "camera.focus.zoom_absolute"), sl.liveValue)
+      h.eq("neither Flickable takes a held slider", h.find(A(), "panelFlick").interactive || h.find(A(), "settingsFlick").interactive, false)
       keys.mouseRelease(sl, sl.width * 0.8, sl.height / 2)
-    }, function() { return value("saturation") === h.notes.dragged }, 3000)
+    }, function() { return value("camera.focus.zoom_absolute") === h.notes.dragged }, 3000)
     h.wait(400)
-    h.step("controls: the drag wrote one command", function() {
-      h.check("moved", h.notes.dragged !== 179, h.notes.dragged)
-      h.eq("one write, the end of the drag", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "saturation", String(h.notes.dragged)]]))
-      h.eq("slider shows it", slider("saturation").value, h.notes.dragged)
-      h.eq("value text", shown("saturation"), String(h.notes.dragged))
-      h.eq("not dragging", slider("saturation").dragging, false)
-      h.eq("the panel scrolls again", h.find(A(), "panelFlick").interactive, h.find(A(), "panelFlick").contentHeight > h.find(A(), "panelFlick").height)
+    h.step("settings: the drag wrote one command", function() {
+      h.check("moved", h.notes.dragged !== 100, h.notes.dragged)
+      h.eq("one write, the end of the drag", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.zoom_absolute", h.notes.dragged)]))
+      h.eq("value text", h.find(A(), "settingValue-camera.focus.zoom_absolute").text, String(h.notes.dragged))
+      h.eq("held count back to 0", C().slidersHeld, 0)
     })
 
-    // held: the debounce writes the value while the hand stays on it, and a
-    // controls line about another value does not move the knob
-    h.step("controls: hold brightness", function() {
-      h.markLog()
-      var sl = slider("brightness")
-      keys.mousePress(sl, sl.width * 0.9, sl.height / 2)
-      keys.mouseMove(sl, sl.width * 0.85, sl.height / 2, -1, Qt.LeftButton)
-      h.notes.held = Math.round(sl.liveValue)
-    }, function() { return value("brightness") === h.notes.held }, 3000)
-    h.step("controls: written while held, 150 ms after the last move", function() {
-      h.eq("one write", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "brightness", String(h.notes.held)]]))
-      h.eq("still held", slider("brightness").dragging, true)
-      h.feed([JSON.stringify({ v: 1, type: "controls", camera: brioId, controls: [
-        { name: "brightness", min: 0, max: 255, step: 1, "default": 128, value: 3, stored: true },
-        { name: "contrast", min: 0, max: 255, step: 1, "default": 32, value: 58, stored: true },
-        { name: "saturation", min: 0, max: 255, step: 1, "default": 128, value: h.notes.dragged, stored: true },
-        { name: "sharpness", min: 0, max: 255, step: 1, "default": 128, value: 255, stored: false }] })])
-    }, function() { return value("brightness") === 3 })
-    h.wait(200)
-    h.step("controls: not yanked back while held", function() {
-      var sl = slider("brightness")
-      h.eq("still held", sl.dragging, true)
-      h.eq("knob where the user holds it", Math.round(sl.liveValue), h.notes.held)
-      h.eq("value text follows the hand", shown("brightness"), String(h.notes.held))
-      keys.mouseRelease(sl, sl.width * 0.85, sl.height / 2)
-    }, function() { return value("brightness") === h.notes.held }, 3000)
-    h.step("controls: the release writes the held value again", function() {
-      var args = setArgs()
-      h.eq("writes", JSON.stringify(args), JSON.stringify([["controls", "set", "brightness", String(h.notes.held)],
-                                                         ["controls", "set", "brightness", String(h.notes.held)]]))
-      h.eq("slider at it", slider("brightness").value, h.notes.held)
-      h.eq("no draft left", JSON.stringify(S().controlDrafts), "{}")
-    })
+    // F4: a slider held while a new set commits under it (another camera
+    // with the same ids, then the same camera with its rows moved; each is
+    // the set alone, as the CLI prints it after a serial change, so the row
+    // items stay) lets go and writes nothing, to that setting or to the one
+    // now at its place
+    var heldThrough = function(label, held, change, changed, restore, serialAfter) {
+      h.step("settings: hold " + held + " (" + label + ")", function() {
+        h.markLog()
+        var sl = h.find(A(), "settingSlider-" + held)
+        h.notes.held = sl
+        keys.mousePress(sl, sl.width * 0.2, sl.height / 2)
+      }, function() {
+        // the press's own move is written after the debounce, as any held
+        // slider's is: let it go out before the set changes
+        return h.notes.held.dragging && C().slidersHeld === 1 && setArgs().length === 1 && !S().commandBusy
+          && JSON.stringify(S().settingDrafts) === "{}"
+      }, 4000)
+      h.step("settings: " + label + " while it is held", function() { h.markLog(); change() }, changed, 4000)
+      h.wait(200)
+      h.step("settings: " + label + ": the drag let go; moving and releasing write nothing", function() {
+        var sl = h.notes.held
+        h.eq("not held", sl.dragging, false)
+        h.eq("held count back to 0", C().slidersHeld, 0)
+        keys.mouseMove(sl, sl.width * 0.7, sl.height / 2, -1, Qt.LeftButton)
+        keys.mouseRelease(sl, sl.width * 0.7, sl.height / 2)
+      })
+      h.wait(500)
+      h.step("settings: " + label + ": nothing written", function() {
+        h.eq("no settings command", JSON.stringify(setArgs()), "[]")
+        h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
+        restore()
+      }, function() {
+        return !!S().record.settings && S().record.settings.camera === brioId && S().record.settings.serial === serialAfter
+          && h.writerIdle() && !S().commandBusy
+      }, 4000)
+      h.wait(200)
+    }
+    var setAlone = '{"fake":"settings-set"}'
+    heldThrough("another camera's set", "camera.focus.zoom_absolute", function() {
+      h.writeFile("settings-camera", [fhdId])
+      h.writeFile("settings-serial", ["5"])
+      h.feed([setAlone])
+    }, function() { return !!S().record.settings && S().record.settings.camera === fhdId }, function() {
+      h.writeFile("settings-camera", [brioId])
+      h.writeFile("settings-serial", ["6"])
+      h.feed([snapshotLine(rev7({}))])
+    }, 6)
+    heldThrough("the same camera, its rows moved", "camera.focus.zoom_absolute", function() {
+      // pan before zoom: the same rows, so the held item stays, and shows Pan
+      var st = brioState()
+      var zi = -1, pi = -1
+      for (var i = 0; i < st.length; i++) {
+        if (st[i].indexOf("|camera.focus.zoom_absolute|") >= 0) zi = i
+        if (st[i].indexOf("|camera.focus.pan_absolute|") >= 0) pi = i
+      }
+      var z = st[zi]
+      st[zi] = st[pi]
+      st[pi] = z
+      h.writeFile("settings-state", st)
+      h.writeFile("settings-serial", ["7"])
+      h.feed([setAlone])
+    }, function() { return !!S().record.settings && S().record.settings.serial === 7 }, function() {
+      h.eq("the held item now shows Pan", h.notes.held.objectName, "settingSlider-camera.focus.pan_absolute")
+      h.writeFile("settings-state", brioState())
+      h.writeFile("settings-serial", ["8"])
+      h.feed([snapshotLine(rev7({}))])
+    }, 8)
 
-    // a slow command: moves behind it coalesce into one queued write
-    h.step("controls: a slow CLI", function() { h.writeFile("delay", ["0.8"]) }, function() { return h.writerIdle() })
-    h.step("controls: three nudges while the first write runs", function() {
+    // a slow command: moves behind it coalesce into one queued write per id
+    h.step("settings: a slow CLI", function() { h.writeFile("delay", ["0.8"]) }, function() { return h.writerIdle() })
+    h.step("settings: three nudges while the first write runs", function() {
       h.markLog()
       h.notes.maxQueue = 0
-      C().setCursor("control", 3)
-      h.key(Qt.Key_Left)                                // 255 -> 242, written after 150 ms
+      h.notes.zoom = value("camera.focus.zoom_absolute")
+      C().setCursor("setting", stopOf("camera.focus.zoom_absolute"))
+      h.key(Qt.Key_Right)                                // +20, written after 150 ms
       h.mark = Date.now()
     }, function() { return S().commandBusy && Date.now() - h.mark > 300 })
-    h.step("controls: a second", function() {
-      h.key(Qt.Key_Left)                                // 229, queued
+    h.step("settings: a second", function() {
+      h.key(Qt.Key_Right)                                // queued
       h.mark = Date.now()
     }, function() { h.notes.maxQueue = Math.max(h.notes.maxQueue, S().pendingIntents.length); return Date.now() - h.mark > 300 })
-    h.step("controls: and the last", function() {
-      h.key(Qt.Key_Left)                                // 216 replaces 229
-      h.mark = Date.now()
+    h.step("settings: and the last", function() {
+      h.key(Qt.Key_Right)                                // replaces it
     }, function() {
       h.notes.maxQueue = Math.max(h.notes.maxQueue, S().pendingIntents.length)
-      return !S().commandBusy && value("sharpness") === 216
+      return !S().commandBusy && value("camera.focus.zoom_absolute") === h.notes.zoom + 60
     }, 6000)
-    h.step("controls: the queued write was replaced, not added", function() {
-      h.eq("writes", JSON.stringify(setArgs()), JSON.stringify([["controls", "set", "sharpness", "242"], ["controls", "set", "sharpness", "216"]]))
+    h.step("settings: the queued write was replaced, not added", function() {
+      h.eq("writes", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.zoom_absolute", h.notes.zoom + 20),
+                                                              write("camera.focus.zoom_absolute", h.notes.zoom + 60)]))
       h.eq("at most one queued", h.notes.maxQueue, 1)
-      h.eq("shown", shown("sharpness"), "216")
+    })
+
+    // a camera switch behind the slow CLI: a write made for the Brio's set
+    // never lands on the next camera's
+    h.step("settings: switch to FHD, then move zoom while it runs", function() {
+      h.markLog()
+      h.check("switch asked", S().selectCamera(fhdId))
+      h.check("move taken", S().commitSetting("camera.focus.zoom_absolute", 300))
+      h.eq("queued, bound to the Brio", JSON.stringify(S().pendingIntents.map(function(i) { return i.verb + ":" + i.camera })),
+           JSON.stringify(["setting:" + brioId]))
+      // the switch lands: the daemon's set is the FHD camera's
+      h.writeFile("settings-camera", [fhdId])
+      h.writeFile("settings-serial", ["3"])
+      h.feed([snapshotLine(rev7({ active_camera: fhdId, active_camera_name: "FHD Camera" }))])
+    }, function() { return !!S().record.settings && S().record.settings.camera === fhdId && !S().commandBusy }, 6000)
+    h.wait(400)
+    h.step("settings: the queued write was dropped, not run on the FHD camera", function() {
+      h.eq("no settings command", JSON.stringify(setArgs()), "[]")
+      h.check("the switch ran", h.newLogArgs().some(function(a) { return a[0] === "camera" }), JSON.stringify(h.newLogArgs()))
+      h.eq("queue empty", S().pendingIntents.length, 0)
+      h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
+      h.writeFile("settings-camera", [brioId])
+      h.writeFile("settings-serial", ["4"])
+      h.removeFile("delay")
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !!S().record.settings && S().record.settings.camera === brioId && h.writerIdle() })
+
+    // F3: more distinct writes than the queue holds, and an on/off ask,
+    // behind a slow command: every write runs once, the ask too, and no
+    // draft is left behind
+    h.step("settings: eleven writes and an on/off ask behind a slow command", function() {
+      h.writeFile("delay", ["0.3"])
+    }, function() { return h.writerIdle() })
+    h.step("settings: queue them in one turn", function() {
+      h.markLog()
+      h.notes.wanted = [["camera.image.brightness", 100], ["camera.image.contrast", 101], ["camera.image.saturation", 102],
+                        ["camera.image.sharpness", 103], ["camera.image.backlight_compensation", 0], ["camera.exposure.gain", 10],
+                        ["camera.focus.zoom_absolute", 222], ["camera.focus.field_of_view", "78"], ["camera.focus.tilt_absolute", 7200],
+                        ["camera.exposure.keep_framerate", true], ["camera.exposure.power_line_frequency", "50hz"]]
+      for (var i = 0; i < h.notes.wanted.length; i++)
+        h.check("taken: " + h.notes.wanted[i][0], S().commitSetting(h.notes.wanted[i][0], h.notes.wanted[i][1]))
+      h.check("the on/off ask is taken", S().setEnabled(true))
+      var q = S().pendingIntents
+      h.eq("the queue: the ask first, then the writes it holds", q.length, h.model.SETTING_QUEUE_CAP + 1)
+      h.eq("the ask first", q[0].verb, "enable")
+      h.eq("the rest wait as drafts", S().settingsDeferred, true)
+      h.eq("every draft kept", Object.keys(S().settingDrafts).length, h.notes.wanted.length)
+    }, function() { return !S().commandBusy && JSON.stringify(S().settingDrafts) === "{}" && !S().settingsDeferred }, 20000)
+    h.step("settings: every write ran once, and the ask", function() {
+      var args = setArgs().map(function(a) { return a[4] + "=" + a[5] }).sort()
+      var want = h.notes.wanted.map(function(w) { return w[0] + "=" + String(w[1]) }).sort()
+      h.eq("writes", JSON.stringify(args), JSON.stringify(want))
+      h.check("on ran", h.newLogArgs().some(function(a) { return a[0] === "on" }), JSON.stringify(h.newLogArgs()))
+      h.eq("no draft left", JSON.stringify(S().settingDrafts), "{}")
+      h.eq("power line", value("camera.exposure.power_line_frequency"), "50hz")
       h.removeFile("delay")
     }, function() { return h.writerIdle() })
 
-    // a refused write: the slider goes back to what the daemon reports
-    h.step("controls: the daemon refuses", function() {
+    // a refused write: the row goes back to what the daemon reports
+    h.step("settings: the daemon refuses", function() {
       h.writeFile("exit", ["1"])
       h.writeFile("stderr", ["omarchy-broadcast: the camera refused the value"])
     }, function() { return h.writerIdle() })
-    h.step("controls: nudge", function() { h.markLog(); h.key(Qt.Key_Left) },
-           function() { return setArgs().length === 1 && !S().commandBusy && JSON.stringify(S().controlDrafts) === "{}" }, 3000)
-    h.step("controls: back to the reported value, error shown", function() {
-      h.eq("argv", JSON.stringify(setArgs()[0]), JSON.stringify(["controls", "set", "sharpness", "203"]))
-      h.eq("shown", shown("sharpness"), "216")
+    h.step("settings: nudge pan", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.focus.pan_absolute"))
+      h.key(Qt.Key_Left)
+    }, function() { return setArgs().length === 1 && !S().commandBusy && JSON.stringify(S().settingDrafts) === "{}" }, 3000)
+    h.step("settings: back to the reported value, error shown", function() {
+      h.eq("argv", JSON.stringify(setArgs()[0]), JSON.stringify(write("camera.focus.pan_absolute", 10800)))
+      h.eq("shown", h.find(A(), "settingValue-camera.focus.pan_absolute").text, "14400")
       h.check("error", S().commandError.indexOf("The daemon refused the request: the camera refused the value") === 0, S().commandError)
       h.writeFile("exit", ["0"])
       h.removeFile("stderr")
     }, function() { return h.writerIdle() })
 
-    // a camera switch behind a slow CLI: a write made for the camera shown
-    // never lands on the next one (the CLI writes to the active camera)
-    h.step("controls: a slow camera switch", function() { h.writeFile("delay", ["0.8"]) }, function() { return h.writerIdle() })
-    h.step("controls: switch to FHD, then move brightness while it runs", function() {
-      h.markLog()
-      h.check("switch asked", S().selectCamera(fhdId))
-      h.check("move taken", S().commitControl("brightness", 40))
-      h.eq("queued, bound to the Brio", JSON.stringify(S().pendingIntents.map(function(i) { return i.verb + ":" + i.camera })),
-           JSON.stringify(["control:" + brioId]))
-      // the switch lands: the daemon's controls line names the FHD camera
-      h.writeFile("controls-camera", [fhdId])
-      h.feed([JSON.stringify({ v: 1, type: "controls", camera: fhdId, controls: [
-        { name: "brightness", min: 0, max: 255, step: 1, "default": 128, value: 128, stored: false }] })])
-    }, function() { return S().record.controlsCameraId === fhdId && !S().commandBusy }, 6000)
-    h.wait(400)
-    h.step("controls: the queued write was dropped, not run on the FHD camera", function() {
-      h.eq("no controls command", JSON.stringify(setArgs()), "[]")
-      h.check("the switch ran", h.newLogArgs().some(function(a) { return a[0] === "camera" }), JSON.stringify(h.newLogArgs()))
-      h.eq("queue empty", S().pendingIntents.length, 0)
-      h.eq("no draft", JSON.stringify(S().controlDrafts), "{}")
-      h.eq("FHD brightness untouched", value("brightness"), 128)
-      // back to the Brio
-      h.writeFile("controls-camera", [brioId])
-      h.feed([snapshotLine(rev6({ state: "active", consumers: 1, loopback_consumers: 1 }))])
-    }, function() { return S().record.controlsCameraId === brioId && S().record.controls.length === 4 && h.writerIdle() })
-
-    // slider writes never hold the on/off switch: off goes ahead of them
-    h.step("controls: slider writes behind a slow CLI", function() {
-      h.markLog()
-      S().commitControl("contrast", 70)               // runs
-      S().commitControl("saturation", 90)             // queued
-    }, function() { return S().pendingIntents.length === 1 })
-    h.step("controls: the right click is not held by them", function() {
-      h.eq("a command runs", S().commandBusy, true)
-      h.eq("the switch is free", S().toggleBusy, false)
-      h.eq("the panel switch is not busy", h.find(A(), "enableSwitch").busy, false)
-      A().toggleCamera()
-      h.eq("off goes first", JSON.stringify(S().pendingIntents.map(function(i) { return i.verb + (i.on === undefined ? "" : ":" + i.on) })),
-           JSON.stringify(["enable:false", "control"]))
-      h.eq("now held", S().toggleBusy, true)
-      A().toggleCamera()
-      h.eq("a second right click waits for the first", S().pendingIntents.length, 2)
-    }, function() { return !S().commandBusy }, 8000)
-    h.wait(300)
-    h.step("controls: off ran before the queued write", function() {
-      var args = h.newLogArgs().filter(function(a) { return a[0] === "controls" || a[0] === "on" || a[0] === "off" })
-      h.eq("order", JSON.stringify(args), JSON.stringify([["controls", "set", "contrast", "70"], ["off"], ["controls", "set", "saturation", "90"]]))
-      h.removeFile("delay")
-    }, function() { return h.writerIdle() })
+    // M5: on a screen too short for the open group the groups scroll on
+    // their own, with a cue, and Reset stays pinned under them (the room is
+    // forced here; the panel's binding is put back after)
+    h.step("settings: a short screen: the groups scroll, Reset stays in reach", function() {
+      openOnly(["focus"])
+      h.find(A(), "settingsView").room = 300
+    }, function() { return h.find(A(), "settingsFlick").interactive })
+    h.wait(250)
+    h.step("settings: the scroll cue and the pinned Reset", function() {
+      var f = h.find(A(), "settingsFlick")
+      h.check("it scrolls", f.contentHeight > f.height + 0.5, f.contentHeight + " in " + f.height)
+      // ScrollBar.AlwaysOn is Qt.ScrollBarAlwaysOn, 2
+      h.eq("a scroll bar at rest", h.find(A(), "settingsScrollBar").policy, 2)
+      h.eq("shown", h.find(A(), "settingsScrollBar").visible, true)
+      h.eq("the fade says more is below", h.find(A(), "settingsMoreBelow").visible, true)
+      var b = h.find(A(), "settingsReset")
+      var bottom = b.mapToItem(h.find(A(), "settingsView"), 0, b.height).y
+      h.check("Reset is shown, inside the section's room", b.visible && bottom <= 300 + 0.5, bottom)
+      C().cursorActive = false
+    })
+    h.grabStep(function() { return A().popup }, "s1-scroll-fallback.png")
+    h.step("settings: scroll to the end", function() {
+      var f = h.find(A(), "settingsFlick")
+      f.contentY = f.contentHeight - f.height
+    })
+    h.wait(150)
+    h.step("settings: at the end the cue goes", function() { h.eq("no fade at the end", h.find(A(), "settingsMoreBelow").visible, false) })
+    h.step("settings: the room is the panel's again", function() {
+      var v = h.find(A(), "settingsView")
+      v.room = Qt.binding(function() { var c = C(); return c && c.contentRoom > 0 ? c.contentRoom - v.areaTop : 0 })
+      h.find(A(), "settingsFlick").contentY = 0
+    }, function() { var v = h.find(A(), "settingsView"); return Math.abs(v.room - (C().contentRoom - v.areaTop)) < 0.5 })
+    // (the refused write's error line above the tabs still takes room here:
+    // Focus & zoom may scroll until Reset clears it, with the cue)
+    h.step("settings: the room after it", function() {
+      var v = h.find(A(), "settingsView"), f = h.find(A(), "settingsFlick")
+      h.note("room " + Math.round(v.room) + ", groups " + Math.round(f.height) + " of " + Math.round(f.contentHeight)
+             + ", cue " + h.find(A(), "settingsMoreBelow").visible)
+      h.eq("a cue whenever it scrolls", h.find(A(), "settingsMoreBelow").visible || !f.interactive, true)
+    })
 
     // reset to defaults, by the button
-    h.step("controls: Reset to defaults", function() {
+    h.step("settings: Reset to defaults", function() {
       h.markLog()
-      var b = h.find(A(), "controlsReset")
-      showControls()
-      keys.mouseClick(b, b.width / 2, b.height / 2)
-    }, function() { return value("sharpness") === 128 && value("saturation") === 128 }, 3000)
-    h.step("controls: reset ran and came back on the stream", function() {
-      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([["controls", "reset"]]))
-      h.eq("values shown", [shown("brightness"), shown("contrast"), shown("saturation"), shown("sharpness")].join(","), "128,32,128,128")
-      h.eq("nothing stored", S().record.controls.filter(function(c) { return c.stored }).length, 0)
+      click(h.find(A(), "settingsReset"))
+    }, function() { return value("camera.image.brightness") === 128 && value("camera.focus.field_of_view") === "90"
+                           && value("camera.exposure.auto_exposure") === "aperture_priority" }, 3000)
+    h.step("settings: reset ran and came back as deltas", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([["settings", "reset", "--camera=" + brioId]]))
+      h.eq("nothing stored", S().record.settings.groups.some(function(g) { return g.rows.some(function(r) { return r.stored }) }), false)
+      h.eq("exposure time greyed again", h.model.findSetting(S().record, "camera.exposure.exposure_time_absolute").enabled, false)
       h.eq("no error", S().commandError, "")
     })
 
-    // a camera lacking sharpness: no row, no stop
-    h.step("controls: a camera without sharpness", function() {
-      h.writeFile("controls-state", [full[0], full[1], full[2], full[4]])
-      h.feed([snapshotLine(rev6({ state: "active", consumers: 1, loopback_consumers: 1 }))])
-    }, function() { return S().record.controls.length === 3 && h.writerIdle() })
-    h.wait(300)
-    h.step("controls: three sliders", function() {
-      h.eq("sharpness row hidden", rowShown("sharpness"), false)
-      h.eq("the others", rowShown("brightness") && rowShown("contrast") && rowShown("saturation"), true)
-      h.check("no sharpness stop", kinds().indexOf("control3") === -1 && kinds().indexOf("control2,reset") !== -1, kinds())
-      h.eq("a write for it is refused", S().moveControl("sharpness", 10), false)
-      showControls()
-    })
-    h.grabStep(function() { return A().popup }, "c1-no-sharpness.png")
+    // a generic camera: an enum of many choices is a dropdown, an action a button
+    h.step("settings: a camera with a long menu and an action", function() {
+      var opts = []
+      for (var i = 0; i < 6; i++) opts.push("m" + i + ":Item " + i)
+      h.writeFile("settings-state", [stateRow("other", "Other", "camera.other.mode", "enum", "Mode", "m1", "m0", { options: opts.join(",") }),
+                                     stateRow("other", "Other", "camera.other.pan_reset", "action", "Recentre", "-", "-")])
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !!S().record.settings && S().record.settings.groups[0].id === "other" && h.writerIdle() })
+    h.wait(250)
+    h.step("settings: the dropdown and the button", function() {
+      var dd = h.find(A(), "settingDropdown-camera.other.mode")
+      h.check("a dropdown", !!dd, "none")
+      h.eq("its choice", dd ? dd.value : "", "m1")
+      h.eq("the only group is open", C().settingsView.groups[0].expanded, true)
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.other.mode"))
+      h.eq("a dropdown row: the box draws the one highlight", highlights("camera.other.mode"), "dropdown")
+      h.key(Qt.Key_Right)
+      h.key(Qt.Key_Left)
+      h.eq("Left/Right do nothing on a dropdown", JSON.stringify(S().settingDrafts), "{}")
+      // the mouse away from where the list opens (its rows follow the mouse)
+      keys.mouseMove(h.find(A(), "settingsTitle"), 1, 1)
+      h.key(Qt.Key_Return)
+    }, function() { return h.find(A(), "settingDropdown-camera.other.mode").popupOpen })
+    h.step("settings: the list is open; Down, Enter", function() {
+      h.eq("nothing written by opening it", setArgs().length, 0)
+      h.key(Qt.Key_Down)
+      h.key(Qt.Key_Return)
+    }, function() { return value("camera.other.mode") === "m2" && !h.find(A(), "settingDropdown-camera.other.mode").popupOpen }, 3000)
+    h.step("settings: Enter runs the action", function() {
+      h.eq("the choice made in the list", JSON.stringify(setArgs()), JSON.stringify([write("camera.other.mode", "m2")]))
+      h.eq("the box shows the daemon's word", h.find(A(), "settingDropdown-camera.other.mode").value, "m2")
+      h.check("the keyboard is the panel's again", h.catcher(A()).activeFocus)
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.other.pan_reset"))
+      h.key(Qt.Key_Return)
+    }, function() { return setArgs().length === 1 }, 3000)
+    h.step("settings: action argv", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.other.pan_reset", "true")]))
+      h.writeFile("settings-state", brioState())
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !S().commandBusy && h.writerIdle() })
 
-    h.step("controls: a camera with none of them", function() {
-      h.writeFile("controls-state", [full[4]])
-      h.feed([snapshotLine(rev6({}))])
-    }, function() { return S().record.controls.length === 0 && S().record.state === "idle" && h.writerIdle() })
-    h.wait(300)
-    h.step("controls: says so, no reset", function() {
-      h.eq("hint", h.find(A(), "controlsHint").text, "This camera has no brightness, contrast, saturation or sharpness control.")
-      h.eq("reset hidden", h.find(A(), "controlsReset").visible, false)
-      h.eq("no note", h.find(A(), "controlsNote").visible, false)
-      h.eq("no control stops", kinds().indexOf("control") === -1 && kinds().indexOf("reset") === -1, true)
-    })
-
-    // an old daemon (null), then an old CLI (no field)
-    h.step("controls: a daemon below revision 6", function() {
-      h.writeFile("controls-state", full)
-      h.writeFile("controls-mode", ["null"])
-      h.feed([snapshotLine({ interface_revision: 5, loopback_consumers: 0, pipewire_consumers: 0 })])
-    }, function() { return S().record.controlsField === "null" && S().record.interfaceRevision === 5 && h.writerIdle() })
-    h.wait(300)
-    h.step("controls: the daemon needs updating", function() {
-      h.eq("section shown", h.find(A(), "controlsBlock").visible, true)
-      h.eq("hint", h.find(A(), "controlsHint").text, "The daemon needs updating for the camera image controls (omarchy-broadcastd 0.19 or newer).")
-      h.eq("no sliders", rowShown("brightness") || rowShown("contrast"), false)
-      h.eq("no reset", h.find(A(), "controlsReset").visible, false)
-      h.eq("no control stops", kinds().indexOf("control") === -1 && kinds().indexOf("reset") === -1, true)
-      h.eq("a write is refused", S().moveControl("brightness", 10), false)
-      h.eq("a reset is refused", S().resetControls(), false)
-      showControls()
-    })
-    h.grabStep(function() { return A().popup }, "c1-old-daemon.png")
-    h.step("controls: an old CLI", function() {
-      h.writeFile("controls-mode", ["absent"])
-      h.feed([snapshotLine({ interface_revision: 6 })])
-    }, function() { return S().record.controlsField === "absent" && S().record.interfaceRevision === 6 && h.writerIdle() })
-    h.wait(300)
-    h.step("controls: the CLI needs updating", function() {
-      h.eq("hint", h.find(A(), "controlsHint").text, "The omarchy-broadcast CLI needs updating for the camera image controls (0.19 or newer).")
-      h.eq("no sliders", rowShown("brightness"), false)
-    })
-    h.grabStep(function() { return A().popup }, "c1-old-cli.png")
+    // an old daemon, an old CLI, a newer schema, no camera: a hint, no settings
+    var hintCase = function(label, snapshot, mode, text, file) {
+      h.step("settings: " + label, function() {
+        h.writeFile("settings-mode", [mode])
+        h.feed([snapshotLine(snapshot)])
+      }, function() { return S().record.settings === null && h.find(A(), "settingsHint").text === text && h.writerIdle() }, 4000)
+      h.wait(250)
+      h.step("settings: " + label + ": the hint, no groups, no stops", function() {
+        h.eq("hint shown", h.find(A(), "settingsHint").visible, true)
+        h.eq("no groups", C().settingsView.groups.length, 0)
+        h.eq("no reset", h.find(A(), "settingsReset").visible, false)
+        h.eq("no settings stops", kinds().indexOf("group") === -1 && kinds().indexOf("setting") === -1 && kinds().indexOf("reset") === -1, true)
+        h.eq("a write is refused", S().moveSetting("camera.image.brightness", 10), false)
+        h.eq("a reset is refused", S().resetSettings(), false)
+      })
+      if (file) h.grabStep(function() { return A().popup }, file)
+    }
+    hintCase("a daemon below revision 7", { interface_revision: 6, settings_schema: null, settings_revision: null }, "none",
+             "The daemon needs updating for camera settings (omarchy-broadcastd 0.22 or newer).", "s1-old-daemon.png")
+    hintCase("an old CLI", { interface_revision: 7 }, "none",
+             "The omarchy-broadcast CLI needs updating for camera settings (omarchy-broadcast 0.22 or newer).", "s1-old-cli.png")
+    hintCase("a newer settings schema", rev7({ settings_schema: 2 }), "none", "Update the plugin to show these camera settings.", "s1-newer-schema.png")
+    hintCase("settings_clear", rev7({}), "clear", "This camera reports no settings.", "")
 
     // closed: nothing runs, nothing is written
-    h.step("controls: close", function() {
+    h.step("settings: close", function() {
       A().close()
       h.markLog()
-      h.removeFile("controls-mode")
-      h.removeFile("controls-state")
-      h.removeFile("controls-camera")
+      h.removeFile("settings-mode")
+      h.removeFile("settings-state")
+      h.removeFile("settings-camera")
+      h.removeFile("settings-rev")
+      h.removeFile("settings-serial")
+      h.removeFile("settings-per-line")
       h.feed([snapshotLine({})])
     }, function() { return S().record.interfaceRevision === 4 && !P().running && h.writerIdle() })
     h.wait(1000)
-    h.step("controls: nothing while closed", function() {
+    h.step("settings: nothing while closed", function() {
       h.eq("no command", setArgs().length, 0)
-      h.eq("debounce idle", S().controlTimer.running, false)
-      h.eq("no draft", JSON.stringify(S().controlDrafts), "{}")
+      h.eq("debounce idle", S().settingsTimer.running, false)
+      h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
       h.eq("queue empty", S().pendingIntents.length, 0)
     })
   }
