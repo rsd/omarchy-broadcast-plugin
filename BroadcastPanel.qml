@@ -9,8 +9,11 @@ import "Model.js" as Model
 // The popup's content, top to bottom: the header (state and switch), the
 // daemon's error or the last command's failure, the live preview in a fixed
 // 16:9 area with its switch and rate on one row under it, then three tabs:
-//   Effect  the background effect (None, Blur, Replace), what it uses and the
-//           Replace hint, and the noise removal switch;
+//   Effect  the background effect's choices as the daemon's settings schema
+//           offers them (the options of its mode setting; none named here),
+//           the background image it holds, then the daemon's other global
+//           settings (strength, noise removal, ...) drawn generically, or
+//           the hint that replaces them (a daemon below revision 9);
 //   Camera  the camera list and Next camera, then the camera's settings as
 //           the daemon publishes them (SettingsView: groups that open and
 //           close, a widget per type, Reset to defaults), or the hint that
@@ -84,10 +87,9 @@ Item {
   readonly property var cameras: record.cameras
   readonly property string heroMeta: Model.heroMeta(record)
   readonly property string truncation: Model.truncationText(record)
-  readonly property var effectOptions: Model.effectOptions(record)
-  readonly property var effectRows: Model.effectRows(record, blurStrengthShown)
-  readonly property var effectHint: Model.effectHint(record)
-  readonly property var denoiseRow: Model.denoiseRow(record)
+  // The background effect's choice row, from the settings schema.
+  readonly property var effectMode: Model.effectModeView(record, Daemon.settingDrafts)
+  readonly property var effectRows: Model.effectRows(record)
   readonly property var preview: Preview.placeholder
   readonly property bool previewControls: Model.previewControlsShown(record, Preview.pathReason)
   readonly property var fpsOptions: Model.fpsOptions(Preview.fps)
@@ -97,13 +99,9 @@ Item {
   // The camera settings exactly as drawn (and as the cursor walks them).
   readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)
   // The Effect tab's generic rows: the daemon's global settings (all but the
-  // effect choice, which has a row of its own). While it publishes none, the
-  // tab keeps its read-only strength and its noise removal switch.
+  // effect choice, which has a row of its own).
   readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)
   readonly property bool genericEffect: Model.effectSettingsShown(effectSettings)
-  // Per row: the legacy rows give way only to the setting that replaces each.
-  readonly property bool blurStrengthShown: Model.effectSettingShown(effectSettings, Model.LEGACY_STRENGTH_SETTING)
-  readonly property bool denoiseShown: Model.effectSettingShown(effectSettings, Model.LEGACY_DENOISE_SETTING)
   // What the keyboard walks and the rows act on: the tab shown's section.
   readonly property var activeView: tab === "effect" ? effectSettings : settingsView
   readonly property SettingsView activeBlock: tab === "effect" ? effectSettingsBlock : settingsBlock
@@ -175,7 +173,7 @@ Item {
 
   // The effect row takes the cursor on the choice under the mouse.
   function setEffectCursor(index) {
-    effectCursor = Model.clampCursor(index, Model.EFFECTS.length)
+    effectCursor = Model.clampCursor(index, root.effectMode.options.length)
     setCursor("effect", -1)
   }
 
@@ -197,7 +195,7 @@ Item {
     // Arriving on the effect, frame-rate or tab row lands on the current
     // choice, as the shell's button groups do.
     if (currentStop && currentStop.kind === "effect")
-      effectCursor = Math.max(0, Model.effectIndex(record.effectKey))
+      effectCursor = Math.max(0, Model.effectModeSelected(root.effectMode))
     if (currentStop && currentStop.kind === "fps")
       fpsCursor = Math.max(0, Model.PREVIEW_FPS_CHOICES.indexOf(Preview.fps))
     if (currentStop && currentStop.kind === "tabs")
@@ -218,7 +216,7 @@ Item {
     else if (currentStop.kind === "group")
       setGroupOpen(currentStop.index, dx > 0)
     else if (currentStop.kind === "effect")
-      effectCursor = Model.clampCursor(effectCursor + (dx > 0 ? 1 : -1), Model.EFFECTS.length)
+      effectCursor = Model.clampCursor(effectCursor + (dx > 0 ? 1 : -1), root.effectMode.options.length)
     else if (currentStop.kind === "fps")
       fpsCursor = Model.clampCursor(fpsCursor + (dx > 0 ? 1 : -1), Model.PREVIEW_FPS_CHOICES.length)
     else if (currentStop.kind === "tabs")
@@ -269,22 +267,15 @@ Item {
     return true
   }
 
-  // Same rule as the switch: nothing while a command's result is still to
-  // come, nothing for the current effect or one that cannot be requested
-  // (Replace without a background image). The value sent is a word of
-  // Model.EFFECTS, never text from the daemon.
+  // A choice of the background effect: written as its setting is, at once
+  // (Daemon.commitSetting checks it against the row: enabled, and one of
+  // its options). Nothing for the choice already made, or while the daemon
+  // greys the row out.
   function chooseEffect(index) {
-    var option = root.effectOptions[index]
-    if (!option || !option.selectable || !root.available || Daemon.commandBusy) return false
-    return Daemon.setEffect(option.value)
-  }
-
-  // Same rule as the effect choices: nothing while a command's result is
-  // still to come, nothing while the daemon does not report noise removal.
-  // The value sent is the flip of the reported state, as a boolean.
-  function toggleDenoise() {
-    if (!root.available || !root.denoiseRow.visible || Daemon.commandBusy) return false
-    return Daemon.setDenoise(root.record.denoise !== true)
+    var row = root.effectMode
+    var option = row.options[index]
+    if (!option || option.selected || !row.enabled || !root.available) return false
+    return Daemon.commitSetting(row.id, option.value)
   }
 
   // Left/Right on a setting: a row of buttons walks its chip cursor (no
@@ -350,9 +341,10 @@ Item {
     return Daemon.resetSettings()
   }
 
-  // Same rule as the bar's right click: no toggle while an on/off or other
+  // Same rule as the bar's middle click: no toggle while an on/off or other
   // non-setting command's result is still to come (ToggleSwitch's `busy`
-  // swallows the click the same way); camera setting writes never hold it.
+  // swallows the click the same way); camera setting writes and the setup
+  // dialog's writes never hold it.
   function toggleSwitch() {
     if (!root.available || Daemon.toggleBusy) return false
     return Daemon.setEnabled(!root.record.enabled)
@@ -366,7 +358,6 @@ Item {
     else if (stop.kind === "fps") chooseFps(fpsCursor)
     else if (stop.kind === "tabs") chooseTab(tabCursor)
     else if (stop.kind === "effect") chooseEffect(effectCursor)
-    else if (stop.kind === "denoise") toggleDenoise()
     else if (stop.kind === "reset") resetSettings()
     else if (stop.kind === "group") setGroupOpen(stop.index, !(root.settingsView.groups[stop.index] || {}).expanded)
     else if (stop.kind === "setting") activateSetting(stop.index)
@@ -410,7 +401,6 @@ Item {
     else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index), true)
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
-    else if (stop.kind === "denoise") scrollItemIntoView(denoiseLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
   }
@@ -892,7 +882,8 @@ Item {
             }
           }
 
-          // ---- Effect: the choices, then what the effect uses; noise removal
+          // ---- Effect: the background effect's choices, the image the
+          // daemon holds, then the other global settings
           Column {
             id: effectTab
             objectName: "effectTab"
@@ -900,35 +891,30 @@ Item {
             spacing: Style.space(10)
             visible: root.tab === "effect"
 
-            PanelSectionHeader {
-              text: "BACKGROUND"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Row {
+            Flow {
               id: effectChoices
               objectName: "effectChoices"
+              width: parent.width
               spacing: Style.spacing.md
+              visible: root.effectMode.visible
 
               Repeater {
                 id: effectRepeater
                 objectName: "effectRepeater"
-                model: root.effectOptions
+                model: root.effectMode.options
                 delegate: Button {
                   id: effectChip
                   required property var modelData
                   required property int index
-                  objectName: "effectChoice-" + modelData.value
+                  objectName: "effectChoice-" + index
                   text: modelData.label
                   tooltipText: modelData.tooltip
                   selected: modelData.selected
                   // One highlight: the panel cursor, which the mouse moves too.
                   hasCursor: root.hasCursor("effect", -1) && root.effectCursor === index
                   bordered: true
-                  // Shown, but faded, when it cannot be chosen (Replace with
-                  // no background image, or every choice when the CLI or
-                  // the daemon predates effects); the hint below says why.
+                  // Faded while the daemon greys the setting out; the
+                  // reason is the hint below.
                   opacity: modelData.faded ? 0.45 : 1.0
                   foreground: root.foreground
                   // The fill the shell's ButtonGroup gives its chips.
@@ -952,107 +938,31 @@ Item {
               }
             }
 
-            // The hint and its command read as one instruction: the same
-            // spacing as the unavailable block's pair.
-            Column {
-              objectName: "effectHintBlock"
+            // Why the choices are greyed (the daemon's reason), or why
+            // there are none: a daemon below revision 9, an old CLI or
+            // plugin, no module with a background effect.
+            Text {
+              objectName: "effectHint"
+              textFormat: Text.PlainText
               width: parent.width
-              spacing: Style.space(6)
-              visible: root.effectHint.text !== "" || root.effectHint.commandText !== ""
-
-              Text {
-                objectName: "effectHint"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.effectHint.text
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              // Shown, never run.
-              Text {
-                objectName: "effectHintCommand"
-                textFormat: Text.PlainText
-                width: parent.width
-                elide: Text.ElideRight
-                visible: text !== ""
-                text: root.effectHint.commandText
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
+              wrapMode: Text.Wrap
+              visible: text !== ""
+              text: root.effectMode.visible ? root.effectMode.reason : root.effectMode.hint
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
 
-            PanelSeparator {
-              foreground: root.foreground
-              visible: root.denoiseRow.visible && !root.denoiseShown
-            }
-
-            // Noise removal: a stage that runs with any effect, so a switch of
-            // its own, not a choice above; laid out as the rows around it, with
-            // the hero switch's control. Not drawn while the daemon does not
-            // report it (an old CLI or daemon): an off switch would claim a
-            // state nobody reported.
-            Item {
-              id: denoiseLine
-              objectName: "denoiseRow"
-              width: parent.width
-              visible: root.denoiseRow.visible && !root.denoiseShown
-              implicitHeight: Math.max(denoiseLabel.implicitHeight, denoiseSwitch.implicitHeight)
-
-              Text {
-                id: denoiseLabel
-                objectName: "denoiseLabel"
-                textFormat: Text.PlainText
-                anchors.left: parent.left
-                anchors.right: denoiseSwitch.left
-                anchors.rightMargin: Style.space(12)
-                anchors.verticalCenter: parent.verticalCenter
-                elide: Text.ElideRight
-                text: root.denoiseRow.label
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-              ToggleSwitch {
-                id: denoiseSwitch
-                objectName: "denoiseToggle"
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                checked: root.denoiseRow.checked
-                busy: Daemon.commandBusy
-                hasCursor: root.hasCursor("denoise", -1)
-                foreground: root.foreground
-                accent: root.accent
-                onHovered: function(on) { if (on) root.setCursor("denoise", -1) }
-                onToggled: root.toggleDenoise()
-                Accessible.role: Accessible.CheckBox
-                Accessible.name: root.denoiseRow.label
-                Accessible.checkable: true
-                Accessible.checked: root.denoiseRow.checked
-
-                PanelToolTip {
-                  visible: denoiseSwitch.containsMouse
-                  text: root.denoiseRow.tooltip
-                  fontFamily: root.fontFamily
-                }
-              }
-            }
-
-            // ---- the daemon's global settings (the effect's strength, noise
-            // removal and whatever it adds), drawn by the same renderer as
-            // the camera's; the effect choice above is not among them. None
-            // while the daemon publishes none: the rows above then stand.
+            // ---- the daemon's other global settings (the effect's strength,
+            // noise removal and whatever the modules add), drawn by the same
+            // renderer as the camera's; the effect choice above is not among
+            // them. None while the daemon publishes none.
             Column {
               id: effectSettingsArea
               objectName: "effectSettingsArea"
               width: parent.width
               spacing: Style.space(10)
               visible: root.genericEffect
-
-              PanelSeparator { foreground: root.foreground }
 
               SettingsView {
                 id: effectSettingsBlock

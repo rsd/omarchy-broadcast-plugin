@@ -24,12 +24,24 @@ import "Model.js" as Model
 // Settings. allowMultiple is false, so the widgets attached here are the same
 // layout entry drawn once per monitor and carry the same `cliPath`; the most
 // recently configured widget's value is the one in force.
+//
+// The setup dialog (SetupDialog.qml, the plugin's overlay) reads its data
+// through here too: while it holds the setup (holdSetup), the four reads of
+// Model.SETUP_READS run one at a time on one more child (readProc), when it
+// opens and again whenever the watch reports a change of the configuration
+// or the modules, a new snapshot, or one of its writes has run. Its writes
+// go through the same command queue as the panel's. It also forwards the
+// panel hotkey here (openPanel), which opens one bar widget's panel.
 Singleton {
   id: root
 
   // ---- readers -------------------------------------------------------------
   property var owners: []
   readonly property int attachedCount: owners.length
+  // Whether the panel of any attached bar widget is open (notePanels): what
+  // the setup dialog reports to the shell as open, so the panel hotkey,
+  // routed to the overlay, still closes an open panel.
+  property bool panelOpen: false
 
   // ---- state shown by the widgets ------------------------------------------
   property var record: Model.emptyRecord("connecting")
@@ -38,9 +50,10 @@ Singleton {
   property string commandError: ""
   // A command is running or queued: its result has not arrived yet.
   property bool commandBusy: false
-  // An on/off toggle waits (the bar's right click, the panel switch): a
-  // command other than a camera setting write is running or queued. Setting
-  // writes never hold it; an on/off ask goes ahead of them in the queue.
+  // An on/off toggle waits (the bar's middle click, the panel switch): a
+  // command other than a camera setting write or a setup write is running or
+  // queued. Those writes never hold it; an on/off ask goes ahead of setting
+  // writes in the queue.
   readonly property bool toggleBusy: Model.toggleBlocked(runningIntent, pendingIntents)
 
   // ---- CLI resolution ------------------------------------------------------
@@ -114,6 +127,39 @@ Singleton {
   // writes (Model.queueTakes): flushSettings runs again once a command ends.
   property bool settingsDeferred: false
 
+  // ---- setup dialog ------------------------------------------------------------
+  // The dialogs that hold the setup (by identity): reads run only while one
+  // does.
+  property var setupHolders: []
+  readonly property bool setupHeld: setupHolders.length > 0
+  // The reads' results (Model.emptySetup: null = still loading), replaced
+  // whole by each read; emptied when the last holder lets go, so a dialog
+  // opened later never shows another moment's data.
+  property var setup: Model.emptySetup()
+  // A setup write is running or queued: the dialog takes no other.
+  readonly property bool setupBusy: Model.setupWriteBusy(runningIntent, pendingIntents)
+  // The last setup write's failure; cleared by the next success.
+  property string setupError: ""
+  // Reads still to run, oldest first; the one running; its lines so far.
+  property var readQueue: []
+  property string readKind: ""
+  property var readLines: []
+  property bool readArmed: false
+  property bool readStarted: false
+  // A line over Model.LINE_CAP, or more than Model.READ_LINES_CAP: the read
+  // is stopped and fails.
+  property bool readRejected: false
+  // A refresh was asked while a read ran: every read runs again after it.
+  property bool readAgain: false
+  // A change line (snapshot, config_changed, modules_changed) came in since
+  // the running setup write started: it has refreshed the reads already, so
+  // the write's own end does not read them again.
+  property bool setupChangeSeen: false
+  property int readExitCode: 0
+  property var readStderr: Model.firstLineStart()
+  // Diagnostics, read by the test harness.
+  property int setupReadRuns: 0
+
   onWatchWantedChanged: Qt.callLater(root.syncWatch)
 
   // ---- registration (by identity) ------------------------------------------
@@ -121,6 +167,7 @@ Singleton {
   function attach(owner) {
     if (!owner || owners.indexOf(owner) !== -1) return
     owners = owners.concat([owner])
+    notePanels()
     // Deferred: the bar injects a widget's settings right after it completes,
     // so the first resolution sees the configured cliPath, not the default.
     // A searched path is looked up again on every attach (a reload, a new
@@ -134,7 +181,135 @@ Singleton {
     var next = owners.slice()
     next.splice(index, 1)
     owners = next
+    notePanels()
     if (next.length === 0) syncWatch()
+  }
+
+  // ---- the bar widgets' panels (the setup dialog forwards the hotkey) ----------
+
+  // The attached bar widgets, in attach order (a dialog attaches too, while
+  // open; it is no panel).
+  function panelOwners() {
+    var out = []
+    for (var i = 0; i < owners.length; i++) if (owners[i] && owners[i].panelOwner === true) out.push(owners[i])
+    return out
+  }
+
+  // A widget's panel opened or closed (BarWidget.onOpenedChanged), or one
+  // attached or went.
+  function notePanels() {
+    var widgets = panelOwners()
+    var open = false
+    for (var i = 0; i < widgets.length; i++) if (widgets[i].opened === true) open = true
+    if (open !== panelOpen) panelOpen = open
+  }
+
+  // Opens one widget's panel, chosen as the shell chooses for its own
+  // (Model.pickPanelOwner: the focused screen's). False when there is none.
+  function openPanel(focusedScreen) {
+    var widgets = panelOwners()
+    var candidates = []
+    for (var i = 0; i < widgets.length; i++)
+      candidates.push({ screenName: String(widgets[i].screenName || ""), visible: widgets[i].visible === true })
+    var at = Model.pickPanelOwner(candidates, focusedScreen)
+    if (at < 0) return false
+    widgets[at].open()
+    return true
+  }
+
+  function closePanels() {
+    var widgets = panelOwners()
+    for (var i = 0; i < widgets.length; i++) if (widgets[i].opened === true) widgets[i].close()
+  }
+
+  // ---- the setup dialog's data -------------------------------------------------
+
+  function holdSetup(holder) {
+    if (!holder || setupHolders.indexOf(holder) !== -1) return
+    setupHolders = setupHolders.concat([holder])
+    refreshSetup()
+  }
+
+  function releaseSetup(holder) {
+    var index = setupHolders.indexOf(holder)
+    if (index === -1) return
+    var next = setupHolders.slice()
+    next.splice(index, 1)
+    setupHolders = next
+    if (next.length > 0) return
+    readQueue = []
+    readAgain = false
+    setup = Model.emptySetup()
+  }
+
+  // Every read the daemon supports now (Model.setupReads), from the first;
+  // after the one running, when one is. Nothing while no dialog holds the
+  // setup.
+  function refreshSetup() {
+    if (!setupHeld) return
+    // What a daemon whose revision dropped (or that went) no longer
+    // supports is not shown from an earlier read.
+    var reads = Model.setupReads(record)
+    var kept = Model.setupForReads(setup, reads)
+    for (var i = 0; i < Model.SETUP_READS.length; i++) {
+      var kind = Model.SETUP_READS[i]
+      if (kept[kind] !== setup[kind]) { setup = kept; break }
+    }
+    if (readProc.running || readArmed) {
+      readAgain = true
+      return
+    }
+    readQueue = reads
+    Qt.callLater(root.nextRead)
+  }
+
+  function nextRead() {
+    if (readProc.running || readArmed || readQueue.length === 0 || !setupHeld) return
+    var kind = readQueue[0]
+    readQueue = readQueue.slice(1)
+    var argv = Model.setupReadArgv(cliPath, kind)
+    if (!argv) {
+      setup = Model.withSetupRead(setup, kind, Model.readFailed(Model.commandFailureText(-1, "", cliPath)))
+      Qt.callLater(root.nextRead)
+      return
+    }
+    readKind = kind
+    readLines = []
+    readStarted = false
+    readRejected = false
+    readStderr = Model.firstLineStart()
+    readArmed = true
+    setupReadRuns++
+    readProc.command = argv
+    readProc.running = true
+  }
+
+  function readLine(line) {
+    if (readRejected) return
+    if (typeof line !== "string" || line.length > Model.LINE_CAP || readLines.length >= Model.READ_LINES_CAP) {
+      readRejected = true
+      readProc.running = false
+      return
+    }
+    readLines = readLines.concat([line])
+  }
+
+  function readEnded() {
+    var kind = readKind
+    readArmed = false
+    var result
+    if (!readStarted) result = Model.readFailed(Model.commandFailureText(-1, "", cliPath))
+    else if (readRejected) result = Model.readFailed("omarchy-broadcast printed more than this plugin reads")
+    else result = Model.setupRead(kind, readLines, readExitCode, readStderr.text)
+    readLines = []
+    readStarted = false
+    if (setupHeld) setup = Model.withSetupRead(setup, kind, result)
+    if (readAgain) {
+      readAgain = false
+      Qt.callLater(root.refreshSetup)
+    } else {
+      Qt.callLater(root.nextRead)
+    }
   }
 
   function configure(owner, value) {
@@ -295,6 +470,11 @@ Singleton {
       return
     }
     var result = Model.reduce(record, line)
+    // The setup dialog's data may have moved: read it again.
+    if (result.outcome === "snapshot" || result.outcome === "config_changed" || result.outcome === "modules_changed") {
+      setupChangeSeen = true
+      Qt.callLater(root.refreshSetup)
+    }
     if (result.outcome === "dropped") droppedLines++
     else if (result.outcome === "invalid" || result.outcome === "ignored") ignoredLines++
     // Cameras are compared raw: two ids that differ only in what sanitising
@@ -416,6 +596,7 @@ Singleton {
     commandArmed = true
     commandBusy = true
     runningIntent = intent
+    if (Model.isSetupIntent(intent)) setupChangeSeen = false
     commandLineMark = Model.settingLineMark(settingLines, settingLinesDue)
     lastCommand = argv
     commandProc.command = argv
@@ -443,10 +624,15 @@ Singleton {
     commandArmed = false
     commandStarted = false
     runningIntent = null
-    if (!started) commandError = Model.commandFailureText(-1, "", cliPath)
-    else if (commandExitCode === 0) commandError = ""
-    else commandError = Model.commandFailureText(commandExitCode, commandStderr.text, cliPath)
+    var failure = !started ? Model.commandFailureText(-1, "", cliPath)
+      : (commandExitCode === 0 ? "" : Model.commandFailureText(commandExitCode, commandStderr.text, cliPath))
+    // A setup write's result is the dialog's to show, not the panel's.
+    if (Model.isSetupIntent(intent)) setupError = failure
+    else commandError = failure
     var ok = started && commandExitCode === 0
+    // Whatever it changed (or not), the dialog shows the daemon's word: read
+    // again, unless a change line since it started has done so already.
+    if (Model.isSetupIntent(intent) && (!ok || !setupChangeSeen)) Qt.callLater(root.refreshSetup)
     if (intent && intent.verb === "setting") settingEnded(intent, ok)
     // A write that went through owes the change after its mark.
     // (None for a value already in force: the daemon prints no change then.)
@@ -483,10 +669,11 @@ Singleton {
     }
   }
 
-  // The bar's right click. Ignored while an on/off or other non-setting
-  // command is running or queued (toggleBusy); setting writes do not hold it.
+  // The bar's middle click. Ignored while an on/off or other non-setting
+  // command is running or queued (toggleBusy); setting writes and setup
+  // writes do not hold it.
   function toggleEnabled() {
-    if (Model.rightClickAction(record, toggleBusy) !== "toggle") return false
+    if (Model.middleClickAction(record, toggleBusy) !== "toggle") return false
     return request({ verb: "enable", on: !record.enabled })
   }
 
@@ -500,17 +687,6 @@ Singleton {
 
   function nextCamera() {
     return request({ verb: "next" })
-  }
-
-  // `effect` is checked against Model.EFFECTS when the command is armed.
-  function setEffect(effect) {
-    return request({ verb: "effect", effect: effect })
-  }
-
-  // `on` must be a boolean; Model.denoiseArgv turns it into `on` or `off`
-  // when the command is armed.
-  function setDenoise(on) {
-    return request({ verb: "denoise", on: on === true })
   }
 
   // A row moved (a slider, a key, a switch, a choice) to `value`: kept as a
@@ -583,6 +759,41 @@ Singleton {
     return true
   }
 
+  // ---- setup writes (the dialog's): one at a time, each re-read after it ------
+
+  // A module on or off, by the id of a row the read list has; not while a
+  // later config file sets its enabled key.
+  function setModuleEnabled(id, on) {
+    var list = setup.modules
+    if (setupBusy || !list || list.ok !== true || typeof on !== "boolean") return false
+    for (var i = 0; i < list.modules.length; i++) {
+      var m = list.modules[i]
+      if (m.id === id) return m.overriddenBy === "" && request({ verb: "setup", op: "module", id: m.id, on: on })
+    }
+    return false
+  }
+
+  // Stage `index` one place up (-1) or down (1): only a move the daemon
+  // offered (Model.orderAfterMove), written as the whole new order.
+  function moveStage(index, direction) {
+    var next = setupBusy ? null : Model.orderAfterMove(setup.order, index, direction)
+    return next !== null && request({ verb: "setup", op: "order", order: next })
+  }
+
+  function resetOrder() {
+    var order = setup.order
+    if (setupBusy || !order || order.ok !== true || order.overriddenBy !== "") return false
+    return request({ verb: "setup", op: "order-reset" })
+  }
+
+  // A config key to `value`: only a row of the read configuration that the
+  // daemon takes a write for, as one of the row's values (Model.configWord).
+  function setConfig(id, value) {
+    var row = setupBusy ? null : Model.findConfigRow(setup.config, id)
+    var word = row ? Model.configWord(row, value) : null
+    return word !== null && request({ verb: "setup", op: "config", id: row.id, word: word })
+  }
+
   // ---- children ------------------------------------------------------------
 
   // One-shot: started (restarted) only by moveSetting, a user's move.
@@ -633,6 +844,22 @@ Singleton {
       }
     }
     onRunningChanged: if (!running && root.resolving) root.resolverFinished()
+  }
+
+  // The setup dialog's reads, one at a time (nextRead): stdout in line mode,
+  // as the watch's (a camera or module id must not be garbled), bounded by
+  // readLine; stderr in chunks, as a command's.
+  property Process readProc: Process {
+    stdout: SplitParser {
+      onRead: function(data) { root.readLine(data) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.readStderr = Model.firstLineFeed(root.readStderr, String(data)) }
+    }
+    onStarted: root.readStarted = true
+    onExited: function(exitCode, exitStatus) { root.readExitCode = exitStatus === 0 ? exitCode : 128 + exitCode }
+    onRunningChanged: if (!running && root.readArmed) root.readEnded()
   }
 
   property Process commandProc: Process {

@@ -226,7 +226,8 @@ TestCase {
     verify(Model.linked(r), "the stream is still connected")
     verify(!Model.available(r), "but nothing can be controlled")
     compare(Model.visualKey(r), "unavailable")
-    compare(Model.rightClickAction(r, false), "open-panel")
+    compare(Model.middleClickAction(r, false), "open-panel")
+    compare(Model.clickAction("right", r, false), "setup", "the setup dialog opens whatever the state")
     compare(Model.toggleArgv(cli, r), null)
     compare(Model.intentArgv({ verb: "enable", on: true }, cli, r), null)
     compare(Model.intentArgv({ verb: "select", id: fhdId }, cli, r), null)
@@ -381,21 +382,37 @@ TestCase {
     compare(Model.intentArgv(null, cli, r), null)
   }
 
-  function test_right_click_while_busy() {
-    compare(Model.rightClickAction(snap(), false), "toggle")
-    compare(Model.rightClickAction(snap(), true), "ignore")
-    compare(Model.rightClickAction(Model.emptyRecord("not-running"), true), "open-panel")
-    compare(Model.rightClickAction(Model.emptyRecord("not-running"), false), "open-panel")
-    compare(Model.rightClickAction(snap(), "true"), "toggle", "busy only for a real true")
+  function test_middle_click_while_busy() {
+    compare(Model.middleClickAction(snap(), false), "toggle")
+    compare(Model.middleClickAction(snap(), true), "ignore")
+    compare(Model.middleClickAction(Model.emptyRecord("not-running"), true), "open-panel")
+    compare(Model.middleClickAction(Model.emptyRecord("not-running"), false), "open-panel")
+    compare(Model.middleClickAction(snap(), "true"), "toggle", "busy only for a real true")
     verify(Model.leftClickAction === undefined, "the old name is gone")
+    verify(Model.rightClickAction === undefined, "the right click is the setup dialog's now")
+  }
+
+  function test_click_actions_by_button() {
+    compare(Model.clickAction("left", snap(), false), "panel")
+    compare(Model.clickAction("left", snap(), true), "panel", "the panel opens while a command runs")
+    compare(Model.clickAction("left", Model.emptyRecord("not-running"), false), "panel")
+    compare(Model.clickAction("middle", snap(), false), "toggle")
+    compare(Model.clickAction("middle", snap(), true), "ignore")
+    compare(Model.clickAction("middle", Model.emptyRecord("not-running"), false), "open-panel")
+    compare(Model.clickAction("right", snap(), false), "setup")
+    compare(Model.clickAction("right", snap(), true), "setup")
+    compare(Model.clickAction("right", Model.emptyRecord("cli-missing"), false), "setup")
+    compare(Model.clickAction("back", snap(), false), "panel", "any other button: the panel")
+    compare(Model.clickAction(undefined, snap(), false), "panel")
   }
 
   function test_bar_click_help() {
-    compare(Model.barClickHelp(snap()), "Click: open the panel. Right click: turn the camera off.")
-    compare(Model.barClickHelp(snap({ state: "off", enabled: false })), "Click: open the panel. Right click: turn the camera on.")
-    compare(Model.barClickHelp(Model.emptyRecord("not-running")), "Click or right click: open the panel.")
-    compare(Model.barClickHelp(snap({ state: "dancing" })), "Click or right click: open the panel.")
-    compare(Model.barClickHelp(null), "Click or right click: open the panel.")
+    compare(Model.barClickHelp(snap()), "Click: open the panel. Middle click: turn the camera off. Right click: open the setup.")
+    compare(Model.barClickHelp(snap({ state: "off", enabled: false })),
+            "Click: open the panel. Middle click: turn the camera on. Right click: open the setup.")
+    compare(Model.barClickHelp(Model.emptyRecord("not-running")), "Click or middle click: open the panel. Right click: open the setup.")
+    compare(Model.barClickHelp(snap({ state: "dancing" })), "Click or middle click: open the panel. Right click: open the setup.")
+    compare(Model.barClickHelp(null), "Click or middle click: open the panel. Right click: open the setup.")
   }
 
   function test_backoff_resets_only_after_uptime() {
@@ -424,16 +441,12 @@ TestCase {
     compare(Model.cursorStops(r, 2, false, "camera").length, 5, "follows the rendered row count")
     var one = snap({ cameras: [cameraObjects()[0]] })
     compare(kindsOf(Model.cursorStops(one, 1, false, "camera")), JSON.stringify(["switch", "tabs", "camera"]))
-    compare(kindsOf(Model.cursorStops(one, 1, false, "effect")), JSON.stringify(["switch", "tabs", "effect"]))
+    compare(kindsOf(Model.cursorStops(one, 1, false, "effect")), JSON.stringify(["switch", "tabs"]), "a daemon below revision 9: no effect row")
     compare(kindsOf(Model.cursorStops(one, 1, false, "status")), JSON.stringify(["switch", "tabs"]), "the Status tab has no control")
     compare(kindsOf(Model.cursorStops(one, 1, false)), kindsOf(Model.cursorStops(one, 1, false, "effect")), "no tab: the default")
     compare(kindsOf(Model.cursorStops(one, 1, false, "bogus")), kindsOf(Model.cursorStops(one, 1, false, "effect")), "unknown tab: the default")
     compare(kindsOf(Model.cursorStops(one, 1, false, "Camera")), kindsOf(Model.cursorStops(one, 1, false, "effect")), "exact words only")
     compare(Model.cursorStops(Model.emptyRecord("not-running"), 3, true, "camera").length, 0)
-    // a CLI that predates effects: nothing on the effect row can be requested
-    var noEffects = snap({ cameras: [cameraObjects()[0]], blur_strength: undefined })
-    compare(kindsOf(Model.cursorStops(noEffects, 1, false, "effect")), JSON.stringify(["switch", "tabs"]))
-    compare(kindsOf(Model.cursorStops(noEffects, 1, false, "camera")), JSON.stringify(["switch", "tabs", "camera"]))
     compare(Model.clampCursor(-3, 5), 0)
     compare(Model.clampCursor(9, 5), 4)
     compare(Model.clampCursor(2, 0), 0)
@@ -772,9 +785,9 @@ TestCase {
     compare(Model.toggleArgv(cli, Model.emptyRecord("not-running")), null, "privacy fails closed")
     compare(Model.toggleArgv(cli, Model.emptyRecord("connecting")), null)
     compare(Model.toggleArgv("", snap()), null)
-    compare(Model.rightClickAction(snap()), "toggle")
-    compare(Model.rightClickAction(Model.emptyRecord("not-running")), "open-panel")
-    compare(Model.rightClickAction(Model.emptyRecord("cli-missing")), "open-panel")
+    compare(Model.middleClickAction(snap()), "toggle")
+    compare(Model.middleClickAction(Model.emptyRecord("not-running")), "open-panel")
+    compare(Model.middleClickAction(Model.emptyRecord("cli-missing")), "open-panel")
   }
 
   function test_select_argv_hostile_ids_stay_one_element() {
@@ -821,420 +834,147 @@ TestCase {
 
   readonly property string image: "/home/u/Pictures/office.jpg"
 
-  function test_effect_argv_whitelist() {
-    for (var i = 0; i < Model.EFFECTS.length; i++)
-      compare(JSON.stringify(Model.effectArgv(cli, Model.EFFECTS[i])), JSON.stringify([cli, "effect", Model.EFFECTS[i]]))
-    compare(JSON.stringify(Model.EFFECTS), JSON.stringify(["none", "blur", "replace"]))
-    var refused = ["", "blur; rm -rf ~", "--image", "--image=/etc/passwd", "-h", "Blur", " blur", "blur ",
-                   "blur\n", "none\u0000", "$(id)", "`id`", "replace --image /x", "unknown", "constructor",
-                   "toString", "__proto__", "0", "next"]
-    for (var r = 0; r < refused.length; r++)
-      compare(Model.effectArgv(cli, refused[r]), null, JSON.stringify(refused[r]))
-    var odd = [null, undefined, 0, 1, true, ["blur"], { effect: "blur" }, new String("blur")]
-    for (var o = 0; o < odd.length; o++) compare(Model.effectArgv(cli, odd[o]), null, String(odd[o]))
-    compare(Model.effectArgv("", "blur"), null, "no CLI")
-    compare(Model.effectArgv("omarchy-broadcast", "blur"), null, "a bare name is not a CLI path")
-    compare(Model.effectArgv("/a/b\nc", "blur"), null)
+  // ---- the background effect (from the settings schema, interface revision 9)
+
+  function test_no_effect_vocabulary_left() {
+    verify(Model.EFFECTS === undefined, "no list of effect names")
+    verify(Model.effectArgv === undefined && Model.denoiseArgv === undefined, "no `effect` or `denoise` command")
+    verify(Model.effectOptions === undefined && Model.denoiseRow === undefined && Model.effectHint === undefined)
+    verify(Model.LEGACY_STRENGTH_SETTING === undefined && Model.LEGACY_DENOISE_SETTING === undefined)
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" })
+    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, r), null, "the old verbs run nothing")
+    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, r), null)
+    var old = snap({ effect: "blur", blur_strength: 0.5, denoise: true })
+    verify(old.effectKey === undefined && old.blurStrength === undefined && old.denoise === undefined && old.cliEffects === undefined,
+           "the snapshot's legacy effect fields are not read")
+    compare(old.effect, "blur", "the effect word stays a display copy")
   }
 
-  function test_effect_fields_parsed() {
-    var r = snap({ effect: "blur", blur_strength: 0.5, background_image: image })
-    compare(r.effect, "blur")
-    compare(r.effectKey, "blur")
-    compare(r.blurStrength, 0.5)
-    compare(r.backgroundImage, image)
-    verify(r.cliEffects)
-    verify(r.backgroundImageSet)
-    // absent fields (an older producer; JSON drops undefined) read unknown / empty
-    var old = snap({ blur_strength: undefined, background_image: undefined })
-    compare(old.effectKey, "none")
-    compare(old.blurStrength, null)
-    compare(old.backgroundImage, "")
-    compare(old.backgroundImageSet, false)
-    compare(old.cliEffects, false)
-    // a state line replaces them, as every scalar
-    var s = Model.reduce(r, line(stateObject({ changed: ["effect", "blur_strength"], effect: "replace",
-                                               blur_strength: 0.25, background_image: image }))).record
-    compare(s.effectKey, "replace")
-    compare(s.blurStrength, 0.25)
-    compare(r.effectKey, "blur", "the old record is not mutated")
-    var cleared = Model.reduce(s, line(stateObject({ changed: ["background_image"], effect: "none", background_image: "",
-                                                     blur_strength: undefined }))).record
-    compare(cleared.backgroundImage, "")
-    compare(cleared.backgroundImageSet, false)
-    compare(cleared.blurStrength, null)
-    compare(cleared.cliEffects, false, "a state line decides the capability as a snapshot does")
-    compare(Model.emptyRecord("not-running").effectKey, "")
-    compare(Model.emptyRecord("not-running").cliEffects, false)
-    compare(Model.emptyRecord("not-running").backgroundImageSet, false)
+  function test_effect_mode_from_the_schema() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" })
+    var v = Model.effectModeView(r, {})
+    compare(v.visible, true)
+    compare(v.hint, "")
+    compare(v.id, modeId)
+    compare(v.enabled, true)
+    compare(JSON.stringify(v.options.map(function(o) { return o.value + ":" + o.label + ":" + o.selected })),
+            JSON.stringify(["none:Off:false", "blur:Blur:true", "replace:Replace:false"]), "the daemon's options and labels, in its order")
+    compare(v.options.filter(function(o) { return o.faded }).length, 0)
+    compare(Model.effectModeSelected(v), 1)
+    verify(Model.effectModeShown(r))
+    // the user's unconfirmed choice is shown
+    var d = {}
+    d[modeId] = "replace"
+    compare(Model.effectModeSelected(Model.effectModeView(r, d)), 2)
+    d[modeId] = "sepia"
+    compare(Model.effectModeSelected(Model.effectModeView(r, d)), 1, "a draft that is no option is not shown")
+    // labels come sanitised from the schema
+    var hostile = withGlobals({}, { effect: "none" })
+    var g = globalGroups()
+    g[0].settings[0].options = [{ value: "none", label: "<b>Off</b>" }, { value: "blur", label: "Blur & more" }]
+    hostile = feedAll(snap(rev9({})), setLines(brioGroups().concat(g))).record
+    compare(JSON.stringify(Model.effectModeView(hostile, {}).options.map(function(o) { return o.label })), JSON.stringify(["bOff/b", "Blur & more"]))
+    // greyed by the daemon: every choice faded, its reason shown, nothing selectable
+    var off = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "none" })
+    var row = Model.findSetting(off, modeId)
+    var greyed = Model.reduce(off, line(deltaLine([{ id: modeId, value: "none", stored: false, enabled: false,
+                                                     disabled_reason: "Loading the effect module" }]))).record
+    var gv = Model.effectModeView(greyed, {})
+    compare(gv.visible, true)
+    compare(gv.enabled, false)
+    compare(gv.reason, "Loading the effect module")
+    compare(gv.options.filter(function(o) { return o.faded }).length, 3)
+    compare(gv.options[1].tooltip, "Loading the effect module")
+    compare(Model.intentArgv({ verb: "setting", id: modeId, value: "blur", camera: "" }, cli, greyed), null, "a greyed row never runs")
+    verify(row.enabled)
   }
 
-  function test_blur_strength_bounds() {
-    var good = [0, 1, 0.5, 0.001]
-    for (var i = 0; i < good.length; i++) compare(snap({ blur_strength: good[i] }).blurStrength, good[i])
-    // JSON cannot carry NaN or Infinity; the reducer sees them only through
-    // Model.blurStrength itself.
-    var bad = [NaN, Infinity, -Infinity, -0.01, -1, 1.0001, 2, 1e300]
-    for (var b = 0; b < bad.length; b++) compare(Model.blurStrength(bad[b]), null, String(bad[b]))
-    var wire = [-0.5, 1.5, 1e300, "0.5", "", null, true, [0.5], { v: 0.5 }]
-    for (var w = 0; w < wire.length; w++)
-      compare(snap({ blur_strength: wire[w] }).blurStrength, null, JSON.stringify(wire[w]))
-    var r = snap({ effect: "blur", blur_strength: 0.456 })
-    compare(JSON.stringify(Model.effectRows(r)), JSON.stringify([{ label: "Strength", value: "46 %" }]))
-    compare(Model.effectRows(snap({ effect: "blur", blur_strength: 1.5 }))[0].value, Model.UNKNOWN)
-    compare(Model.effectRows(snap({ effect: "blur", blur_strength: "0.5" })).length, 0, "a string: a CLI without effects")
-    compare(Model.effectRows(snap({ effect: "none", blur_strength: 0.5 })).length, 0, "only while blurring")
+  function test_effect_mode_hints() {
+    // below revision 9: the daemon needs updating, whatever the snapshot carries
+    var old = feedAll(snap(merged(rev9({ cameras: [cameraObjects()[0]] }), { interface_revision: 8 })), setLines(brioGroups().concat(globalGroups()))).record
+    var v = Model.effectModeView(old, {})
+    compare(v.visible, false)
+    compare(v.hint, Model.DAEMON_NO_EFFECTS)
+    compare(Model.effectSettingsView(old, {}).visible, false, "no generic rows either")
+    compare(Model.effectModeView(snap({ effect: "blur" }), {}).hint, Model.DAEMON_NO_EFFECTS, "revision 4")
+    compare(Model.effectModeView(snap({ interface_revision: undefined }), {}).hint, Model.DAEMON_NO_EFFECTS, "unknown revision")
+    // a CLI that predates the settings, a plugin that predates the schema
+    compare(Model.effectModeView(snap({ interface_revision: 9 }), {}).hint, Model.CLI_NO_SETTINGS)
+    compare(Model.effectModeView(snap(rev9({ settings_schema: 2 })), {}).hint, Model.PLUGIN_OLD_SETTINGS)
+    // loading: nothing yet, and no hint
+    var loading = snap(rev9({}))
+    compare(Model.effectModeView(loading, {}).visible, false)
+    compare(Model.effectModeView(loading, {}).hint, "")
+    // no module offers the background effect: only the video group is published
+    var noBg = feedAll(snap(rev9({ cameras: [cameraObjects()[0]] })), setLines(brioGroups().concat([globalGroups()[1]]))).record
+    compare(Model.effectModeView(noBg, {}).visible, false)
+    compare(Model.effectModeView(noBg, {}).hint, Model.NO_BACKGROUND_TEXT)
+    compare(Model.effectSettingsView(noBg, {}).visible, true, "the other global settings still draw")
+    // a mode row of the camera's scope is not the effect
+    var g = globalGroups()
+    g[0].settings[0].scope = "camera"
+    var wrong = feedAll(snap(rev9({})), setLines(brioGroups().concat(g))).record
+    compare(Model.effectModeView(wrong, {}).hint, Model.NO_BACKGROUND_TEXT)
+    // unavailable: nothing at all
+    compare(Model.effectModeView(Model.emptyRecord("not-running"), {}).hint, "")
+    compare(Model.effectModeView(null, {}).visible, false)
   }
 
-  function test_background_image_sanitised_and_capped() {
-    var hostile = snap({ effect: "replace", background_image: "/tmp/<img src='http://x/y'>&\n\u202epic.png" })
+  function test_effect_choice_is_a_setting_write() {
+    var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "none" })
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: modeId, value: "replace", camera: "" }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", modeId, "replace"]))
+    compare(Model.intentArgv({ verb: "setting", id: modeId, value: "sepia", camera: "" }, cli, r), null, "only one of the row's options")
+    compare(Model.intentArgv({ verb: "setting", id: modeId, value: "blur; rm", camera: "" }, cli, r), null)
+    compare(Model.rowValue(Model.findSetting(r, modeId), "blur"), "blur")
+  }
+
+  function test_effect_in_tooltip() {
+    var base = "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers"
+    compare(Model.tooltipText(withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" })), base + " \u00b7 background: Blur")
+    compare(Model.tooltipText(withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "replace" })), base + " \u00b7 background: Replace")
+    compare(Model.tooltipText(withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "none" })), base, "the default says nothing")
+    compare(Model.tooltipText(snap({ effect: "blur" })), base, "a daemon below revision 9: no schema, no phrase")
+    compare(Model.effectSummary(null), "")
+    compare(Model.tooltipText(merged(withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" }), {})).indexOf("Blur") > 0, true)
+  }
+
+  function test_background_image_row() {
+    var r = snap(rev9({ background_image: image }))
+    compare(JSON.stringify(Model.effectRows(r)), JSON.stringify([{ label: "Background image", value: "\u2066" + image + "\u2069" }]),
+            "inside a left-to-right isolate")
+    compare(Model.effectRows(snap(rev9({ background_image: "" }))).length, 0)
+    compare(Model.effectRows(snap({ background_image: image })).length, 0, "below revision 9: no Effect tab rows")
+    var heb = "/\u05d0\u05d1\u05d2/c.png"
+    compare(Model.effectRows(snap(rev9({ background_image: heb })))[0].value, "\u2066" + heb + "\u2069", "LRI, not first-strong")
+    var hostile = snap(rev9({ background_image: "/tmp/<img src='http://x/y'>&\n\u202epic.png" }))
     verify(!/[<>&\n\u202e]/.test(hostile.backgroundImage), hostile.backgroundImage)
     verify(hostile.backgroundImage.indexOf("/tmp/") === 0, hostile.backgroundImage)
     var long = "/"
     for (var i = 0; i < 5000; i++) long += "d"
-    var r = snap({ effect: "replace", background_image: long })
-    compare(r.backgroundImage.length, Model.IMAGE_PATH_CAP)
-    compare(r.backgroundImage.charAt(r.backgroundImage.length - 1), "\u2026", "ellipsised")
+    var capped = snap(rev9({ background_image: long }))
+    compare(capped.backgroundImage.length, Model.IMAGE_PATH_CAP)
+    compare(capped.backgroundImage.charAt(capped.backgroundImage.length - 1), "\u2026", "ellipsised")
     var odd = [42, null, true, ["/a"], { p: "/a" }]
     for (var o = 0; o < odd.length; o++)
-      compare(snap({ background_image: odd[o] }).backgroundImage, "", JSON.stringify(odd[o]))
-    compare(JSON.stringify(Model.effectRows(snap({ effect: "replace", background_image: image }))),
-            JSON.stringify([{ label: "Image", value: "\u2066" + image + "\u2069" }]), "inside a left-to-right isolate")
-    // a path whose first letter is right-to-left still sits in an LTR isolate
-    var heb = "/\u05d0\u05d1\u05d2/c.png"
-    compare(Model.effectRows(snap({ effect: "replace", background_image: heb }))[0].value,
-            "\u2066" + heb + "\u2069", "LRI, not first-strong")
-    compare(Model.effectRows(snap({ effect: "replace", background_image: "" }))[0].value, Model.UNKNOWN)
-  }
-
-  function test_unknown_effect_is_never_selected() {
-    var r = snap({ effect: "sepia<b>", background_image: image })
-    compare(r.effectKey, "")
-    compare(r.effect, "sepiab", "display copy only, sanitised")
-    var opts = Model.effectOptions(r)
-    compare(opts.filter(function(o) { return o.selected }).length, 0)
-    compare(JSON.stringify(opts.map(function(o) { return o.value })), JSON.stringify(Model.EFFECTS),
-            "the choices are the whitelist, never the daemon's word")
-    var hint = Model.effectHint(r)
-    verify(hint.text.indexOf("does not know: sepiab") !== -1, hint.text)
-    compare(hint.commandText, "")
-    compare(Model.effectSummary(r), "")
-    compare(Model.effectRows(r).length, 0)
-    compare(Model.effectIndex(r.effectKey), -1)
-    // one that differs only in case or spacing is unknown too
-    compare(snap({ effect: "Blur" }).effectKey, "")
-    compare(snap({ effect: " blur" }).effectKey, "")
-    compare(snap({ effect: 7 }).effectKey, "")
-  }
-
-  function test_replace_needs_a_background_image() {
-    var none = snap({ effect: "none", background_image: "" })
-    verify(Model.effectSelectable(none, "none"))
-    verify(Model.effectSelectable(none, "blur"))
-    verify(!Model.effectSelectable(none, "replace"), "no image: Replace is not offered")
-    var opts = Model.effectOptions(none)
-    compare(JSON.stringify(opts.map(function(o) { return o.label })), JSON.stringify(["None", "Blur", "Replace"]))
-    compare(JSON.stringify(opts.map(function(o) { return o.selected })), JSON.stringify([true, false, false]))
-    compare(JSON.stringify(opts.map(function(o) { return o.selectable })), JSON.stringify([false, true, false]),
-            "the current effect and Replace without an image cannot be chosen")
-    compare(JSON.stringify(opts.map(function(o) { return o.faded })), JSON.stringify([false, false, true]),
-            "only Replace is faded; the current effect never is")
-    var hint = Model.effectHint(none)
-    compare(hint.text, "Replace needs an image:")
-    compare(hint.commandText, "omarchy-broadcast effect replace --image PATH")
-    verify(opts[2].tooltip.indexOf("under [effect]") !== -1, opts[2].tooltip)
-    compare(opts[0].tooltip, "The camera image, unchanged")
-    compare(Model.intentArgv({ verb: "effect", effect: "replace" }, cli, none), null)
-    // an image the daemon holds makes it selectable, and the hint goes
-    var withImage = snap({ effect: "blur", blur_strength: 0.5, background_image: image })
-    verify(Model.effectSelectable(withImage, "replace"))
-    compare(JSON.stringify(Model.effectOptions(withImage).map(function(o) { return o.selectable })),
-            JSON.stringify([true, false, true]))
-    compare(Model.effectHint(withImage).text, "")
-    compare(Model.effectHint(withImage).commandText, "")
-    compare(Model.effectOptions(withImage)[2].tooltip, "Replace the background with the background image")
-    verify(Model.effectOptions(withImage)[2].tooltip.indexOf("configured") === -1)
-    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "replace" }, cli, withImage)),
-            JSON.stringify([cli, "effect", "replace"]))
-    // the gate reads the raw field, not the display copy: a path that sanitises
-    // to nothing is still an image the daemon holds, and the hint agrees
-    var blank = snap({ effect: "replace", background_image: "<>&" })
-    compare(blank.backgroundImage, "")
-    verify(blank.backgroundImageSet)
-    verify(Model.effectSelectable(snap({ background_image: "<>&" }), "replace"))
-    compare(Model.effectHint(blank).text, "", "no 'needs an image' hint while one is set")
+      compare(snap(rev9({ background_image: odd[o] })).backgroundImage, "", JSON.stringify(odd[o]))
+    // the raw field decides: a path that sanitises to nothing is still held
+    var blank = snap(rev9({ background_image: "<>&" }))
+    verify(Model.hasBackgroundImage(blank))
     compare(Model.effectRows(blank)[0].value, Model.UNKNOWN)
-    verify(Model.effectSelectable(snap({ background_image: "\n\n\t" }), "replace"))
   }
 
-  function test_cli_without_effects_offers_none() {
-    // The committed CLI before effects: "effect":"none", no blur_strength, no
-    // background_image, and no `effect` command (clap exits 2).
-    var old = snap({ blur_strength: undefined, background_image: undefined })
-    verify(Model.available(old))
-    compare(old.cliEffects, false)
-    var opts = Model.effectOptions(old)
-    compare(opts.filter(function(o) { return o.selectable }).length, 0, "no choice is offered")
-    compare(opts.filter(function(o) { return o.faded }).length, 3, "the whole row is faded, None included")
-    for (var i = 0; i < opts.length; i++) {
-      compare(opts[i].tooltip, Model.CLI_NO_EFFECTS)
-      compare(Model.effectSelectable(old, Model.EFFECTS[i]), false)
-      compare(Model.intentArgv({ verb: "effect", effect: Model.EFFECTS[i] }, cli, old), null, Model.EFFECTS[i])
-    }
-    var hint = Model.effectHint(old)
-    compare(hint.text, "The omarchy-broadcast CLI needs updating for effects.")
-    compare(hint.commandText, "")
-    verify(hint.text.indexOf("plugin") === -1, "never blamed on the plugin")
-    compare(Model.effectRows(old).length, 0)
-    // even with a background image field but no blur_strength
-    compare(Model.effectSelectable(snap({ blur_strength: undefined, background_image: image }), "replace"), false)
-    // a blur_strength that is a number but out of range still means the CLI knows effects
-    var odd = snap({ blur_strength: 7 })
-    verify(odd.cliEffects)
-    compare(odd.blurStrength, null)
-    // a string is not the new producer's number
-    compare(snap({ blur_strength: "0.5" }).cliEffects, false)
-    // the other controls are untouched
-    verify(Model.intentArgv({ verb: "enable", on: false }, cli, old) !== null)
-  }
-
-  function test_daemon_without_effects_offers_none() {
-    // A new CLI (blur_strength a number) still talking to a daemon started
-    // before the upgrade: interface revision 1. The CLI would refuse every
-    // `effect` request ("the daemon does not support effects").
-    var old = snap({ interface_revision: 1 })
-    verify(Model.available(old))
-    verify(old.cliEffects, "the CLI knows effects")
-    compare(old.interfaceRevision, 1)
-    verify(!Model.effectsSupported(old))
-    var opts = Model.effectOptions(old)
-    compare(opts.filter(function(o) { return o.selectable }).length, 0, "no choice is offered")
-    compare(opts.filter(function(o) { return o.faded }).length, 3, "the whole row is faded, None included")
-    for (var i = 0; i < opts.length; i++) {
-      compare(opts[i].tooltip, Model.DAEMON_NO_EFFECTS)
-      compare(Model.effectSelectable(old, Model.EFFECTS[i]), false)
-      compare(Model.intentArgv({ verb: "effect", effect: Model.EFFECTS[i] }, cli, old), null, Model.EFFECTS[i])
-    }
-    var hint = Model.effectHint(old)
-    compare(hint.text, "The daemon needs updating for effects.")
-    compare(hint.commandText, "")
-    verify(hint.text !== Model.CLI_NO_EFFECTS + ".", "distinct from the CLI line")
-    compare(Model.effectRows(snap({ interface_revision: 1, effect: "blur" })).length, 0)
-    compare(Model.effectSelectable(snap({ interface_revision: 1, background_image: image }), "replace"), false)
-    compare(kindsOf(Model.cursorStops(snap({ interface_revision: 1, cameras: [cameraObjects()[0]] }), 1, false, "effect")),
-            JSON.stringify(["switch", "tabs"]))
-    verify(Model.intentArgv({ verb: "enable", on: false }, cli, old) !== null, "the other controls are untouched")
-    // an old CLI with an old daemon names the CLI first: it is what to update first
-    var both = snap({ interface_revision: 1, blur_strength: undefined })
-    compare(Model.effectHint(both).text, "The omarchy-broadcast CLI needs updating for effects.")
-    compare(Model.effectOptions(both)[0].tooltip, Model.CLI_NO_EFFECTS)
-    // a state line from the restarted daemon brings effects back
-    var back = Model.reduce(old, line(stateObject({ changed: ["interface_revision"], interface_revision: 2 }))).record
-    compare(back.interfaceRevision, 2)
-    verify(Model.effectsSupported(back))
-    compare(Model.effectHint(back).text, "Replace needs an image:")
-    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, back)), JSON.stringify([cli, "effect", "blur"]))
-    // and one from a daemon downgraded again takes them away
-    var down = Model.reduce(back, line(stateObject({ changed: ["interface_revision"], interface_revision: 1 }))).record
-    verify(!Model.effectsSupported(down))
-    compare(Model.emptyRecord("not-running").interfaceRevision, -1)
-  }
-
-  function test_daemon_revision_bounds() {
-    // revision 2 and anything later (up to the producer's u32) offers effects
-    var good = [2, 3, 1000, 4294967295]
-    for (var i = 0; i < good.length; i++) {
-      var r = snap({ interface_revision: good[i] })
-      compare(r.interfaceRevision, good[i])
-      verify(Model.effectsSupported(r), String(good[i]))
-      verify(Model.effectSelectable(r, "blur"), String(good[i]))
-      compare(Model.effectHint(r).text, "Replace needs an image:", String(good[i]))
-    }
-    // below 2, or unreadable: unknown, read as a daemon without effects
-    var bad = [undefined, null, 0, 1, -1, -2, 1.5, 2.5, NaN, Infinity, -Infinity, 4294967296, 1e300,
-               "2", "", true, [2], { v: 2 }]
-    for (var b = 0; b < bad.length; b++) {
-      var name = typeof bad[b] + " " + String(bad[b])
-      var o = snap({ interface_revision: bad[b] })
-      verify(Model.available(o), name)
-      compare(o.interfaceRevision, bad[b] === 0 || bad[b] === 1 ? bad[b] : -1, name)
-      verify(!Model.effectsSupported(o), name)
-      compare(Model.effectOptions(o).filter(function(x) { return x.selectable }).length, 0, name)
-      compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, o), null, name)
-      compare(Model.effectHint(o).text, "The daemon needs updating for effects.", name)
-      compare(Model.cursorStops(o, 0).filter(function(s) { return s.kind === "effect" }).length, 0, name)
-    }
-    // JSON carries NaN and Infinity as null; the reader itself refuses them too
-    compare(Model.interfaceRevision(NaN), -1)
-    compare(Model.interfaceRevision(Infinity), -1)
-    compare(Model.interfaceRevision(-0.5), -1)
-    // a number too large for a double: Qt's JSON.parse refuses the line (an
-    // engine that reads it as Infinity gets -1); never effects either way
-    var text = line(snapshotObject({})).replace('"interface_revision":4', '"interface_revision":1e999')
-    verify(text.indexOf("1e999") > 0)
-    var huge = Model.reduce(Model.emptyRecord("connecting"), text)
-    if (huge.outcome === "snapshot") compare(huge.record.interfaceRevision, -1)
-    else compare(huge.outcome, "invalid")
-    verify(!Model.effectsSupported(huge.record))
-  }
-
-  function test_effect_intents_are_rechecked_when_they_run() {
-    var r = snap()
-    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, r)), JSON.stringify([cli, "effect", "blur"]))
-    compare(JSON.stringify(Model.intentArgv({ verb: "effect", effect: "none" }, cli, r)), JSON.stringify([cli, "effect", "none"]))
-    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, Model.emptyRecord("not-running")), null,
-            "never D-Bus-activates a stopped daemon")
-    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, cli, snap({ state: "dancing" })), null)
-    compare(Model.intentArgv({ verb: "effect", effect: "blur; rm" }, cli, r), null)
-    compare(Model.intentArgv({ verb: "effect", effect: "--image" }, cli, r), null)
-    compare(Model.intentArgv({ verb: "effect" }, cli, r), null)
-    compare(Model.intentArgv({ verb: "effect", effect: "blur" }, "", r), null)
-    verify(!Model.effectSelectable(null, "blur"))
-    compare(Model.effectOptions(Model.emptyRecord("not-running")).filter(function(o) { return o.selectable }).length, 0)
-    compare(Model.effectHint(Model.emptyRecord("not-running")).text, "")
-    compare(Model.effectRows(Model.emptyRecord("not-running")).length, 0)
-  }
-
-  function test_effect_in_tooltip() {
-    compare(Model.tooltipText(snap({ effect: "blur" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background blurred")
-    compare(Model.tooltipText(snap({ effect: "replace", background_image: image })),
-            "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers \u00b7 background replaced")
-    compare(Model.tooltipText(snap({ effect: "none" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
-    compare(Model.tooltipText(snap({ effect: "sepia" })), "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers")
-    compare(Model.tooltipText(snap({ state: "off", enabled: false, effect: "blur" })), "Omarchy Broadcast: off")
-  }
-
-  // ---- noise removal ---------------------------------------------------------
-
-  function test_denoise_parsed() {
-    compare(snap({ denoise: true }).denoise, true)
-    compare(snap({ denoise: false }).denoise, false)
-    // missing: a CLI or a daemon that predates noise removal
-    compare(snap().denoise, null)
-    compare(snap({ denoise: undefined }).denoise, null)
-    // anything but a boolean is unknown, never coerced
-    var odd = [null, 0, 1, "true", "false", "on", "", [true], { on: true }, NaN]
-    for (var i = 0; i < odd.length; i++) {
-      var r = snap({ denoise: odd[i] })
-      compare(r.denoise, null, typeof odd[i] + " " + String(odd[i]))
-      verify(!Model.denoiseSupported(r), typeof odd[i] + " " + String(odd[i]))
-      verify(Model.available(r), "the rest of the record still applies")
-    }
-    compare(Model.emptyRecord("connecting").denoise, null)
-    compare(Model.emptyRecord("not-running").denoise, null)
-    // a state line carries it too, and the old record is not mutated
-    var on = snap({ denoise: true })
-    var off = Model.reduce(on, line(stateObject({ changed: ["denoise"], denoise: false }))).record
-    compare(off.denoise, false)
-    compare(on.denoise, true, "the old record is not mutated")
-    // a state line without it (an old producer) makes it unknown again
-    var gone = Model.reduce(on, line(stateObject({ changed: ["state"] }))).record
-    compare(gone.denoise, null)
-    // an error line forgets it with everything else
-    compare(Model.reduce(on, line({ v: 1, type: "error", code: "daemon-not-running", error: "gone" })).record.denoise, null)
-  }
-
-  function test_denoise_row() {
-    var on = Model.denoiseRow(snap({ denoise: true }))
-    compare(on.visible, true)
-    compare(on.checked, true)
-    compare(on.label, "Noise removal")
-    compare(on.tooltip, "Turn noise removal off")
-    var off = Model.denoiseRow(snap({ denoise: false }))
-    compare(off.visible, true)
-    compare(off.checked, false)
-    compare(off.tooltip, "Turn noise removal on")
-    // unknown: no switch at all, rather than an off one
-    var unknown = Model.denoiseRow(snap())
-    compare(unknown.visible, false)
-    compare(unknown.checked, false)
-    compare(Model.denoiseRow(Model.emptyRecord("not-running")).visible, false)
-    compare(Model.denoiseRow(snap({ state: "dancing", denoise: true })).visible, false, "an unknown state is unavailable")
-    compare(Model.denoiseRow(null).visible, false)
-    // offered in every known state, as the effect choices are
-    var states = ["off", "idle", "starting", "error"]
-    for (var i = 0; i < states.length; i++)
-      compare(Model.denoiseRow(snap({ state: states[i], denoise: false })).visible, true, states[i])
-    compare(Model.denoiseRow(Model.reduce(active(), line(stateObject({ state: "active", denoise: true }))).record).checked, true)
-    // gated on the daemon's interface revision, as effects are: a revision-3
-    // line that carries `denoise` still shows no switch, and none can be armed
-    var rev3 = snap({ interface_revision: 3, denoise: false })
-    compare(Model.denoiseRow(rev3).visible, false)
-    verify(!Model.denoiseSupported(rev3))
-    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, rev3), null)
-    compare(Model.intentArgv({ verb: "denoise", on: false }, cli, rev3), null)
-    compare(Model.denoiseRow(snap({ interface_revision: 4, denoise: false })).visible, true)
-    compare(Model.denoiseRow(snap({ interface_revision: 5, denoise: true })).visible, true)
-    compare(Model.denoiseRow(snap({ interface_revision: 3, denoise: true })).visible, false)
-    compare(Model.denoiseRow(snap({ interface_revision: undefined, denoise: false })).visible, false, "unknown revision")
-    // independent of effects: effects without noise removal leave the switch hidden
-    verify(Model.effectsSupported(rev3))
-  }
-
-  function test_denoise_argv() {
-    compare(JSON.stringify(Model.denoiseArgv(cli, true)), JSON.stringify([cli, "denoise", "on"]))
-    compare(JSON.stringify(Model.denoiseArgv(cli, false)), JSON.stringify([cli, "denoise", "off"]))
-    // a strict boolean only: nothing else becomes a word on the command line
-    var odd = [null, undefined, 0, 1, "on", "off", "true", "", [true], { on: true }, new Boolean(true)]
-    for (var i = 0; i < odd.length; i++) compare(Model.denoiseArgv(cli, odd[i]), null, typeof odd[i] + " " + String(odd[i]))
-    compare(Model.denoiseArgv("", true), null, "no CLI")
-    compare(Model.denoiseArgv("omarchy-broadcast", true), null, "a bare name is not a CLI path")
-    compare(Model.denoiseArgv("/a/b\nc", true), null)
-  }
-
-  function test_denoise_intents_are_rechecked_when_they_run() {
-    var r = snap({ denoise: false })
-    compare(JSON.stringify(Model.intentArgv({ verb: "denoise", on: true }, cli, r)), JSON.stringify([cli, "denoise", "on"]))
-    compare(JSON.stringify(Model.intentArgv({ verb: "denoise", on: false }, cli, snap({ denoise: true }))),
-            JSON.stringify([cli, "denoise", "off"]))
-    compare(JSON.stringify(Model.intentArgv({ verb: "denoise", on: true }, "/new/omarchy-broadcast", r)),
-            JSON.stringify(["/new/omarchy-broadcast", "denoise", "on"]), "the CLI path of the moment")
-    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, Model.emptyRecord("not-running")), null,
-            "never D-Bus-activates a stopped daemon")
-    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, snap({ state: "dancing", denoise: false })), null)
-    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, snap()), null,
-            "a CLI or daemon that does not report it has no `denoise` to run")
-    compare(Model.intentArgv({ verb: "denoise", on: "on" }, cli, r), null)
-    compare(Model.intentArgv({ verb: "denoise" }, cli, r), null)
-    compare(Model.intentArgv({ verb: "denoise", on: true }, "", r), null)
-    // a daemon that loses it meanwhile (a downgrade) drops a queued ask
-    var lost = Model.reduce(r, line(stateObject({ changed: ["state"] }))).record
-    compare(Model.intentArgv({ verb: "denoise", on: true }, cli, lost), null)
-  }
-
-  function test_denoise_cursor_stop() {
+  function test_effect_tab_stops() {
     var one = [cameraObjects()[0]]
-    compare(kindsOf(Model.cursorStops(snap({ cameras: one, denoise: false }), 1, false, "effect")),
-            JSON.stringify(["switch", "tabs", "effect", "denoise"]))
-    compare(kindsOf(Model.cursorStops(snap({ cameras: one, denoise: true }), 1, false, "effect")),
-            JSON.stringify(["switch", "tabs", "effect", "denoise"]))
-    compare(kindsOf(Model.cursorStops(snap({ cameras: one }), 1, false, "effect")),
-            JSON.stringify(["switch", "tabs", "effect"]), "unknown: no stop")
-    // a daemon below the noise removal revision: no stop, whatever the line carries
-    compare(kindsOf(Model.cursorStops(snap({ cameras: one, interface_revision: 3, denoise: false }), 1, false, "effect")),
-            JSON.stringify(["switch", "tabs", "effect"]))
-    compare(Model.stopIndex(Model.cursorStops(snap({ denoise: false }), 2, false, "effect"), "denoise", -1), 3)
-    compare(Model.stopIndex(Model.cursorStops(snap({ denoise: false }), 2, false, "camera"), "denoise", -1), -1, "only on its own tab")
-    compare(Model.cursorStops(Model.emptyRecord("not-running"), 2).length, 0)
-  }
-
-  function test_denoise_in_tooltip() {
-    var base = "Omarchy Broadcast: idle \u00b7 Logitech MX Brio \u00b7 0 consumers"
-    compare(Model.tooltipText(snap({ effect: "blur", denoise: true })), base + " \u00b7 background blurred, noise removal on")
-    compare(Model.tooltipText(snap({ effect: "replace", background_image: image, denoise: true })),
-            base + " \u00b7 background replaced, noise removal on")
-    compare(Model.tooltipText(snap({ effect: "none", denoise: true })), base + " \u00b7 noise removal on")
-    compare(Model.tooltipText(snap({ effect: "sepia", denoise: true })), base + " \u00b7 noise removal on")
-    compare(Model.tooltipText(snap({ effect: "blur", denoise: false })), base + " \u00b7 background blurred")
-    compare(Model.tooltipText(snap({ effect: "none", denoise: false })), base)
-    compare(Model.tooltipText(snap({ effect: "none" })), base, "unknown says nothing")
-    compare(Model.tooltipText(snap({ effect: "none", denoise: "true" })), base)
-    compare(Model.tooltipText(snap({ state: "off", enabled: false, denoise: true })), "Omarchy Broadcast: off")
-    compare(Model.effectSummary(snap({ effect: "blur", denoise: true })), "background blurred, noise removal on")
-    compare(Model.effectSummary(null), "")
-    // a daemon error about noise removal (it could not run) still shows
-    verify(Model.tooltipText(snap({ denoise: true, error: "noise removal unavailable" }))
-             .indexOf("noise removal on \u00b7 error: noise removal unavailable") !== -1)
+    var r = withGlobals({ cameras: one }, { effect: "blur" })
+    var cam = Model.settingsView(r, {}, {})
+    var fx = Model.effectSettingsView(r, {})
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", cam, fx)), JSON.stringify(["switch", "tabs", "effect", "setting", "setting"]))
+    var noBg = feedAll(snap(rev9({ cameras: one })), setLines(brioGroups().concat([globalGroups()[1]]))).record
+    compare(kindsOf(Model.cursorStops(noBg, 1, false, "effect", Model.settingsView(noBg, {}, {}), Model.effectSettingsView(noBg, {}))),
+            JSON.stringify(["switch", "tabs", "setting"]), "no effect row without a background effect")
+    compare(kindsOf(Model.cursorStops(snap({ cameras: one, denoise: true }), 1, false, "effect")), JSON.stringify(["switch", "tabs"]),
+            "below revision 9: no effect stops, no noise removal switch")
   }
 
   // ---- CLI resolution ------------------------------------------------------
@@ -1552,7 +1292,7 @@ TestCase {
     compare(Model.previewControlsShown(r5, ""), true)
     compare(Model.previewControlsShown(r5, "XDG_RUNTIME_DIR is not set"), false)
     compare(Model.previewControlsShown(previewRecord("idle", 0, 0, 4), ""), false)
-    compare(kindsOf(Model.cursorStops(r5, 2, true, "effect")), JSON.stringify(["switch", "preview", "fps", "tabs", "effect", "denoise"]))
+    compare(kindsOf(Model.cursorStops(r5, 2, true, "effect")), JSON.stringify(["switch", "preview", "fps", "tabs"]))
     compare(kindsOf(Model.cursorStops(r5, 2, true, "camera")), JSON.stringify(["switch", "preview", "fps", "tabs", "camera", "camera", "next"]))
     compare(kindsOf(Model.cursorStops(r5, 2, true, "status")), JSON.stringify(["switch", "preview", "fps", "tabs"]))
     var without = Model.cursorStops(r5, 2, false).map(function(s) { return s.kind })
@@ -2240,14 +1980,16 @@ TestCase {
     var q = [slider("camera.image.brightness", 1), slider("camera.image.contrast", 2)]
     q = Model.enqueueIntent(q, { verb: "setting", id: "camera.image.autofocus", value: true, quick: true })
     compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "setting:camera.image.brightness=1", "setting:camera.image.contrast=2"]), "a switch goes first")
-    q = Model.enqueueIntent(q, { verb: "denoise", on: true })
-    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "denoise", "setting:camera.image.brightness=1", "setting:camera.image.contrast=2"]), "noise removal goes after the earlier quick ask, before the sliders")
+    q = Model.enqueueIntent(q, { verb: "setting", id: "effect.video.denoise", value: true, quick: true })
+    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "setting:effect.video.denoise=true", "setting:camera.image.brightness=1",
+                                      "setting:camera.image.contrast=2"]), "a later quick ask goes after the earlier one, before the sliders")
     // the slider's coalesced latest value stays queued, after the quick ones
     q = Model.enqueueIntent(q, slider("camera.image.brightness", 9))
-    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "denoise", "setting:camera.image.contrast=2", "setting:camera.image.brightness=9"]))
-    // an effect replaces the other ask, passes the sliders
-    var e = Model.enqueueIntent([slider("camera.image.brightness", 1)], { verb: "effect", effect: "blur" })
-    compare(order(e), JSON.stringify(["effect", "setting:camera.image.brightness=1"]))
+    compare(order(q), JSON.stringify(["setting:camera.image.autofocus=true", "setting:effect.video.denoise=true", "setting:camera.image.contrast=2",
+                                      "setting:camera.image.brightness=9"]))
+    // an other ask goes last, behind the sliders
+    var e = Model.enqueueIntent([slider("camera.image.brightness", 1)], { verb: "next" })
+    compare(order(e), JSON.stringify(["setting:camera.image.brightness=1", "next"]))
     // the same id keeps one write: a quick write replaces a queued one of its id
     var same = Model.enqueueIntent([slider("camera.image.contrast", 2), slider("camera.image.mode", "a")],
                                    { verb: "setting", id: "camera.image.mode", value: "b", quick: true })
@@ -2257,9 +1999,10 @@ TestCase {
                                 { verb: "setting", id: "camera.image.autofocus", value: false, quick: true })
     compare(order(r), JSON.stringify(["reset-settings", "setting:camera.image.autofocus=false", "setting:camera.image.contrast=2"]))
     // a quick ask with no slider queued goes last, as before
-    var l = Model.enqueueIntent([{ verb: "next" }], { verb: "denoise", on: false })
-    compare(order(l), JSON.stringify(["denoise"]), "the latest other ask wins")
-    verify(Model.isQuickIntent({ verb: "effect", effect: "off" }))
+    var l = Model.enqueueIntent([{ verb: "next" }], { verb: "select", id: fhdId })
+    compare(order(l), JSON.stringify(["select"]), "the latest other ask wins")
+    verify(!Model.isQuickIntent({ verb: "effect", effect: "off" }), "the old effect verb is no quick ask")
+    verify(Model.isQuickIntent({ verb: "setting", id: "effect.video.denoise", value: true, quick: true }))
     verify(!Model.isQuickIntent(slider("camera.image.brightness", 1)))
     verify(!Model.isQuickIntent(null))
   }
@@ -2354,7 +2097,7 @@ TestCase {
     compare(Model.viewRow(open, 0).widget, "segmented")
     compare(Model.viewRow(open, 3).widget, "switch")
     compare(Model.viewRow(open, 9), null)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", v)), JSON.stringify(["switch", "tabs", "effect"]),
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", v)), JSON.stringify(["switch", "tabs"]),
             "the settings are stops on the Camera tab only")
     // a draft shows until it is confirmed
     var d = {}
@@ -2437,14 +2180,15 @@ TestCase {
                                             disabled_reason: opt.denoiseOk ? "" : "Not installed" })] }
     ]
   }
-  function rev8(o) { return merged({ interface_revision: 8, settings_schema: 1, settings_revision: 5 }, o || {}) }
+  // Interface revision 9: the effects come from modules and are drawn only from the schema.
+  function rev9(o) { return merged({ interface_revision: 9, settings_schema: 1, settings_revision: 5 }, o || {}) }
   // The camera's groups, then the global ones, as the daemon publishes them.
   function withGlobals(o, g) {
-    return feedAll(snap(rev8(o)), setLines(brioGroups().concat(globalGroups(g)))).record
+    return feedAll(snap(rev9(o)), setLines(brioGroups().concat(globalGroups(g)))).record
   }
   // No camera: only global groups, with camera "".
   function globalsOnly(o, g) {
-    return feedAll(snap(rev8(merged({ active_camera: "", cameras: [] }, o || {}))), setLines(globalGroups(g), { camera: "" })).record
+    return feedAll(snap(rev9(merged({ active_camera: "", cameras: [] }, o || {}))), setLines(globalGroups(g), { camera: "" })).record
   }
 
   function test_global_settings_routed_by_scope() {
@@ -2461,7 +2205,7 @@ TestCase {
     compare(cam.title, Model.SETTINGS_TITLE)
     compare(cam.truncation, "")
     // routed by scope, not by id: a global group named like a camera one stays global
-    var same = feedAll(snap(rev8({})), setLines([{ id: "image", label: "Image", settings: [intS("camera.image.x", "X")] },
+    var same = feedAll(snap(rev9({})), setLines([{ id: "image", label: "Image", settings: [intS("camera.image.x", "X")] },
                                                   { id: "image", label: "Image fx", settings: [intS("effect.image.y", "Y", { scope: "global" })] }])).record
     compare(rowIds(same.settings), JSON.stringify(["image:1", "image:1"]), "one group a scope")
     compare(Model.settingsView(same, {}, {}).groups.length, 1)
@@ -2493,7 +2237,7 @@ TestCase {
     compare(Model.viewRow(v, 1).widget, "switch")
     compare(Model.effectSettingsShown(v), true)
     // a group that holds only the skipped setting is not drawn
-    var lone = feedAll(snap(rev8({})), setLines([{ id: "background", label: "Background effect", settings: [globalGroups()[0].settings[0]] }],
+    var lone = feedAll(snap(rev9({})), setLines([{ id: "background", label: "Background effect", settings: [globalGroups()[0].settings[0]] }],
                                                  { camera: "" })).record
     compare(Model.effectSettingsView(lone, {}).groups.length, 0)
     compare(Model.effectSettingsShown(Model.effectSettingsView(lone, {})), false)
@@ -2503,15 +2247,16 @@ TestCase {
     compare(Model.viewRow(Model.effectSettingsView(r, d), 0).valueText, "80 %")
   }
 
-  function test_effect_fallback_without_global_settings() {
+  function test_effect_rows_need_revision_9() {
+    // a revision-7 daemon with the camera's settings only: no effect rows, no stops
     var r = brio({ cameras: [cameraObjects()[0]], interface_revision: 7, effect: "blur", blur_strength: 0.5, denoise: true })
     var v = Model.effectSettingsView(r, {})
     compare(v.visible, false)
     compare(v.groups.length, 0)
     compare(Model.effectSettingsShown(v), false)
-    compare(JSON.stringify(Model.effectRows(r, false)), JSON.stringify([{ label: "Strength", value: "50 %" }]), "the read-only strength stays")
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", Model.settingsView(r, {}, {}), v)), JSON.stringify(["switch", "tabs", "effect", "denoise"]),
-            "the noise removal switch stays a stop")
+    compare(Model.effectRows(r).length, 0)
+    compare(Model.effectModeView(r, {}).hint, Model.DAEMON_NO_EFFECTS)
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", Model.settingsView(r, {}, {}), v)), JSON.stringify(["switch", "tabs"]))
     compare(Model.effectSettingsView(Model.withLink("not-running"), {}).visible, false)
     var cleared = Model.reduce(r, line({ v: 1, type: "settings_clear", rev: 9, serial: 2 })).record
     compare(Model.effectSettingsView(cleared, {}).visible, false)
@@ -2520,17 +2265,17 @@ TestCase {
   function test_effect_generic_rows_in_the_effect_tab() {
     var r = withGlobals({ cameras: [cameraObjects()[0]], effect: "blur", blur_strength: 0.5, denoise: true }, { effect: "blur" })
     var v = Model.effectSettingsView(r, {})
-    compare(JSON.stringify(Model.effectRows(r, true)), JSON.stringify([]), "no read-only strength beside the adjustable one")
+    compare(JSON.stringify(Model.effectRows(r)), JSON.stringify([]), "no read-only strength beside the adjustable one")
     var cam = Model.settingsView(r, {}, {})
     compare(kindsOf(Model.cursorStops(r, 1, false, "effect", cam, v)), JSON.stringify(["switch", "tabs", "effect", "setting", "setting"]),
-            "the generic rows replace the noise removal stop; no group header is a stop")
+            "the choice row, then the generic rows; no group header is a stop")
     var stops = Model.cursorStops(r, 1, false, "effect", cam, v)
     compare(Model.stopIndex(stops, "setting", 1), 4)
     compare(Model.stopIndex(stops, "denoise", -1), -1)
     compare(kindsOf(Model.cursorStops(r, 1, false, "camera", cam, v).filter(function(s) { return s.kind === "setting" })), JSON.stringify(["setting", "setting", "setting", "setting", "setting"]),
             "the Camera tab walks the camera's view only")
     var replace = withGlobals({ cameras: [cameraObjects()[0]], effect: "replace", background_image: "/tmp/a.png" }, { effect: "replace" })
-    compare(Model.effectRows(replace, true).map(function(x) { return x.label }).join(","), "Image", "the image row stays")
+    compare(Model.effectRows(replace).map(function(x) { return x.label }).join(","), "Background image", "the image row stays")
   }
 
   function test_global_row_disabled_with_its_reason() {
@@ -2589,7 +2334,7 @@ TestCase {
     compare(kindsOf(Model.cursorStops(r, 0, false, "camera", cam, v)), JSON.stringify(["switch", "tabs"]))
     // a camera group with no camera is not a v1 line
     // is refused, and the set commits without it
-    var bad = feedAll(snap(rev8({})), setLines(brioGroups(), { camera: "" })).record
+    var bad = feedAll(snap(rev9({})), setLines(brioGroups(), { camera: "" })).record
     compare(bad.settings.groups.length, 0)
     compare(bad.settings.camera, "")
     // a camera appears: a new set with the camera's groups first
@@ -2597,7 +2342,7 @@ TestCase {
     compare(Model.settingsView(withCam, {}, {}).visible, true)
     compare(Model.settingsView(withCam, {}, {}).groups.length, 4)
     // a set with a camera and no camera setting says the camera has none
-    var camNone = feedAll(snap(rev8({ active_camera: brioId })), setLines(globalGroups(), { camera: brioId })).record
+    var camNone = feedAll(snap(rev9({ active_camera: brioId })), setLines(globalGroups(), { camera: brioId })).record
     compare(Model.settingsView(camNone, {}, {}).hint, Model.SETTINGS_EMPTY_TEXT)
     // nothing at all to show
     var cleared = Model.reduce(r, line({ v: 1, type: "settings_clear", rev: 9, serial: 3 })).record
@@ -2614,7 +2359,7 @@ TestCase {
     compare(d.settings.groups[4].scope, "global")
     compare(Model.effectSettingsView(d, {}).groups.length, 2)
     // the caps are a scope's own: sixteen camera groups leave the global ones
-    var many = feedAll(snap(rev8({})), setLines(groupsOf(16, 1).concat(globalGroups()), { camera: brioId, per: 8 })).record
+    var many = feedAll(snap(rev9({})), setLines(groupsOf(16, 1).concat(globalGroups()), { camera: brioId, per: 8 })).record
     compare(Model.settingsView(many, {}, {}).groups.length, 16)
     compare(Model.effectSettingsView(many, {}).groups.length, 2)
     compare(Model.settingsView(many, {}, {}).truncation, "")
@@ -3027,7 +2772,7 @@ TestCase {
     var camGroup = merged(clone(lines[1]), { group: { id: "cam", label: "Cam", settings: [intS("camera.cam.x", "X")] } })
     var all = [bogus, camGroup].concat(lines)
     for (var i = 0; i < all.length; i++) { all[i] = merged(all[i], { index: i, count: all.length }) }
-    var r = feedAll(snap(rev8({})), all).record
+    var r = feedAll(snap(rev9({})), all).record
     verify(r.settings !== null, "the set committed")
     compare(r.settings.camera, "")
     compare(r.settings.groups.every(function(x) { return x.scope === "global" }), true)
@@ -3040,7 +2785,7 @@ TestCase {
     for (var i = 0; i < good.length; i++) {
       var broken = [null, 5, true, {}, [], "x".repeat(Model.ID_CAP * 2 + 1)]
       for (var b = 0; b < broken.length; b++)
-        compare(Model.reduce(snap(rev8({})), line(merged(good[i], { camera: broken[b] }))).record.settings, null, "camera " + JSON.stringify(broken[b]).slice(0, 12))
+        compare(Model.reduce(snap(rev9({})), line(merged(good[i], { camera: broken[b] }))).record.settings, null, "camera " + JSON.stringify(broken[b]).slice(0, 12))
     }
     var r = globalsOnly()
     var d = deltaLine([], { camera: "" })
@@ -3051,24 +2796,533 @@ TestCase {
     compare(Model.settingsDelta(r.settings, d), null, "an absent camera is not the empty camera")
   }
 
-  function test_legacy_rows_fall_back_per_row() {
-    var base = { cameras: [cameraObjects()[0]], effect: "blur", blur_strength: 0.5, denoise: true }
-    // only the video group is published: the strength stays read-only, the switch goes
-    var onlyVideo = feedAll(snap(rev8(base)), setLines(brioGroups().concat([globalGroups({ effect: "blur" })[1]]))).record
-    var v1 = Model.effectSettingsView(onlyVideo, {})
-    compare(Model.effectSettingShown(v1, strengthId), false)
-    compare(Model.effectSettingShown(v1, denoiseId), true)
-    compare(JSON.stringify(Model.effectRows(onlyVideo, Model.effectSettingShown(v1, strengthId))), JSON.stringify([{ label: "Strength", value: "50 %" }]))
-    compare(kindsOf(Model.cursorStops(onlyVideo, 1, false, "effect", Model.settingsView(onlyVideo, {}, {}), v1)),
-            JSON.stringify(["switch", "tabs", "effect", "setting"]), "no legacy switch stop: the setting row holds it")
-    // only the background group: the strength is generic, the legacy switch stays
-    var onlyBg = feedAll(snap(rev8(base)), setLines(brioGroups().concat([globalGroups({ effect: "blur" })[0]]))).record
-    var v2 = Model.effectSettingsView(onlyBg, {})
-    compare(Model.effectSettingShown(v2, strengthId), true)
-    compare(Model.effectSettingShown(v2, denoiseId), false)
-    compare(Model.effectRows(onlyBg, true).length, 0)
-    compare(kindsOf(Model.cursorStops(onlyBg, 1, false, "effect", Model.settingsView(onlyBg, {}, {}), v2)),
-            JSON.stringify(["switch", "tabs", "effect", "denoise", "setting"]), "the legacy switch stands, above the rows")
-    compare(Model.effectSettingShown(null, strengthId), false)
+  // ---- the setup dialog (interface revisions 9 and 10) ---------------------------
+
+  function rev10(o) { return merged({ interface_revision: 10, settings_schema: 1, settings_revision: 5, config_serial: 3, modules_serial: 2 }, o || {}) }
+  function setupRecord(revision) { return snap(rev10({ interface_revision: revision === undefined ? 10 : revision })) }
+  function lines(objs) { return objs.map(function(o) { return typeof o === "string" ? o : JSON.stringify(o) }) }
+  function moduleObj(id, o) {
+    return merged({ id: id, name: "Module " + id, version: "1.0.0", licence: "MIT", description: "", kind: "video-stage",
+                    library: "/usr/lib/x.so", manifest: "/usr/lib/x.toml", enabled: true, status: "available", reason: "",
+                    stages: [{ id: "background", slot: "matte", rank: 300, device: "nvidia-gpu", available: true, reason: "", selected: true }],
+                    stages_truncated: false, overridden_by: "" }, o || {})
+  }
+  function moduleLines(mods, o) {
+    var opt = merged({ serial: 2, profile: "quality", profile_overridden_by: "" }, o || {})
+    var out = [{ v: 1, type: "modules", serial: opt.serial, profile: opt.profile, count: mods.length, profile_overridden_by: opt.profile_overridden_by }]
+    for (var i = 0; i < mods.length; i++) out.push({ v: 1, type: "module", serial: opt.serial, index: i, count: mods.length, module: mods[i] })
+    return lines(out)
+  }
+  function orderLines(ids, o) {
+    var opt = merged({ overridden_by: "", order_truncated: false }, o || {})
+    var stages = []
+    for (var i = 0; i < ids.length; i++) stages.push({ id: ids[i], slot: "pre-matte", up: i > 0, down: i < ids.length - 1 })
+    if (opt.stages !== undefined) stages = opt.stages
+    return lines([{ v: 1, type: "order", order: ids, order_truncated: opt.order_truncated, stages: stages, overridden_by: opt.overridden_by }])
+  }
+  function cfgRow(id, type, o) {
+    return merged({ id: id, label: id, description: "", type: type, editable: true, source: "", overridden_by: "", apply: "live",
+                    enabled: true, disabled_reason: "" }, o || {})
+  }
+  function cfgGroups() {
+    return [
+      { id: "output", label: "Output", settings: [
+        cfgRow("output.format", "enum", { label: "Format", value: "nv12", "default": "nv12", apply: "reload",
+               options: [{ value: "nv12", label: "NV12" }, { value: "yuyv", label: "YUYV" }] }),
+        cfgRow("output.hold_timeout_s", "float", { label: "Hold timeout", value: 2.5, "default": 2.5, min: 0, max: 10, step: 0.5, unit: "s", apply: "reload" }),
+        cfgRow("output.mode", "string", { label: "Mode", value: "1920x1080@30", editable: false, description: "The output's size and rate" })] },
+      { id: "lifecycle", label: "Lifecycle", settings: [
+        cfgRow("lifecycle.idle_grace_s", "int", { label: "Idle grace", value: 5, "default": 5, min: 0, max: 60, step: 1, unit: "s" }),
+        cfgRow("lifecycle.start_debounce_ms", "int", { label: "Start debounce", value: 200, "default": 200, min: 0, max: 5000, step: 10,
+               source: "config.d/90-local.toml", overridden_by: "config.d/90-local.toml", enabled: false,
+               disabled_reason: "Overridden by config.d/90-local.toml" })] },
+      { id: "pipewire", label: "PipeWire", settings: [
+        cfgRow("pipewire.enabled", "bool", { label: "PipeWire output", value: false, "default": false, apply: "reload", source: "config.d/50-panel.toml" })] },
+      { id: "effect", label: "Effect", settings: [
+        cfgRow("effect.maxine_root", "path", { label: "Maxine root", value: "/opt/maxine", editable: false, apply: "restart" })] },
+      { id: "modules", label: "Modules", settings: [
+        cfgRow("modules.profile", "enum", { label: "Backend profile", value: "quality", "default": "quality", apply: "reload",
+               options: [{ value: "quality", label: "Quality" }, { value: "battery", label: "Battery" }] }),
+        cfgRow("modules.pin.background", "enum", { label: "Background", value: "", "default": "", apply: "reload",
+               options: [{ value: "", label: "Automatic" }, { value: "br.com.dias.maxine-vfx", label: "NVIDIA Maxine" }] }),
+        cfgRow("modules.enabled.br.com.dias.maxine-vfx", "bool", { label: "NVIDIA Maxine", value: true }),
+        cfgRow("modules.dirs", "list", { label: "Module directories", value: ["/a", "/b"], editable: false }),
+        cfgRow("modules.order", "list", { label: "Stage order", value: [], editable: false })] }
+    ]
+  }
+  function configLines(groups, o) {
+    var opt = merged({ serial: 7, per: 2, schema: 1 }, o || {})
+    var raw = []
+    for (var g = 0; g < groups.length; g++) {
+      var parts = Math.max(1, Math.ceil(groups[g].settings.length / opt.per))
+      for (var p = 0; p < parts; p++)
+        raw.push({ v: 1, type: "config_group", schema: opt.schema, serial: opt.serial, part: p + 1, parts: parts,
+                   group: { id: groups[g].id, label: groups[g].label, settings: groups[g].settings.slice(p * opt.per, (p + 1) * opt.per) } })
+    }
+    for (var i = 0; i < raw.length; i++) { raw[i].index = i; raw[i].count = raw.length }
+    return lines(raw)
+  }
+  function filesLines(o) {
+    return lines([merged({ v: 1, type: "config_files", serial: 7, dir: "/home/u/.config/omarchy-broadcast", files: [
+      { path: "config.toml", status: "loaded", managed: false, reason: "" },
+      { path: "config.d/50-panel.toml", status: "absent", managed: true, reason: "" },
+      { path: "config.d/90-local.toml", status: "error", managed: false, reason: "line 3: unknown field `foo`" }],
+      files_truncated: false }, o || {})])
+  }
+  function fullSetup() {
+    var setup = Model.emptySetup()
+    setup = Model.withSetupRead(setup, "modules", Model.readModules(moduleLines([moduleObj("br.com.dias.maxine-vfx"),
+      moduleObj("org.example.hello", { name: "Hello tint", version: "0.1.0", enabled: false, status: "disabled",
+                                       reason: "Disabled after crashing the daemon twice in a row",
+                                       stages: [{ id: "hello", slot: "post-composite", rank: 100, device: "cpu", available: false, reason: "Disabled", selected: false }] })]), 0, ""))
+    setup = Model.withSetupRead(setup, "order", Model.readOrder(orderLines(["enhance", "denoise", "background"]), 0, ""))
+    setup = Model.withSetupRead(setup, "config", Model.readConfig(configLines(cfgGroups()), 0, ""))
+    setup = Model.withSetupRead(setup, "files", Model.readConfigFiles(filesLines(), 0, ""))
+    return setup
+  }
+
+  function test_setup_lines_in_the_watch() {
+    var r = snap(rev10({}))
+    compare(r.configSerial, 3)
+    compare(r.modulesSerial, 2)
+    compare(snap().configSerial, 0, "a CLI that predates them: 0")
+    compare(snap({ config_serial: -1, modules_serial: "2" }).configSerial, 0)
+    var c = Model.reduce(r, line({ v: 1, type: "config_changed", serial: 4 }))
+    compare(c.outcome, "config_changed")
+    compare(c.record.configSerial, 4)
+    compare(r.configSerial, 3, "the old record is not mutated")
+    var m = Model.reduce(c.record, line({ v: 1, type: "modules_changed", serial: 9 }))
+    compare(m.outcome, "modules_changed")
+    compare(m.record.modulesSerial, 9)
+    compare(m.record.configSerial, 4)
+    var bad = [0, -1, 1.5, "4", null, undefined, 4294967296]
+    for (var i = 0; i < bad.length; i++)
+      compare(Model.reduce(r, line({ v: 1, type: "config_changed", serial: bad[i] })).outcome, "ignored", JSON.stringify(bad[i]))
+    compare(Model.reduce(Model.emptyRecord("not-running"), line({ v: 1, type: "modules_changed", serial: 3 })).outcome, "ignored",
+            "only between a snapshot and an outage")
+  }
+
+  function test_setup_payload() {
+    compare(JSON.stringify(Model.setupPayload("")), JSON.stringify({ view: "panel", cliSetting: null }), "the panel hotkey")
+    compare(Model.setupPayload("{}").view, "panel", "the shell's togglePanelAt")
+    compare(Model.setupPayload(undefined).view, "panel")
+    compare(Model.setupPayload("not json").view, "panel")
+    compare(Model.setupPayload("[\"setup\"]").view, "panel")
+    compare(Model.setupPayload('{"view":"panel"}').view, "panel")
+    compare(Model.setupPayload('{"view":"Setup"}').view, "panel", "exact word only")
+    var p = Model.setupPayload(Model.setupPayloadJson("/opt/bin/omarchy-broadcast"))
+    compare(p.view, "setup")
+    compare(p.cliSetting, "/opt/bin/omarchy-broadcast")
+    compare(Model.setupPayload(Model.setupPayloadJson(null)).cliSetting, null, "no setting: none passed")
+    compare(Model.setupPayloadJson(null), '{"view":"setup"}')
+    compare(Model.setupPayload('{"view":"setup","cliPath":5}').cliSetting, null)
+    var long = "/"
+    for (var i = 0; i < Model.PATH_CAP + 10; i++) long += "x"
+    compare(Model.setupPayload('{"view":"setup","cliPath":"' + long + '"}').cliSetting, null, "a path over PATH_CAP is no setting")
+    for (var j = 0; j < 300; j++) long += "y"
+    compare(Model.setupPayload('{"view":"setup","cliPath":"' + long + '"}').view, "panel", "an over-cap payload is not read")
+  }
+
+  function test_pick_panel_owner() {
+    var c = [{ screenName: "DP-1", visible: true }, { screenName: "HDMI-A-1", visible: true }]
+    compare(Model.pickPanelOwner(c, "HDMI-A-1"), 1, "the focused screen's")
+    compare(Model.pickPanelOwner(c, "DP-1"), 0)
+    compare(Model.pickPanelOwner(c, ""), 0, "no focused screen: the first")
+    compare(Model.pickPanelOwner(c, "eDP-1"), 0, "a screen without the widget: the first")
+    // As the shell's BarModel.pickPanelSlot: the focused screen first, then a drawn one
+    compare(Model.pickPanelOwner([{ screenName: "DP-1", visible: false }, { screenName: "HDMI-A-1", visible: true }], "DP-1"), 0,
+            "the focused screen's, drawn or not")
+    compare(Model.pickPanelOwner([{ screenName: "DP-1", visible: false }, { screenName: "HDMI-A-1", visible: true }], "eDP-1"), 1,
+            "no copy on the focused screen: a drawn one before one that is not")
+    compare(Model.pickPanelOwner([{ screenName: "DP-1", visible: false }, { screenName: "DP-1", visible: true }], "DP-1"), 1,
+            "on the focused screen, the drawn one")
+    compare(Model.pickPanelOwner([{ screenName: "DP-1", visible: false }, { screenName: "HDMI-A-1", visible: true }], ""), 1,
+            "no focused screen: a drawn one")
+    compare(Model.pickPanelOwner([{ screenName: "DP-1", visible: false }], "DP-1"), 0, "none drawn: still one")
+    compare(Model.pickPanelOwner([], "DP-1"), -1)
+    compare(Model.pickPanelOwner(null, "DP-1"), -1)
+  }
+
+  function test_read_modules() {
+    var r = Model.readModules(moduleLines([moduleObj("br.com.dias.maxine-vfx", { name: "NVIDIA <b>Maxine</b>" }),
+                                           moduleObj("org.example.hello", { status: "disabled", enabled: false, reason: "Disabled", overridden_by: "config.d/90-x.toml" })],
+                                          { profile_overridden_by: "config.d/90-x.toml" }), 0, "")
+    compare(r.ok, true)
+    compare(r.serial, 2)
+    compare(r.profile, "quality")
+    compare(r.profileOverriddenBy, "config.d/90-x.toml")
+    compare(r.modules.length, 2)
+    compare(r.modules[0].name, "NVIDIA bMaxine/b", "sanitised")
+    compare(r.modules[0].stages[0].id, "background")
+    compare(r.modules[1].overriddenBy, "config.d/90-x.toml")
+    compare(r.modules[1].reason, "Disabled")
+    compare(r.modules[0].reason, "", "an available module has no reason")
+    // an empty list is a list
+    var none = Model.readModules(moduleLines([]), 0, "")
+    compare(none.ok, true)
+    compare(none.modules.length, 0)
+    // incomplete, repeated or foreign lines
+    var some = moduleLines([moduleObj("a.b"), moduleObj("c.d")])
+    compare(Model.readModules(some.slice(0, 2), 0, "").ok, false, "a module line missing")
+    compare(Model.readModules([some[0], some[1], some[1]], 0, "").error, "The module list arrived incomplete", "a repeated index is one line")
+    compare(Model.readModules(some.slice(1), 0, "").ok, false, "no header")
+    // ids not of the grammar are left out; an unknown status reads unavailable
+    var odd = Model.readModules(moduleLines([moduleObj("Bad Id"), moduleObj("a.b", { status: "weird" }), moduleObj("a.b"), moduleObj("x")]), 0, "")
+    compare(odd.ok, true)
+    compare(JSON.stringify(odd.modules.map(function(m) { return m.id + ":" + m.status })), JSON.stringify(["a.b:unavailable"]), "bad ids dropped, a repeat kept once")
+    // the CLI's error line, or its exit status
+    var err = Model.readModules(lines([{ v: 1, type: "error", code: "unsupported-daemon", error: "the daemon does not support modules" }]), 1, "")
+    compare(err.ok, false)
+    compare(err.error, "the daemon does not support modules")
+    compare(Model.readModules([], 3, "").error, "omarchy-broadcastd is not running")
+    compare(Model.readModules(["garbage"], 0, "").error, "omarchy-broadcast printed no module list")
+    compare(Model.readModules(lines([{ v: 2, type: "modules" }]), 0, "").error.indexOf("schema v2") >= 0, true)
+    // a count over the cap is never waited for
+    compare(Model.readModules(lines([{ v: 1, type: "modules", serial: 1, profile: "", count: Model.MODULE_LINES_CAP + 1 }]), 0, "").ok, false)
+  }
+
+  function test_read_order_and_moves() {
+    var o = Model.readOrder(orderLines(["enhance", "denoise", "background", "relight"]), 0, "")
+    compare(o.ok, true)
+    compare(JSON.stringify(o.order), JSON.stringify(["enhance", "denoise", "background", "relight"]))
+    compare(JSON.stringify(o.stages.map(function(s) { return s.up + "/" + s.down })), JSON.stringify(["false/true", "true/true", "true/true", "true/false"]))
+    compare(JSON.stringify(Model.orderAfterMove(o, 1, -1)), JSON.stringify(["denoise", "enhance", "background", "relight"]))
+    compare(JSON.stringify(Model.orderAfterMove(o, 1, 1)), JSON.stringify(["enhance", "background", "denoise", "relight"]))
+    compare(Model.orderAfterMove(o, 0, -1), null, "the first cannot go up")
+    compare(Model.orderAfterMove(o, 3, 1), null)
+    compare(Model.orderAfterMove(o, 9, 1), null)
+    compare(Model.orderAfterMove(o, 1, 2), null, "one place at a time")
+    // the daemon's word decides: a move it would refuse is not offered
+    var strict = Model.readOrder(orderLines(["denoise", "background"], { stages: [
+      { id: "denoise", slot: "pre-matte", up: false, down: false }, { id: "background", slot: "matte", up: false, down: false }] }), 0, "")
+    compare(Model.orderAfterMove(strict, 0, 1), null)
+    compare(Model.orderAfterMove(strict, 1, -1), null)
+    // no stages (a revision-9 CLI): nothing moves
+    var bare = Model.readOrder(lines([{ v: 1, type: "order", order: ["a", "b"], order_truncated: false }]), 0, "")
+    compare(bare.ok, true)
+    compare(bare.stages.every(function(s) { return !s.up && !s.down }), true)
+    // overridden or truncated: nothing moves, and the view says why
+    var over = Model.readOrder(orderLines(["a", "b"], { overridden_by: "config.d/90-x.toml" }), 0, "")
+    compare(Model.orderAfterMove(over, 0, 1), null)
+    var trunc = Model.readOrder(orderLines(["a", "b"], { order_truncated: true }), 0, "")
+    compare(trunc.truncated, true)
+    compare(Model.orderAfterMove(trunc, 0, 1), null)
+    // ids not of the stage grammar (or repeated) make it truncated: never written back
+    var hostile = Model.readOrder(orderLines(["a", "--flag", "a"]), 0, "")
+    compare(JSON.stringify(hostile.order), JSON.stringify(["a"]))
+    compare(hostile.truncated, true)
+    compare(Model.readOrder(["{}"], 0, "").ok, false)
+    compare(Model.orderAfterMove(null, 0, 1), null)
+  }
+
+  function test_read_config_rows() {
+    var c = Model.readConfig(configLines(cfgGroups()), 0, "")
+    compare(c.ok, true)
+    compare(c.serial, 7)
+    compare(JSON.stringify(c.groups.map(function(g) { return g.id + ":" + g.rows.length })),
+            JSON.stringify(["output:3", "lifecycle:2", "pipewire:1", "effect:1", "modules:5"]), "the parts of a group joined, in order")
+    var fmt = Model.findConfigRow(c, "output.format")
+    compare(fmt.type + ":" + fmt.value + ":" + fmt.apply, "enum:nv12:reload")
+    var hold = Model.findConfigRow(c, "output.hold_timeout_s")
+    compare(hold.bounded, true)
+    compare(hold.decimals, 1)
+    var deb = Model.findConfigRow(c, "lifecycle.start_debounce_ms")
+    compare(deb.overriddenBy, "config.d/90-local.toml")
+    compare(deb.enabled, false)
+    var en = Model.findConfigRow(c, "modules.enabled.br.com.dias.maxine-vfx")
+    verify(en !== null, "a key whose last parts are a module id")
+    compare(JSON.stringify(Model.findConfigRow(c, "modules.dirs").value), JSON.stringify(["/a", "/b"]))
+    compare(Model.findConfigRow(c, "modules.pin.background").value, "", "Automatic is the empty option")
+    // incomplete, another serial, a newer schema
+    var all = configLines(cfgGroups())
+    compare(Model.readConfig(all.slice(1), 0, "").ok, false)
+    compare(Model.readConfig(configLines(cfgGroups(), { schema: 2 }), 0, "").error, Model.SETUP_OLD_PLUGIN)
+    var mixed = all.slice()
+    mixed[2] = JSON.stringify(merged(JSON.parse(mixed[2]), { serial: 8 }))
+    compare(Model.readConfig(mixed, 0, "").ok, false, "a line of another serial does not complete the set")
+    compare(Model.readConfig(lines([{ v: 1, type: "error", code: "unsupported-daemon", error: "the daemon does not support the configuration" }]), 1, "").error,
+            "the daemon does not support the configuration")
+  }
+
+  function test_config_entry_validation() {
+    var e = function(o) { return Model.configEntry(o) }
+    compare(e(cfgRow("output.format", "enum", { value: "x", options: [] })), null, "an enum with no option")
+    compare(e(cfgRow("output.x", "color", { value: "red" })), null, "an unknown type is skipped")
+    compare(e(cfgRow("Output.X", "bool", { value: true })), null, "not of the key grammar")
+    compare(e(cfgRow("output", "bool", { value: true })), null, "a key has a dot")
+    // module ids are reverse-DNS with any number of parts (the daemon's valid_module_id, 64 bytes)
+    var longId = "a.b.c.d.e.f.g.h.i.j.k.l"
+    compare(e(cfgRow("modules.enabled." + longId, "bool", { value: true })).id, "modules.enabled." + longId, "a module id of many parts")
+    var maxId = "a"
+    while (maxId.length < 63) maxId += ".b"
+    maxId = maxId.slice(0, 64)
+    compare(Model.moduleIdOf(maxId), maxId, "64 bytes of parts")
+    compare(Model.configKeyOf("modules.enabled." + maxId), "modules.enabled." + maxId)
+    compare(Model.configKeyOf("modules.enabled.a..b"), "", "no empty part")
+    compare(Model.configKeyOf("modules.enabled.a.b."), "", "no empty last part")
+    compare(e(cfgRow("output.__proto__", "bool", { value: true })) !== null, true, "a dotted key is never a bare reserved word")
+    compare(e(cfgRow("output.x", "bool", { value: "true" })), null, "a bool is a boolean")
+    compare(e(cfgRow("output.x", "int", { value: 1.5 })), null, "an int is whole")
+    compare(e(cfgRow("output.x", "int", { value: 5, min: 0, max: 10, step: 1 })).bounded, true)
+    compare(e(cfgRow("output.x", "int", { value: 50, min: 0, max: 10, step: 1 })).value, 10, "clamped into range")
+    compare(e(cfgRow("output.x", "int", { value: 5 })).bounded, false, "no range: shown, not stepped")
+    compare(e(cfgRow("output.x", "int", { value: 5, min: 10, max: 0, step: 1 })).bounded, false)
+    compare(e(cfgRow("output.x", "float", { value: 0.25, min: 0, max: 1, step: 0.05 })).decimals, 2)
+    compare(e(cfgRow("output.x", "float", { value: 1e300 })), null)
+    compare(e(cfgRow("output.x", "string", { value: 7 })), null)
+    compare(e(cfgRow("output.x", "list", { value: "a,b" })), null)
+    var hostile = e(cfgRow("output.x", "string", { label: "<img src=x>", description: "a\nb<b>", value: "<script>",
+                                                   overridden_by: "config.d/<x>.toml", disabled_reason: "r" }))
+    verify(!/[<>]/.test(hostile.label + hostile.description + hostile.value + hostile.overriddenBy), JSON.stringify(hostile))
+    compare(hostile.reason, "", "no reason while enabled")
+    compare(e(cfgRow("output.x", "bool", { value: true, apply: "sometimes" })).apply, "live", "an unknown apply reads live")
+    var list = []
+    for (var i = 0; i < 40; i++) list.push("/d" + i)
+    var many = e(cfgRow("modules.dirs", "list", { value: list }))
+    compare(many.value.length, Model.CONFIG_LIST_CAP)
+    compare(many.itemsTotal, 40)
+    var opts = []
+    for (var o = 0; o < 30; o++) opts.push({ value: "o" + o, label: "O" + o })
+    opts.push({ value: "--flag", label: "bad" })
+    compare(e(cfgRow("output.x", "enum", { value: "o1", options: opts })).options.length, Model.CONFIG_OPTION_CAP)
+    compare(Model.configOptions([{ value: "--flag", label: "x" }, { value: "a b", label: "y" }, { value: "", label: "" }]).options.length, 1,
+            "only option values of the grammar")
+  }
+
+  function test_config_words_and_widgets() {
+    var c = Model.readConfig(configLines(cfgGroups()), 0, "")
+    var row = function(id) { return Model.findConfigRow(c, id) }
+    compare(Model.configWord(row("output.format"), "yuyv"), "yuyv")
+    compare(Model.configWord(row("output.format"), "rgb"), null, "only the row's options")
+    compare(Model.configWord(row("pipewire.enabled"), true), "true")
+    compare(Model.configWord(row("pipewire.enabled"), "true"), null, "a strict boolean")
+    compare(Model.configWord(row("lifecycle.idle_grace_s"), 7.4), "7", "on the grid")
+    compare(Model.configWord(row("lifecycle.idle_grace_s"), 900), "60", "within range")
+    compare(Model.configWord(row("output.hold_timeout_s"), 3.3), "3.5")
+    compare(Model.configWord(row("output.hold_timeout_s"), NaN), null)
+    compare(Model.configWord(row("modules.pin.background"), ""), "", "Automatic")
+    compare(Model.configWord(row("modules.pin.background"), "br.com.dias.maxine-vfx"), "br.com.dias.maxine-vfx")
+    compare(Model.configWord(row("lifecycle.start_debounce_ms"), 300), null, "overridden by a later file: refused")
+    compare(Model.configWord(row("output.mode"), "x"), null, "not editable")
+    compare(Model.configWord(row("modules.dirs"), ["/x"]), null, "a list is never written here")
+    compare(Model.configNudge(row("lifecycle.idle_grace_s"), 1), 8, "a twentieth of the range")
+    compare(Model.configNudge(row("lifecycle.idle_grace_s"), -1), 2)
+    compare(Model.configNudge(row("output.hold_timeout_s"), 1), 3)
+    compare(Model.configNudge(row("output.hold_timeout_s"), 0), null)
+    // the widgets
+    compare(Model.configWidget(row("pipewire.enabled")), "switch")
+    compare(Model.configWidget(row("output.format")), "choices")
+    compare(Model.configWidget(row("lifecycle.idle_grace_s")), "stepper")
+    compare(Model.configWidget(row("lifecycle.start_debounce_ms")), "text", "overridden: read-only")
+    compare(Model.configWidget(row("output.mode")), "text")
+    compare(Model.configWidget(row("effect.maxine_root")), "text")
+    compare(Model.configWidget(Model.configEntry(cfgRow("output.x", "int", { value: 5 }))), "text", "an unbounded number is shown")
+    // the drawn row
+    var v = Model.configRowView(row("lifecycle.start_debounce_ms"), 4)
+    compare(v.note, "Overridden by config.d/90-local.toml")
+    compare(v.greyed, true)
+    compare(v.stop, -1)
+    compare(v.applyText, "")
+    var f = Model.configRowView(row("output.format"), 0)
+    compare(f.applyText, "Applies at next camera start")
+    compare(Model.configSelected(f), 0)
+    compare(Model.configRowView(row("output.hold_timeout_s"), 1).valueText, "2.5 s")
+    compare(Model.configRowView(row("modules.dirs"), 0).valueText, "/a, /b")
+    compare(Model.configRowView(row("modules.order"), 0).valueText, "None")
+    // argv
+    compare(JSON.stringify(Model.configSetArgv(cli, "output.format", "yuyv")), JSON.stringify([cli, "config", "set", "--", "output.format", "yuyv"]))
+    compare(JSON.stringify(Model.configSetArgv(cli, "modules.pin.background", "")), JSON.stringify([cli, "config", "set", "--", "modules.pin.background", ""]))
+    compare(Model.configSetArgv(cli, "output.format", "--help"), null)
+    compare(Model.configSetArgv(cli, "output.format", "a b"), null)
+    compare(Model.configSetArgv(cli, "-x", "1"), null)
+    compare(Model.configSetArgv("", "output.format", "nv12"), null)
+  }
+
+  function test_setup_intents() {
+    var r10 = setupRecord(10)
+    var r9 = setupRecord(9)
+    var go = function(intent, r) { return JSON.stringify(Model.intentArgv(merged({ verb: "setup" }, intent), cli, r)) }
+    compare(go({ op: "module", id: "org.example.hello", on: true }, r9), JSON.stringify([cli, "modules", "enable", "org.example.hello"]))
+    compare(go({ op: "module", id: "org.example.hello", on: false }, r9), JSON.stringify([cli, "modules", "disable", "org.example.hello"]))
+    compare(go({ op: "module", id: "--all", on: false }, r9), "null")
+    compare(go({ op: "module", id: "org.example.hello", on: "yes" }, r9), "null")
+    compare(go({ op: "order", order: ["denoise", "enhance"] }, r9), JSON.stringify([cli, "order", "set", "denoise,enhance"]))
+    compare(go({ op: "order", order: ["denoise", "denoise"] }, r9), "null", "each stage once")
+    compare(go({ op: "order", order: ["a,b"] }, r9), "null")
+    compare(go({ op: "order", order: [] }, r9), "null")
+    compare(go({ op: "order-reset" }, r9), JSON.stringify([cli, "order", "reset"]))
+    compare(go({ op: "config", id: "output.format", word: "yuyv" }, r10), JSON.stringify([cli, "config", "set", "--", "output.format", "yuyv"]))
+    compare(go({ op: "config", id: "output.format", word: "yuyv" }, r9), "null", "config writes need revision 10")
+    compare(go({ op: "module", id: "a.b", on: true }, setupRecord(8)), "null", "modules need revision 9")
+    compare(go({ op: "module", id: "a.b", on: true }, Model.emptyRecord("not-running")), "null", "never D-Bus-activates a stopped daemon")
+    compare(go({ op: "rm" }, r10), "null")
+    // the queue: one setup write at a time, never replaced by another ask
+    verify(!Model.setupWriteBusy(null, []))
+    var q = Model.enqueueIntent([], { verb: "setup", op: "order-reset" })
+    verify(Model.setupWriteBusy(null, q))
+    verify(Model.setupWriteBusy({ verb: "setup", op: "order-reset" }, []))
+    compare(Model.queueTakes(q, { verb: "setup", op: "module", id: "a.b", on: true }), false, "a second one is refused")
+    var mixed = Model.enqueueIntent(q, { verb: "next" })
+    compare(JSON.stringify(mixed.map(function(i) { return i.verb })), JSON.stringify(["setup", "next"]), "another ask leaves it queued")
+    mixed = Model.enqueueIntent(mixed, { verb: "select", id: fhdId })
+    compare(JSON.stringify(mixed.map(function(i) { return i.verb })), JSON.stringify(["setup", "select"]), "the latest other ask still wins")
+    compare(Model.dropSettingIntents(mixed).length, 2, "a camera change keeps it")
+    // Q5: a setup write is a settings-type write; it never holds the on/off
+    verify(!Model.toggleBlocked(null, q), "the middle click does not wait for a queued setup write")
+    verify(!Model.toggleBlocked({ verb: "setup", op: "config", id: "output.format", word: "yuyv" }, []), "nor for a running one")
+    verify(Model.toggleBlocked({ verb: "setup", op: "order-reset" }, [{ verb: "enable", on: true }]), "an on/off behind it still does")
+    verify(Model.toggleBlocked(null, mixed), "nor does a camera change queued with it")
+    verify(Model.isSetupIntent(q[0]))
+    verify(!Model.isSettingIntent(q[0]))
+  }
+
+  function test_setup_gate_and_reads() {
+    compare(JSON.stringify(Model.setupReads(setupRecord(10))), JSON.stringify(["modules", "order", "config", "files"]))
+    compare(JSON.stringify(Model.setupReads(setupRecord(9))), JSON.stringify(["modules", "order"]))
+    compare(Model.setupReads(setupRecord(8)).length, 0)
+    compare(Model.setupReads(Model.emptyRecord("not-running")).length, 0)
+    compare(JSON.stringify(Model.setupReadArgv(cli, "config")), JSON.stringify([cli, "config", "show", "--json"]))
+    compare(JSON.stringify(Model.setupReadArgv(cli, "files")), JSON.stringify([cli, "config", "files", "--json"]))
+    compare(JSON.stringify(Model.setupReadArgv(cli, "modules")), JSON.stringify([cli, "modules", "list", "--json"]))
+    compare(JSON.stringify(Model.setupReadArgv(cli, "order")), JSON.stringify([cli, "order", "show", "--json"]))
+    compare(Model.setupReadArgv(cli, "rm"), null)
+    compare(Model.setupReadArgv("relative", "order"), null)
+    var g8 = Model.setupGate(setupRecord(8))
+    compare(g8.modules + ":" + g8.config + ":" + g8.text, "false:false:" + Model.SETUP_OLD_DAEMON)
+    var g9 = Model.setupGate(setupRecord(9))
+    compare(g9.modules + ":" + g9.config + ":" + g9.text, "true:false:")
+    var gone = Model.setupGate(Model.emptyRecord("not-running"))
+    compare(gone.text, "omarchy-broadcastd is not running")
+    compare(gone.commandText, "systemctl --user start omarchy-broadcastd")
+    var s = Model.withSetupRead(Model.emptySetup(), "order", { ok: true })
+    compare(s.order.ok, true)
+    compare(s.modules, null)
+    compare(Model.withSetupRead(s, "bogus", {}).order.ok, true, "an unknown kind changes nothing")
+    // a daemon whose revision drops: the reads it no longer supports are cleared
+    var all = { modules: { ok: true }, order: { ok: true }, config: { ok: true }, files: { ok: true } }
+    var kept = Model.setupForReads(all, Model.setupReads(setupRecord(9)))
+    compare(kept.modules.ok + ":" + kept.order.ok + ":" + kept.config + ":" + kept.files, "true:true:null:null", "revision 9 keeps the modules reads")
+    var none = Model.setupForReads(all, Model.setupReads(setupRecord(8)))
+    compare(JSON.stringify(none), JSON.stringify(Model.emptySetup()), "revision 8 keeps nothing")
+    compare(Model.setupForReads(all, Model.setupReads(setupRecord(10))).files.ok, true, "revision 10 keeps all")
+    compare(JSON.stringify(Model.setupForReads(null, ["modules"])), JSON.stringify(Model.emptySetup()))
+  }
+
+  function test_setup_section_views() {
+    var setup = fullSetup()
+    var r = setupRecord(10)
+    var mods = Model.modulesSectionView(setup, r)
+    compare(mods.hint, "")
+    compare(JSON.stringify(mods.rows.map(function(m) { return m.title + "|" + m.statusText + "|" + m.checked + "|" + m.switchable })),
+            JSON.stringify(["Module br.com.dias.maxine-vfx 1.0.0|Available|true|true", "Hello tint 0.1.0|Disabled|false|true"]))
+    compare(mods.rows[1].reason, "Disabled after crashing the daemon twice in a row", "a crash-ledger disable says so")
+    compare(mods.rows[0].stagesText, "Stages: background")
+    var order = Model.orderSectionView(setup, r)
+    compare(JSON.stringify(order.rows.map(function(x) { return x.position + x.id + x.up + x.down })),
+            JSON.stringify(["1enhancefalsetrue", "2denoisetruetrue", "3backgroundtruefalse"]))
+    compare(order.reset, true)
+    var back = Model.backendsSectionView(setup, r)
+    compare(JSON.stringify(back.groups[0].rows.map(function(x) { return x.id + ":" + x.widget })),
+            JSON.stringify(["modules.profile:choices", "modules.pin.background:choices"]), "the profile and the pins only")
+    compare(back.stops, 2)
+    var dmn = Model.daemonSectionView(setup, r)
+    compare(JSON.stringify(dmn.groups.map(function(g) { return g.id })), JSON.stringify(["output", "lifecycle", "pipewire", "effect"]), "no modules group")
+    compare(JSON.stringify(dmn.groups[0].rows.map(function(x) { return x.widget + ":" + x.stop })), JSON.stringify(["choices:0", "stepper:1", "text:-1"]))
+    compare(dmn.stops, 4, "the interactive rows only")
+    compare(Model.configViewRow(dmn, 3).id, "pipewire.enabled")
+    compare(Model.configViewRow(dmn, 9), null)
+    compare(dmn.groups[3].rows[0].applyText, "", "a read-only row says nothing about applying")
+    // a revision-9 daemon: Modules and Order work, the config sections say why not
+    var r9 = setupRecord(9)
+    compare(Model.modulesSectionView(setup, r9).hint, "")
+    compare(Model.backendsSectionView(setup, r9).hint, Model.SETUP_OLD_CONFIG)
+    compare(Model.daemonSectionView(setup, r9).hint, Model.SETUP_OLD_CONFIG)
+    // revision 8: every section says the daemon needs updating
+    var r8 = setupRecord(8)
+    compare(Model.modulesSectionView(setup, r8).hint, Model.SETUP_OLD_DAEMON)
+    compare(Model.orderSectionView(setup, r8).hint, Model.SETUP_OLD_DAEMON)
+    // loading and failures
+    compare(Model.modulesSectionView(Model.emptySetup(), r).hint, Model.SETUP_LOADING)
+    compare(Model.daemonSectionView(Model.withSetupRead(Model.emptySetup(), "config", Model.readFailed("boom")), r).hint, "boom")
+    compare(Model.modulesSectionView(Model.withSetupRead(setup, "modules", Model.readModules(moduleLines([]), 0, "")), r).hint, Model.MODULES_EMPTY_TEXT)
+    compare(Model.orderSectionView(Model.withSetupRead(setup, "order", Model.readOrder(orderLines([]), 0, "")), r).hint, Model.ORDER_EMPTY_TEXT)
+    // overridden: the switch and the moves are not offered
+    var overSetup = Model.withSetupRead(setup, "modules", Model.readModules(moduleLines([moduleObj("a.b", { overridden_by: "config.d/90-x.toml" })]), 0, ""))
+    var ov = Model.modulesSectionView(overSetup, r)
+    compare(ov.rows[0].switchable, false)
+    compare(ov.rows[0].note, "Overridden by config.d/90-x.toml")
+    var overOrder = Model.withSetupRead(setup, "order", Model.readOrder(orderLines(["a", "b"], { overridden_by: "config.d/90-x.toml" }), 0, ""))
+    var oo = Model.orderSectionView(overOrder, r)
+    compare(oo.rows.every(function(x) { return !x.up && !x.down }), true)
+    compare(oo.reset, false)
+    compare(oo.note, "Overridden by config.d/90-x.toml")
+  }
+
+  function test_setup_stops() {
+    var setup = fullSetup()
+    var r = setupRecord(10)
+    var kinds = function(section, view) { return JSON.stringify(Model.setupStops(section, view).map(function(x) { return x.kind + x.index })) }
+    var sections = ["section0", "section1", "section2", "section3", "section4"]
+    compare(kinds("modules", Model.modulesSectionView(setup, r)), JSON.stringify(sections.concat(["module0", "module1"])))
+    compare(kinds("order", Model.orderSectionView(setup, r)), JSON.stringify(sections.concat(["stage0", "stage1", "stage2", "order-reset-1"])))
+    compare(kinds("backends", Model.backendsSectionView(setup, r)), JSON.stringify(sections.concat(["config0", "config1"])))
+    compare(kinds("daemon", Model.daemonSectionView(setup, r)), JSON.stringify(sections.concat(["config0", "config1", "config2", "config3"])))
+    compare(kinds("diagnostics", Model.diagnosticsView(setup, r)), JSON.stringify(sections), "Diagnostics only shows")
+    compare(kinds("modules", Model.modulesSectionView(Model.emptySetup(), r)), JSON.stringify(sections), "loading: the list only")
+    compare(kinds("bogus", null), JSON.stringify(sections))
+    // a stage that cannot move is no stop
+    var strict = Model.withSetupRead(setup, "order", Model.readOrder(orderLines(["a", "b"], { stages: [
+      { id: "a", up: false, down: false }, { id: "b", up: false, down: false }] }), 0, ""))
+    compare(kinds("order", Model.orderSectionView(strict, r)), JSON.stringify(sections.concat(["order-reset-1"])))
+    // the buttons a stage row's Left/Right land on
+    compare(Model.stageButtonAfter({ up: true, down: true }, 0, 1), 1)
+    compare(Model.stageButtonAfter({ up: true, down: true }, 1, -1), 0)
+    compare(Model.stageButtonAfter({ up: false, down: true }, 0, 0), 1, "lands on the one offered")
+    compare(Model.stageButtonAfter({ up: false, down: true }, 1, -1), 1, "never on one not offered")
+    compare(Model.stageButtonAfter({ up: true, down: false }, 1, 0), 0)
+    compare(Model.stageButtonAfter({ up: false, down: false }, 0, 1), -1)
+    compare(Model.setupSectionValue("order"), "order")
+    compare(Model.setupSectionValue("Order"), "modules")
+    compare(JSON.stringify(Model.setupSectionOptions("daemon").map(function(x) { return x.number + x.label + x.selected })),
+            JSON.stringify(["1Modulesfalse", "2Orderfalse", "3Backendsfalse", "4Daemontrue", "5Diagnosticsfalse"]))
+  }
+
+  function test_setup_scroll() {
+    // contentY after a scroll of `delta` (clamped to the content)
+    compare(Model.scrollTarget(0, 1000, 400, 40), 40)
+    compare(Model.scrollTarget(580, 1000, 400, 40), 600, "stops at the bottom")
+    compare(Model.scrollTarget(20, 1000, 400, -40), 0, "stops at the top")
+    compare(Model.scrollTarget(0, 300, 400, 40), 0, "content that fits does not scroll")
+    compare(Model.scrollTarget(NaN, 1000, 400, 40), 40, "a bad position reads as the top")
+  }
+
+  function test_diagnostics_view() {
+    var setup = fullSetup()
+    var r = snap(rev10({ error: "Maxine could not load" }))
+    var d = Model.diagnosticsView(setup, r)
+    compare(JSON.stringify(d.rows), JSON.stringify([{ label: "D-Bus API", value: "revision 10" }, { label: "Daemon error", value: "Maxine could not load" }]))
+    compare(d.dir, "/home/u/.config/omarchy-broadcast")
+    compare(JSON.stringify(d.files.map(function(f) { return f.path + "|" + f.statusText + "|" + f.reason + "|" + f.note })),
+            JSON.stringify(["config.toml|Loaded||", "config.d/50-panel.toml|Not present||" + Model.MANAGED_FILE_TEXT,
+                            "config.d/90-local.toml|Error|line 3: unknown field `foo`|"]), "in load order, the managed one marked")
+    compare(JSON.stringify(d.problems.map(function(p) { return p.title + "|" + p.reason })),
+            JSON.stringify(["Hello tint|Disabled: Disabled after crashing the daemon twice in a row"]))
+    compare(JSON.stringify(d.commands), JSON.stringify(["omarchy-broadcast modules", "journalctl --user -u omarchy-broadcastd"]))
+    // an unavailable stage of an available module is a problem too
+    var stageOff = Model.withSetupRead(setup, "modules", Model.readModules(moduleLines([moduleObj("a.b", { stages: [
+      { id: "relight", slot: "post-matte", rank: 1, device: "gpu", available: false, reason: "Not installed", selected: false }] })]), 0, ""))
+    compare(Model.diagnosticsView(stageOff, r).problems[0].title, "Module a.b, stage relight")
+    compare(Model.diagnosticsView(stageOff, r).problems[0].reason, "Not installed")
+    var fine = Model.withSetupRead(setup, "modules", Model.readModules(moduleLines([moduleObj("a.b")]), 0, ""))
+    compare(Model.diagnosticsView(fine, r).problemsHint, "No module problems")
+    // revision 9: the files need 10; unavailable: the panel's words
+    compare(Model.diagnosticsView(setup, setupRecord(9)).filesHint, Model.SETUP_OLD_CONFIG)
+    var gone = Model.diagnosticsView(setup, Model.emptyRecord("not-running"))
+    compare(gone.rows[0].value, Model.UNKNOWN)
+    compare(gone.rows[1].value, "omarchy-broadcastd is not running")
+    compare(gone.files.length, 0)
+    var trunc = Model.readConfigFiles(filesLines({ files_truncated: true }), 0, "")
+    compare(trunc.truncated, true)
+    compare(Model.readConfigFiles(filesLines({ files: [{ path: "x.toml", status: "odd", managed: 1, reason: "<b>" }] }), 0, "").files[0].status, "error")
   }
 }

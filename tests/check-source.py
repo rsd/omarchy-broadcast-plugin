@@ -17,15 +17,13 @@ widget would hide.
     chunks (it is unbounded; only its capped first line is kept);
   - panel visuals never read `containsMouse` for colour (the shell's
     CursorSurface contract: one highlight, from the panel cursor);
-  - an effect reaches the command line only as a word of Model.EFFECTS,
-    through an intent (Daemon.setEffect -> Model.effectArgv);
-  - noise removal reaches it only as `on` or `off` from a strict boolean,
-    through an intent (Daemon.setDenoise -> Model.denoiseArgv), and only
-    while the daemon reports it;
+  - no effect is named: no list of effect words, no `effect` or `denoise`
+    command; the background effect's choice is written as its setting
+    (Daemon.commitSetting with the row's id and one of its options, from
+    Model.effectModeView), and the Effect tab needs interface revision 9;
   - the effect chips carry the shell ButtonGroup's fill and fade from
-    Model's `faded`; the hint and its command share one Column at the
-    unavailable block's spacing; the Replace gate reads the raw image field,
-    and the shown path sits in a left-to-right Unicode isolate;
+    Model's `faded`; the image gate reads the raw image field, and the shown
+    path sits in a left-to-right Unicode isolate;
   - the preview: one Process, in the Preview singleton, armed with an argv
     from Model.previewArgv (15 or 30 only), read in line mode with the line
     cap that stops it, no Timer anywhere in its path, re-armed through
@@ -49,9 +47,21 @@ widget would hide.
     PanelActionButton or PanelToolTip; both Flickables let go of a held
     slider; the set's lines, options and changes are capped before they are
     walked;
-  - the bar clicks: right click turns the camera on or off through
-    Model.rightClickAction (its guards, with Daemon.toggleBusy: slider writes
-    never hold it), every other click opens and closes the panel;
+  - the bar clicks, through Model.clickAction: left opens and closes the
+    panel, middle turns the camera on or off through Model.middleClickAction
+    (its guards, with Daemon.toggleBusy: slider writes never hold it), right
+    opens the setup dialog through the shell's toggle with
+    Model.setupPayloadJson, after closing the open panels;
+  - the setup dialog: an overlay entry point of the manifest (kept loaded);
+    open() reads its payload only through Model.setupPayload and forwards
+    anything but the setup view to Daemon.openPanel; `opened` covers the
+    panels too, close() closes them; its reads are fixed argv
+    (Model.setupReadArgv) on one more Process of the Daemon, stdout in line
+    mode and bounded, stderr chunked; its writes are setup intents of the
+    command queue (Daemon.setModuleEnabled, moveStage, resetOrder,
+    setConfig), each word checked again when it runs (Model.setupIntentArgv),
+    a config value after `--`, a stage move only one the daemon offered
+    (Model.orderAfterMove);
   - the panel tab: a stored `panelTab` is read only through
     Model.panelTabValue (anything but a word of Model.PANEL_TABS reads as the
     default), written only by the panel's chooseTab as a word of
@@ -242,18 +252,15 @@ check("command stderr is chunked (splitMarker: \"\")", re.search(r'stderr:\s*Spl
       command_block[:200])
 check("command stderr goes through Model.firstLineFeed", "Model.firstLineFeed(" in command_block)
 check("an over-cap watch line stops the watch", re.search(r"line\.length > Model\.LINE_CAP\)\s*\{[^}]*stopWatch\(\)", daemon) is not None)
-check("an effect is requested as an intent, never a raw argv",
-      re.search(r'function setEffect\(effect\)\s*\{\s*return request\(\{ verb: "effect", effect: effect \}\)\s*\}', daemon) is not None)
-check("effectArgv only passes a word of Model.EFFECTS",
-      re.search(r'function effectArgv\(cli, effect\)\s*\{\s*if \(!cliUsable\(cli\) \|\| effectKey\(effect\) === ""\) return null', model) is not None)
-check("noise removal is requested as an intent, never a raw argv",
-      re.search(r'function setDenoise\(on\)\s*\{\s*return request\(\{ verb: "denoise", on: on === true \}\)\s*\}', daemon) is not None)
-check("denoiseArgv only passes on/off from a strict boolean",
-      re.search(r'function denoiseArgv\(cli, on\)\s*\{\s*if \(!cliUsable\(cli\) \|\| typeof on !== "boolean"\) return null\s*'
-                r'return \[cli, "denoise", on \? DENOISE_WORDS\.on : DENOISE_WORDS\.off\]', model) is not None
-      and 'var DENOISE_WORDS = { on: "on", off: "off" }' in model)
-check("a denoise intent runs only while the daemon reports it",
-      'case "denoise": return denoiseSupported(record) ? denoiseArgv(cli, intent.on) : null' in model)
+check("no effect vocabulary: no effect words, no `effect` or `denoise` command, no legacy setting ids",
+      re.search(r"\bEFFECTS\b", model + daemon) is None
+      and all(n not in model + daemon for n in ("effectArgv", "denoiseArgv", "DENOISE_WORDS", "setEffect", "setDenoise",
+                                            '"effect", effect', '"denoise"', "LEGACY_", "effectKey", "cliEffects"))
+      and re.search(r'case "(effect|denoise)":', model) is None)
+check("the Effect tab draws from the schema only from interface revision 9",
+      "if (!moduleEffects(record)) { out.hint = DAEMON_NO_EFFECTS; return out }" in block(model, "function effectModeView")
+      and "if (!moduleEffects(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out" in block(model, "function effectSettingsView")
+      and "record.interfaceRevision >= MODULES_REVISION" in block(model, "function moduleEffects"))
 check("queued commands are intents re-checked when armed",
       "pendingIntents" in daemon and "pendingArgv" not in daemon and "Model.intentArgv(intent, cliPath, record)" in block(daemon, "function armCommand"))
 check("the queue changes only through Model.enqueueIntent (coalescing) and flushPending",
@@ -266,34 +273,22 @@ bar_src = sources[PLUGIN / "BarWidget.qml"]
 for name, src in ((p.name, sources[p]) for p in plugin_qml):
     check(f"{name}: no containsMouse-driven colour",
           re.search(r"(color|border\.color|fill)\s*:[^\n]*containsMouse", src) is None)
-check("the panel sets an effect only from its whitelisted choices",
-      re.findall(r"Daemon\.setEffect\(([^)]*)\)", panel) == ["option.value"],
-      str(re.findall(r"Daemon\.setEffect\(([^)]*)\)", panel)))
+check("the panel writes the effect choice as its setting, from the row's own options",
+      "var row = root.effectMode" in block(panel, "function chooseEffect")
+      and "return Daemon.commitSetting(row.id, option.value)" in block(panel, "function chooseEffect")
+      and "if (!option || option.selected || !row.enabled || !root.available) return false" in block(panel, "function chooseEffect")
+      and "readonly property var effectMode: Model.effectModeView(record, Daemon.settingDrafts)" in panel
+      and re.search(r"id: effectRepeater\s*objectName: \"effectRepeater\"\s*model: root\.effectMode\.options", panel) is not None)
 effect_chips = block(panel, "id: effectRepeater")
-check("the panel flips noise removal only from the reported state",
-      re.findall(r"Daemon\.setDenoise\(([^)]*)\)", panel) == ["root.record.denoise !== true"],
-      str(re.findall(r"Daemon\.setDenoise\(([^)]*)\)", panel)))
-check("the noise removal switch is drawn only from Model.denoiseRow",
-      re.search(r'objectName: "denoiseRow"[^}]*visible: root\.denoiseRow\.visible', panel) is not None)
-check("the noise removal switch swallows clicks while a command runs",
-      re.search(r'objectName: "denoiseToggle"[^}]*busy: Daemon\.commandBusy', panel) is not None)
 check("effect chips have the ButtonGroup fill (Commons.Color.background)",
       re.search(r"^\s*background:\s*Commons\.Color\.background\s*$", effect_chips, re.M) is not None, effect_chips[:200])
 check("effect chips fade from Model's `faded`, not a local rule",
       re.search(r"opacity:\s*modelData\.faded \? 0\.45 : 1\.0", effect_chips) is not None)
-hint_at = panel.find('objectName: "effectHintBlock"')
-hint_column = panel.rfind("Column {", 0, hint_at) if hint_at >= 0 else -1
-hint_block = block(panel[hint_column:], "Column {") if hint_column >= 0 else ""
-# The Column's own spacing: the indentation of its objectName line.
-hint_indent = re.search(r'^( *)objectName:\s*"effectHintBlock"', hint_block, re.M)
-check("effect hint and its command share one Column at Style.space(6)",
-      re.match(r'\{\s*objectName:\s*"effectHintBlock"', hint_block) is not None and hint_indent is not None
-      and re.search(r"^" + hint_indent.group(1) + r"spacing: Style\.space\(6\)$", hint_block, re.M) is not None
-      and 'objectName: "effectHint"' in hint_block and 'objectName: "effectHintCommand"' in hint_block,
-      hint_block[:200])
+check("the effect hint is the daemon's reason or the view's hint, plain text",
+      re.search(r'objectName: "effectHint"\s*textFormat: Text\.PlainText[^}]*text: root\.effectMode\.visible \? root\.effectMode\.reason : root\.effectMode\.hint', panel) is not None)
 check("the image path is isolated (LRI U+2066 ... PDI U+2069) after sanitising",
       'return "\\u2066" + record.backgroundImage + "\\u2069"' in model)
-check("the Replace gate reads the raw field, not the display copy",
+check("the image gate reads the raw field, not the display copy",
       re.search(r"function hasBackgroundImage\(record\)\s*\{\s*return !!record && record\.backgroundImageSet === true\s*\}", model) is not None)
 check("camera rows are CursorSurfaces", re.search(r"delegate:\s*CursorSurface\s*\{", panel) is not None)
 check("the panel scrolls (Flickable)", "Flickable {" in panel)
@@ -334,11 +329,12 @@ check("a global setting is written as `settings set -- ID VALUE`, the id and the
       re.search(r'function settingArgvGlobal\(cli, id, word\)\s*\{\s*'
                 r'if \(!cliUsable\(cli\) \|\| settingId\(id\) === "" \|\| typeof word !== "string" \|\| !SETTING_VALUE_RE\.test\(word\)\)\s*'
                 r'return null\s*return \[cli, "settings", "set", "--", id, word\]', model) is not None)
-check("the Effect tab skips only the one setting its choice row owns; the two legacy rows' settings are named in Model.js alone",
+check("Model.js names one setting, the background effect's choice, and the Effect tab skips only that one",
       'var EFFECT_MODE_SETTING = "effect.background.mode"' in model
-      and model.count("EFFECT_MODE_SETTING") == 2
+      and model.count("EFFECT_MODE_SETTING") == 3
+      and "findSetting(record, EFFECT_MODE_SETTING)" in block(model, "function effectModeRow")
       and re.findall(r"[a-z0-9]+\.[a-z0-9_]+\.[a-z0-9_]+", " ".join(re.findall(r'"([^"\n]*)"', model)))
-          == ["effect.background.mode", "effect.background.blur_strength", "effect.video.denoise"])
+          == ["effect.background.mode"])
 check("a change of the set's camera drops the queued setting writes; cameras compared raw",
       'if ((after ? after.camera : "") !== (before ? before.camera : "")) dropQueuedSettings()' in block(daemon, "function ingest")
       and "var before = record.settings" in block(daemon, "function ingest")
@@ -471,10 +467,13 @@ check("a stored tab is read only through Model.panelTabValue",
 for word, name in (("effect", "effectTab"), ("camera", "cameraTab"), ("status", "statusTab")):
     check(f"the {word} tab is drawn only while it is the tab shown",
           re.search(r'objectName: "' + name + r'"[^}]*visible: root\.tab === "' + word + r'"', panel) is not None)
-check("the right click toggles through Model.rightClickAction; other clicks open and close the panel",
-      re.search(r"function press\(buttonCode\)\s*\{\s*if \(buttonCode === Qt\.RightButton\) root\.toggleCamera\(\)\s*else root\.toggle\(\)\s*\}", bar_src) is not None
-      and "var action = Model.rightClickAction(root.record, Daemon.toggleBusy)" in block(bar_src, "function toggleCamera")
-      and "Model.rightClickAction(record, toggleBusy) !== \"toggle\"" in block(daemon, "function toggleEnabled")
+check("the clicks go through Model.clickAction: middle toggles through Model.middleClickAction, right opens the setup, left the panel",
+      re.search(r'var action = Model\.clickAction\(buttonCode === Qt\.MiddleButton \? "middle" : \(buttonCode === Qt\.RightButton \? "right" : "left"\),\s*'
+                r'root\.record, Daemon\.toggleBusy\)\s*if \(action === "setup"\) root\.openSetup\(\)\s*'
+                r'else if \(action === "panel"\) root\.toggle\(\)\s*else root\.toggleCamera\(\)', block(bar_src, "function press")) is not None
+      and "var action = Model.middleClickAction(root.record, Daemon.toggleBusy)" in block(bar_src, "function toggleCamera")
+      and "Model.middleClickAction(record, toggleBusy) !== \"toggle\"" in block(daemon, "function toggleEnabled")
+      and "rightClickAction" not in model + daemon + bar_src
       and "readonly property bool toggleBusy: Model.toggleBlocked(runningIntent, pendingIntents)" in daemon
       and "if (!root.available || Daemon.toggleBusy) return false" in block(panel, "function toggleSwitch")
       and re.search(r'objectName: "enableSwitch"[^}]*busy: Daemon\.toggleBusy', panel) is not None
@@ -508,6 +507,66 @@ check("the only hard-coded colour is black behind a frame",
 check("the preview rate uses the shell's ButtonGroup, driven by the panel cursor",
       re.search(r'ButtonGroup \{\s*id: fpsChoices[^}]*focusable: false[^}]*cursorIndex: root\.hasCursor\("fps", -1\) \? root\.fpsCursor : -1',
                 panel) is not None)
+
+# ---- the setup dialog -----------------------------------------------------------
+dialog = sources[PLUGIN / "SetupDialog.qml"]
+check("the manifest adds the overlay kind, kept loaded, with SetupDialog.qml as its entry point",
+      manifest.get("kinds") == ["bar-widget", "overlay"] and manifest.get("keepLoaded") is True
+      and manifest.get("entryPoints") == {"barWidget": "BarWidget.qml", "overlay": "SetupDialog.qml"}, str(manifest.get("kinds")))
+check("the right click opens the setup through the shell's toggle with the setup payload, after closing the panels"
+      " (only once the shell has a toggle)",
+      re.search(r"var shell = root\.bar \? root\.bar\.shell : null\s*"
+                r'if \(!shell \|\| typeof shell\.toggle !== "function"\) return false\s*'
+                r"Daemon\.closePanels\(\)\s*"
+                r"return shell\.toggle\(root\.moduleName, Model\.setupPayloadJson\(root\.cliSetting\)\) === true",
+                block(bar_src, "function openSetup")) is not None)
+# shell.qml panelEntry onLoaded: `if ("<name>" in item) item.<name> = ...` for
+# each of these; an assignment to a readonly one throws before the overlay is
+# registered, and the overlay never opens.
+loader_names = ("omarchyPath", "shell", "manifest", "barWidgetRegistry", "pluginRegistry", "service")
+readonly_injected = [n for n in loader_names if re.search(r"readonly property \S+ " + n + r"\b", dialog)]
+check("the setup dialog declares none of the names the shell's loader assigns as readonly, and no `service`",
+      readonly_injected == [] and re.search(r"property \S+ service\b", dialog) is None
+      and "property var shell: null" in dialog and "property var manifest: null" in dialog, str(readonly_injected))
+check("the overlay window has the plugin's layer-shell namespace",
+      re.search(r'OverlayWindow \{\s*id: overlay\s*shown: root\.shown\s*WlrLayershell\.namespace: "omarchy-broadcast"', dialog) is not None
+      and "import Quickshell.Wayland" in dialog)
+check("the setup dialog's writes do not hold the on/off toggle",
+      "!isSettingIntent(intent) && !isSetupIntent(intent)" in block(model, "function toggleBlocked"))
+check("open() reads its payload through Model.setupPayload and forwards anything else to the panel",
+      "var payload = Model.setupPayload(payloadJson)" in block(dialog, "function open(")
+      and re.search(r'if \(payload\.view !== "setup"\) \{\s*hideDialog\(\)[^}]*Daemon\.openPanel\(', block(dialog, "function open(")) is not None
+      and "readonly property bool opened: shown || Daemon.panelOpen" in dialog
+      and "Daemon.closePanels()" in block(dialog, "function close()"))
+check("the dialog holds the setup only while shown",
+      "Daemon.holdSetup(root)" in block(dialog, "function open(") and "Daemon.releaseSetup(root)" in block(dialog, "function hideDialog"))
+read_block = block(daemon, "property Process readProc")
+check("the setup reads: fixed argv, stdout in line mode and bounded, stderr chunked",
+      read_block != "" and re.search(r"stdout:\s*SplitParser\s*\{\s*onRead", read_block) is not None
+      and re.search(r'stderr:\s*SplitParser\s*\{\s*splitMarker:\s*""', read_block) is not None
+      and "var argv = Model.setupReadArgv(cliPath, kind)" in block(daemon, "function nextRead")
+      and "readLines.length >= Model.READ_LINES_CAP" in block(daemon, "function readLine")
+      and "line.length > Model.LINE_CAP" in block(daemon, "function readLine")
+      and all(w in block(model, "function setupReadArgv") for w in (
+          'return [cli, "modules", "list", "--json"]', 'return [cli, "order", "show", "--json"]',
+          'return [cli, "config", "show", "--json"]', 'return [cli, "config", "files", "--json"]')))
+setup_requests = re.findall(r'request\(\{ verb: "setup", op: "([a-z-]+)"', daemon)
+check("setup writes are intents of the queue, from the four Daemon functions only",
+      setup_requests == ["module", "order", "order-reset", "config"]
+      and 'request({ verb: "setup", op: "module", id: m.id, on: on })' in block(daemon, "function setModuleEnabled")
+      and "Model.orderAfterMove(setup.order, index, direction)" in block(daemon, "function moveStage")
+      and "var word = row ? Model.configWord(row, value) : null" in block(daemon, "function setConfig")
+      and 'case "setup": return setupIntentArgv(cli, record, intent)' in model, str(setup_requests))
+check("a config value goes after `--`, key and word checked; a stage order is ids of the grammar, each once",
+      re.search(r'function configSetArgv\(cli, key, word\)\s*\{\s*if \(!cliUsable\(cli\) \|\| configKeyOf\(key\) === "" \|\| typeof word !== "string" \|\| !CONFIG_WORD_RE\.test\(word\)\) return null\s*'
+                r'return \[cli, "config", "set", "--", key, word\]', model) is not None
+      and "if (stageIdOf(order[i]) === \"\" || seen[order[i]] === true) return null" in block(model, "function orderSetArgv")
+      and "if (direction === -1 ? !st.up : !st.down) return null" in block(model, "function orderAfterMove"))
+dialog_writes = re.findall(r"Daemon\.(setModuleEnabled|moveStage|resetOrder|setConfig|commitSetting|moveSetting)\(([^,)]*)", dialog)
+check("the dialog writes only by ids of rows it was given",
+      dialog_writes != [] and all(a in ("row.id", "configRow.row.id", "index", "") for _, a in dialog_writes), str(dialog_writes))
+check("the dialog names no command: every argv is the Model's",
+      all(w not in dialog for w in ('"set"', '"--"', '"enable"', '"disable"', '"reset"', '"show"', '"list"', '"--json"')))
 
 # ---- pending re-arm through Qt.callLater (rule 8) ---------------------------
 check("command retry deferred with Qt.callLater", "Qt.callLater(root.flushPending)" in daemon_src)
