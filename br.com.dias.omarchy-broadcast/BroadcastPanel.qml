@@ -85,7 +85,7 @@ Item {
   readonly property string heroMeta: Model.heroMeta(record)
   readonly property string truncation: Model.truncationText(record)
   readonly property var effectOptions: Model.effectOptions(record)
-  readonly property var effectRows: Model.effectRows(record)
+  readonly property var effectRows: Model.effectRows(record, blurStrengthShown)
   readonly property var effectHint: Model.effectHint(record)
   readonly property var denoiseRow: Model.denoiseRow(record)
   readonly property var preview: Preview.placeholder
@@ -96,6 +96,17 @@ Item {
   property var settingsOpen: null
   // The camera settings exactly as drawn (and as the cursor walks them).
   readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)
+  // The Effect tab's generic rows: the daemon's global settings (all but the
+  // effect choice, which has a row of its own). While it publishes none, the
+  // tab keeps its read-only strength and its noise removal switch.
+  readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)
+  readonly property bool genericEffect: Model.effectSettingsShown(effectSettings)
+  // Per row: the legacy rows give way only to the setting that replaces each.
+  readonly property bool blurStrengthShown: Model.effectSettingShown(effectSettings, Model.LEGACY_STRENGTH_SETTING)
+  readonly property bool denoiseShown: Model.effectSettingShown(effectSettings, Model.LEGACY_DENOISE_SETTING)
+  // What the keyboard walks and the rows act on: the tab shown's section.
+  readonly property var activeView: tab === "effect" ? effectSettings : settingsView
+  readonly property SettingsView activeBlock: tab === "effect" ? effectSettingsBlock : settingsBlock
   // A slider is held: the Flickables must not take the drag over.
   property int slidersHeld: 0
 
@@ -106,7 +117,7 @@ Item {
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView)
+  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
@@ -151,14 +162,14 @@ Item {
   // on the effect and frame-rate rows.
   function landOnSetting() {
     var stop = currentStop
-    var row = stop && stop.kind === "setting" ? Model.viewRow(root.settingsView, stop.index) : null
+    var row = stop && stop.kind === "setting" ? Model.viewRow(root.activeView, stop.index) : null
     choiceCursor = row && row.widget === "segmented" ? Model.choiceCursorStart(row) : -1
   }
 
   // The mouse is over chip `index` of the row at stop `stop`.
   function setChoiceCursor(stop, index) {
     setCursor("setting", stop)
-    var row = Model.viewRow(root.settingsView, stop)
+    var row = Model.viewRow(root.activeView, stop)
     if (row && row.widget === "segmented" && index >= 0 && index < row.options.length) choiceCursor = index
   }
 
@@ -279,7 +290,7 @@ Item {
   // Left/Right on a setting: a row of buttons walks its chip cursor (no
   // write), a slider moves (nudgeSetting).
   function moveSettingH(stop, dx) {
-    var row = Model.viewRow(root.settingsView, stop)
+    var row = Model.viewRow(root.activeView, stop)
     if (!row || !row.enabled || !root.available) return false
     if (row.widget === "segmented") {
       root.choiceCursor = Model.choiceCursorAfter(row, root.choiceCursor, dx)
@@ -293,7 +304,7 @@ Item {
   // (Daemon.moveSetting: a draft, then the debounce). Nothing for a greyed
   // row.
   function nudgeSetting(stop, dx) {
-    var row = Model.viewRow(root.settingsView, stop)
+    var row = Model.viewRow(root.activeView, stop)
     if (!row || !row.enabled || !root.available) return false
     var value = Model.settingNudge(row, row.value, dx > 0 ? 1 : -1)
     return value !== null && Daemon.moveSetting(row.id, value)
@@ -303,13 +314,13 @@ Item {
   // dropdown opens its list, a switch flips, an action runs (a slider moves
   // with Left/Right). Nothing for a greyed row, or the choice already made.
   function activateSetting(stop) {
-    var row = Model.viewRow(root.settingsView, stop)
+    var row = Model.viewRow(root.activeView, stop)
     if (!row || !row.enabled || !root.available) return false
     if (row.widget === "segmented") {
       var option = row.options[root.choiceCursor]
       return !!option && option.value !== row.value && Daemon.commitSetting(row.id, option.value)
     }
-    if (row.widget === "dropdown") return settingsBlock.openChoices(stop)
+    if (row.widget === "dropdown") return root.activeBlock.openChoices(stop)
     if (row.widget === "switch") return Daemon.commitSetting(row.id, row.value !== true)
     if (row.widget === "action") return Daemon.runSettingAction(row.id)
     return false
@@ -373,8 +384,8 @@ Item {
     if (!item) return
     Qt.callLater(function() {
       if (!item) return
-      if (inner === true) scrollWithin(settingsBlock.flick, item)
-      scrollWithin(flick, inner === true ? settingsBlock.flick : item)
+      if (inner === true) scrollWithin(root.activeBlock.flick, item)
+      scrollWithin(flick, inner === true ? root.activeBlock.flick : item)
     })
   }
 
@@ -396,7 +407,7 @@ Item {
     else if (stop.kind === "fps") scrollItemIntoView(fpsLine)
     else if (stop.kind === "tabs") scrollItemIntoView(tabRow)
     else if (stop.kind === "group") scrollItemIntoView(settingsBlock.groupItem(stop.index), true)
-    else if (stop.kind === "setting") scrollItemIntoView(settingsBlock.rowItem(stop.index), true)
+    else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index), true)
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "denoise") scrollItemIntoView(denoiseLine)
@@ -976,7 +987,7 @@ Item {
 
             PanelSeparator {
               foreground: root.foreground
-              visible: root.denoiseRow.visible
+              visible: root.denoiseRow.visible && !root.denoiseShown
             }
 
             // Noise removal: a stage that runs with any effect, so a switch of
@@ -988,7 +999,7 @@ Item {
               id: denoiseLine
               objectName: "denoiseRow"
               width: parent.width
-              visible: root.denoiseRow.visible
+              visible: root.denoiseRow.visible && !root.denoiseShown
               implicitHeight: Math.max(denoiseLabel.implicitHeight, denoiseSwitch.implicitHeight)
 
               Text {
@@ -1027,6 +1038,45 @@ Item {
                   text: root.denoiseRow.tooltip
                   fontFamily: root.fontFamily
                 }
+              }
+            }
+
+            // ---- the daemon's global settings (the effect's strength, noise
+            // removal and whatever it adds), drawn by the same renderer as
+            // the camera's; the effect choice above is not among them. None
+            // while the daemon publishes none: the rows above then stand.
+            Column {
+              id: effectSettingsArea
+              objectName: "effectSettingsArea"
+              width: parent.width
+              spacing: Style.space(10)
+              visible: root.genericEffect
+
+              PanelSeparator { foreground: root.foreground }
+
+              SettingsView {
+                id: effectSettingsBlock
+                objectName: "effectSettingsView"
+                namePrefix: "effect-"
+                readonly property real areaTop: tabBlock.y + effectTab.y + effectSettingsArea.y + y
+                width: parent.width
+                room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
+                bar: root.bar
+                view: root.effectSettings
+                // Only the tab shown has a cursor (both views number their stops from 0).
+                cursorStop: root.tab === "effect" ? root.currentStop : null
+                choiceCursor: root.choiceCursor
+                keyCatcher: catcher
+                slidersHeld: root.slidersHeld
+                foreground: root.foreground
+                dim: root.dim
+                faint: root.faint
+                accent: root.accent
+                hoverFill: root.hoverFill
+                fontFamily: root.fontFamily
+                onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
+                onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
+                onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
               }
             }
           }
@@ -1209,7 +1259,7 @@ Item {
                 room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
                 bar: root.bar
                 view: root.settingsView
-                cursorStop: root.currentStop
+                cursorStop: root.tab === "camera" ? root.currentStop : null
                 choiceCursor: root.choiceCursor
                 keyCatcher: catcher
                 slidersHeld: root.slidersHeld

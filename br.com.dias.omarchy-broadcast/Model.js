@@ -796,12 +796,14 @@ function imagePathText(record) {
   return "\u2066" + record.backgroundImage + "\u2069"
 }
 
-// Read-only rows under the choices: the blur strength while blurring, the
-// background image while replacing. Empty when unavailable or when the CLI
+// Read-only rows under the choices: the blur strength while blurring (unless
+// `strengthShown`: the Effect tab draws the daemon's strength setting, an
+// adjustable one, instead), the background image while replacing. Empty when unavailable or when the CLI
 // or the daemon predates effects.
-function effectRows(record) {
+function effectRows(record, strengthShown) {
   if (!effectsSupported(record)) return []
-  if (record.effectKey === "blur") {
+  // The daemon's own strength setting is drawn (adjustable) instead.
+  if (record.effectKey === "blur" && strengthShown !== true) {
     var s = record.blurStrength
     return [{ label: "Strength", value: s === null ? UNKNOWN : Math.round(s * 100) + " %" }]
   }
@@ -1367,6 +1369,8 @@ var OPTION_LABEL_CAP = 32
 // Rendering caps (the producer's are 64 settings a camera and 16 options a
 // setting); past them the panel says "Showing N of M".
 var SETTINGS_GROUP_CAP = 16
+// A set holds the groups of both scopes, each up to SETTINGS_GROUP_CAP.
+var SETTINGS_SET_GROUP_CAP = 2 * SETTINGS_GROUP_CAP
 var SETTINGS_PER_GROUP_CAP = 16
 var SETTING_OPTION_CAP = 16
 var SETTINGS_ROW_CAP = 64
@@ -1505,6 +1509,14 @@ function clampInt(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }
 
+// Where a setting's value is kept: "global" (the daemon's own, such as the
+// background effect) or "camera" (per camera: every other value, an absent
+// scope included). The Camera tab draws the camera ones, the Effect tab the
+// global ones.
+function settingScope(s) {
+  return isPlainObject(s) && s.scope === "global" ? "global" : "camera"
+}
+
 // One setting of a settings_group line -> a row, or null (skipped): an id of
 // the grammar, a known type, and for each type its fields:
 //   int     min, max, step, default, value: device integers; max > min,
@@ -1514,7 +1526,8 @@ function clampInt(value, min, max) {
 //   enum    at least one valid option; a value (or default) that is not
 //           one of them reads as "" (no choice selected)
 //   action  nothing more
-// Unknown fields (enabled_when, hint, scope, ...) are not read. A setting
+// `scope` is read as settingScope reads it. Unknown fields (enabled_when,
+// hint, ...) are not read. A setting
 // of a known type that is skipped (a fixed int, max == min; too many steps;
 // a field missing) still counts in its group's total (settingKnown), so the
 // group says that not all are shown; one of an unknown type does not.
@@ -1525,7 +1538,7 @@ function settingEntry(s) {
   var label = settingText(s.label, SETTING_LABEL_CAP)
   var enabled = s.enabled === true
   var e = {
-    id: id, type: s.type, label: label !== "" ? label : id, stored: s.stored === true, enabled: enabled,
+    id: id, type: s.type, label: label !== "" ? label : id, scope: settingScope(s), stored: s.stored === true, enabled: enabled,
     reason: enabled ? "" : settingText(s.disabled_reason, SETTING_REASON_CAP),
     value: null, defaultValue: null, min: 0, max: 0, step: 0, unit: "", options: [], optionsTotal: 0
   }
@@ -1565,7 +1578,8 @@ function settingKnown(s) {
 }
 
 // A settings_group line's message -> its validated parts, or null (the
-// line's envelope is not one a v1 producer prints; it is ignored). At most
+// line's envelope is not one a v1 producer prints; it is ignored). The
+// camera is "" only on a line of global settings (no camera is active). At most
 // SETTINGS_LINE_LOOK settings of the line are looked at; `total` counts the
 // rows kept, the known-type ones skipped, and those past the look cap. A
 // group that is not one of the grammar (its id, its label object) is kept as
@@ -1576,10 +1590,13 @@ function settingsGroupLine(m) {
   if (!isPlainObject(m) || m.schema !== SETTINGS_SCHEMA) return null
   var rev = settingsNumber(m.rev)
   var serial = settingsNumber(m.serial)
-  var camera = rawId(m.camera)
+  // "" is the literal empty string only (no camera); a value that is not a
+  // string, or is too long, is no camera at all: the line is ignored.
+  if (typeof m.camera !== "string" || m.camera.length > ID_CAP * 2) return null
+  var camera = m.camera
   var count = lineIndex(m.count, 1, SETTINGS_LINES_CAP)
   var parts = lineIndex(m.parts, 1, SETTINGS_LINES_CAP)
-  if (rev === 0 || serial === 0 || camera === "" || count < 0 || parts < 0) return null
+  if (rev === 0 || serial === 0 || count < 0 || parts < 0) return null
   var index = lineIndex(m.index, 0, count)
   var part = lineIndex(m.part, 1, parts)
   if (index < 0 || part < 0) return null
@@ -1592,6 +1609,16 @@ function settingsGroupLine(m) {
     return envelope
   }
   var src = Array.isArray(g.settings) ? g.settings : []
+  // A group's settings share one scope: the first one's. Only a group of
+  // global settings is published with no camera (the set then holds only
+  // those); a camera group needs the camera it is for.
+  var scope = src.length > 0 ? settingScope(src[0]) : "camera"
+  if (camera === "" && scope !== "global") {
+    // Not a group of a set with no camera: refused, so the line still fills
+    // its place and the set commits without it.
+    envelope.group = { refused: true, key: "#" + index }
+    return envelope
+  }
   var n = Math.min(src.length, SETTINGS_LINE_LOOK)
   var rows = []
   var skipped = 0
@@ -1601,7 +1628,7 @@ function settingsGroupLine(m) {
     else if (settingKnown(src[i])) skipped++
   }
   var label = settingText(g.label, SETTING_LABEL_CAP)
-  envelope.group = { refused: false, id: gid, label: label !== "" ? label : gid, rows: rows,
+  envelope.group = { refused: false, id: gid, scope: scope, label: label !== "" ? label : gid, rows: rows,
                      total: rows.length + skipped + (src.length - n) }
   return envelope
 }
@@ -1632,10 +1659,13 @@ function commitSettings(a) {
       }
       continue
     }
-    var g = byId[line.group.id]
+    // A group is told apart by its scope as well as its id: a camera group
+    // and a global one may share an id.
+    var key = line.group.scope + ":" + line.group.id
+    var g = byId[key]
     if (g === undefined) {
-      g = { id: line.group.id, label: line.group.label, rows: [], total: 0 }
-      byId[line.group.id] = g
+      g = { id: line.group.id, scope: line.group.scope, label: line.group.label, rows: [], total: 0 }
+      byId[key] = g
       all.push(g)
     }
     g.total += line.group.total
@@ -1646,19 +1676,24 @@ function commitSettings(a) {
       if (g.rows.length < SETTINGS_PER_GROUP_CAP) g.rows.push(row)
     }
   }
+  // The caps apply to each scope on its own, so that camera groups never
+  // crowd the global ones out (a refused group counts with the camera's).
   var out = []
-  var counted = refusedCount
-  var rows = 0
+  var counted = { camera: refusedCount, global: 0 }
+  var shown = { camera: 0, global: 0 }
+  var rows = { camera: 0, global: 0 }
   for (var k = 0; k < all.length; k++) {
     var total = Math.max(all[k].rows.length, all[k].total)
     if (total === 0) continue
-    counted++
-    if (out.length >= SETTINGS_GROUP_CAP) continue
-    var kept = all[k].rows.slice(0, Math.max(0, SETTINGS_ROW_CAP - rows))
-    rows += kept.length
-    out.push({ id: all[k].id, label: all[k].label, rows: kept, total: total })
+    var sc = all[k].scope
+    counted[sc]++
+    if (shown[sc] >= SETTINGS_GROUP_CAP) continue
+    var kept = all[k].rows.slice(0, Math.max(0, SETTINGS_ROW_CAP - rows[sc]))
+    rows[sc] += kept.length
+    shown[sc]++
+    out.push({ id: all[k].id, scope: sc, label: all[k].label, rows: kept, total: total })
   }
-  return { rev: a.rev, serial: a.serial, camera: a.camera, groups: out, groupsTotal: counted }
+  return { rev: a.rev, serial: a.serial, camera: a.camera, groups: out, groupsTotal: counted.camera, globalGroupsTotal: counted.global }
 }
 
 // One settings_group line applied to the record (a copy): kept in the set
@@ -1723,11 +1758,11 @@ function settingChanged(row, c) {
 function settingsDelta(set, m) {
   if (!set || !isPlainObject(m) || m.schema !== SETTINGS_SCHEMA) return null
   var rev = settingsNumber(m.rev)
-  if (rev === 0 || rev < set.rev || settingsNumber(m.serial) !== set.serial || rawId(m.camera) !== set.camera) return null
+  if (rev === 0 || rev < set.rev || settingsNumber(m.serial) !== set.serial || typeof m.camera !== "string" || rawId(m.camera) !== set.camera) return null
   var groups = []
   var where = Object.create(null)
   for (var g = 0; g < set.groups.length; g++) {
-    groups.push({ id: set.groups[g].id, label: set.groups[g].label, rows: set.groups[g].rows.slice(), total: set.groups[g].total })
+    groups.push({ id: set.groups[g].id, scope: set.groups[g].scope, label: set.groups[g].label, rows: set.groups[g].rows.slice(), total: set.groups[g].total })
     for (var r = 0; r < set.groups[g].rows.length; r++) where[set.groups[g].rows[r].id] = [g, r]
   }
   var changes = Array.isArray(m.changes) ? m.changes : []
@@ -1740,7 +1775,7 @@ function settingsDelta(set, m) {
     if (at === undefined) continue
     groups[at[0]].rows[at[1]] = settingChanged(groups[at[0]].rows[at[1]], c)
   }
-  return { rev: rev, serial: set.serial, camera: set.camera, groups: groups, groupsTotal: set.groupsTotal }
+  return { rev: rev, serial: set.serial, camera: set.camera, groups: groups, groupsTotal: set.groupsTotal, globalGroupsTotal: set.globalGroupsTotal }
 }
 
 // ---- capability
@@ -1776,7 +1811,7 @@ function settingsLive(record) {
 function findSetting(record, id) {
   var set = record && isPlainObject(record.settings) ? record.settings : null
   if (!set || typeof id !== "string") return null
-  for (var g = 0; g < set.groups.length && g < SETTINGS_GROUP_CAP; g++) {
+  for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
     var rows = set.groups[g].rows
     for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) if (rows[r].id === id) return rows[r]
   }
@@ -1888,20 +1923,26 @@ function settingWidget(row) {
 // choice of this session (memory only): a group id (that group, while the
 // set has it), "" (the user closed the open group: none), or anything else,
 // a group the set does not have included (no choice): the Image group, or
-// the first group on a camera that has none. "" when none is open.
+// the first group on a camera that has none. "" when none is open. Only the
+// camera's groups count: the global ones are never in the accordion.
 function openGroupId(open, set) {
-  if (!isPlainObject(set) || !Array.isArray(set.groups) || set.groups.length === 0) return ""
-  if (open === "") return ""
+  if (!isPlainObject(set) || !Array.isArray(set.groups)) return ""
+  var first = ""
   var image = false
-  for (var i = 0; i < set.groups.length && i < SETTINGS_GROUP_CAP; i++) {
-    if (typeof open === "string" && set.groups[i].id === open) return open
-    if (set.groups[i].id === "image") image = true
+  for (var i = 0; i < set.groups.length && i < SETTINGS_SET_GROUP_CAP; i++) {
+    var g = set.groups[i]
+    if (g.scope === "global") continue
+    if (first === "") first = g.id
+    if (open !== "" && typeof open === "string" && g.id === open) return open
+    if (g.id === "image") image = true
   }
-  return image ? "image" : set.groups[0].id
+  if (first === "" || open === "") return ""
+  return image ? "image" : first
 }
 
-// The Camera tab's settings section, exactly as it is drawn:
-//   { visible, hint, note, groups, truncation, reset, rowCount, setKey }
+// The settings section of a tab, exactly as it is drawn:
+//   { visible, hint, note, groups, truncation, reset, rowCount, setKey,
+//     title, collapsible }
 // groups: { id, label, index, expanded, glyph, rows, truncation }, where the
 // rows of a collapsed group are not listed; a row:
 //   { id, type, widget, label, enabled, reason, value, valueText, min, max,
@@ -1913,8 +1954,26 @@ function openGroupId(open, set) {
 // the panel's choice of open group (openGroupId). `setKey` names the set
 // (its camera and serial): a row of another key is another camera's or
 // another structure's, whatever its place (a held slider lets go).
+// `collapsible` is whether the groups open and close (one at a time).
+function emptySettingsView() {
+  return { visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "",
+           title: "", collapsible: true }
+}
+
+function viewRowOf(row, drafts, stop) {
+  var value = shownSettingValue(row, drafts)
+  return {
+    id: row.id, type: row.type, widget: settingWidget(row), label: row.label, enabled: row.enabled,
+    reason: row.reason, value: value, valueText: settingValueText(row, value), min: row.min, max: row.max,
+    step: row.step, options: row.options, selectedIndex: row.type === "enum" ? optionIndex(row.options, value) : -1,
+    optionsNote: showingText(row.options.length, row.optionsTotal, "choices"), stop: stop
+  }
+}
+
+// The Camera tab's section: the groups whose settings are per camera.
 function settingsView(record, open, drafts) {
-  var out = { visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "" }
+  var out = emptySettingsView()
+  out.title = SETTINGS_TITLE
   if (!available(record)) return out
   if (!settingsSupported(record)) {
     out.hint = settingsMissingText(record)
@@ -1930,38 +1989,96 @@ function settingsView(record, open, drafts) {
   out.setKey = JSON.stringify([set.camera, set.serial])
   var openId = openGroupId(open, set)
   var stop = 0
-  for (var g = 0; g < set.groups.length && g < SETTINGS_GROUP_CAP; g++) {
+  for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
     var group = set.groups[g]
+    if (group.scope === "global") continue
     var expanded = group.id === openId
     var rows = []
-    for (var r = 0; expanded && r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
-      var row = group.rows[r]
-      var value = shownSettingValue(row, drafts)
-      rows.push({
-        id: row.id, type: row.type, widget: settingWidget(row), label: row.label, enabled: row.enabled,
-        reason: row.reason, value: value, valueText: settingValueText(row, value), min: row.min, max: row.max,
-        step: row.step, options: row.options, selectedIndex: row.type === "enum" ? optionIndex(row.options, value) : -1,
-        optionsNote: showingText(row.options.length, row.optionsTotal, "choices"), stop: stop++
-      })
-    }
+    for (var r = 0; expanded && r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++)
+      rows.push(viewRowOf(group.rows[r], drafts, stop++))
     out.groups.push({
       id: group.id, label: group.label, index: out.groups.length, expanded: expanded,
       glyph: expanded ? GLYPH_EXPANDED : GLYPH_COLLAPSED,
       rows: rows, truncation: expanded ? showingText(rows.length, group.total, "settings") : ""
     })
   }
-  out.visible = true
   out.rowCount = stop
   // "Showing N of M groups": N is what is drawn (commitSettings keeps only
   // groups to draw), M counts the refused and capped ones too.
   out.truncation = showingText(out.groups.length, set.groupsTotal, "groups")
   if (out.groups.length === 0) {
-    out.hint = SETTINGS_EMPTY_TEXT
+    // A set of global settings only: there is no camera, and nothing to say.
+    out.hint = set.camera !== "" ? SETTINGS_EMPTY_TEXT : ""
+    if (set.camera === "") out.truncation = ""
+    out.visible = out.hint !== ""
     return out
   }
+  out.visible = true
   out.note = settingsLive(record) ? SETTINGS_LIVE_TEXT : SETTINGS_IDLE_TEXT
   out.reset = true
   return out
+}
+
+// The setting the Effect tab's dedicated choice row owns: the background
+// effect. The only one this plugin names; every other global setting is
+// drawn by the generic renderer.
+var EFFECT_MODE_SETTING = "effect.background.mode"
+
+// The Effect tab's generic section: every group of global settings, all open
+// (no accordion, no reset: the camera's reset never reaches them), without
+// the setting the dedicated row owns (a group left with nothing is not
+// drawn). No groups (`visible` false) when the daemon publishes no global
+// setting at all, and the panel then keeps its own rows.
+function effectSettingsView(record, drafts) {
+  var out = emptySettingsView()
+  out.collapsible = false
+  if (!available(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out
+  var set = record.settings
+  out.setKey = JSON.stringify([set.camera, set.serial])
+  var stop = 0
+  var skippedGroups = 0
+  for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
+    var group = set.groups[g]
+    if (group.scope !== "global") continue
+    var rows = []
+    var skipped = 0
+    for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
+      if (group.rows[r].id === EFFECT_MODE_SETTING) { skipped++; continue }
+      rows.push(viewRowOf(group.rows[r], drafts, stop++))
+    }
+    if (rows.length === 0) { skippedGroups++; continue }
+    out.groups.push({
+      id: group.id, label: group.label, index: out.groups.length, expanded: true, glyph: "",
+      rows: rows, truncation: showingText(rows.length + skipped, group.total, "settings")
+    })
+  }
+  out.rowCount = stop
+  out.truncation = showingText(out.groups.length + skippedGroups, set.globalGroupsTotal, "groups")
+  out.visible = out.groups.length > 0
+  return out
+}
+
+// The two settings that replace a legacy row of the Effect tab. Named only
+// to hide that row once its setting is drawn (effectSettingShown); the
+// generic renderer names no setting.
+var LEGACY_STRENGTH_SETTING = "effect.background.blur_strength"
+var LEGACY_DENOISE_SETTING = "effect.video.denoise"
+
+// Whether the Effect tab's generic view draws setting `id` as a row.
+function effectSettingShown(view, id) {
+  if (!isPlainObject(view) || !Array.isArray(view.groups)) return false
+  for (var g = 0; g < view.groups.length && g < SETTINGS_GROUP_CAP; g++) {
+    var rows = Array.isArray(view.groups[g].rows) ? view.groups[g].rows : []
+    for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) if (rows[r].id === id) return true
+  }
+  return false
+}
+
+// Whether the Effect tab draws the daemon's global settings (a daemon that
+// publishes some) in place of its own read-only strength and noise removal
+// rows.
+function effectSettingsShown(view) {
+  return isPlainObject(view) && Array.isArray(view.groups) && view.groups.length > 0
 }
 
 // The open group after the user opens (`open` true) or closes group `id`:
@@ -2033,6 +2150,15 @@ function settingArgv(cli, camera, id, word) {
   return [cli, "settings", "set", "--camera=" + cam, "--", id, word]
 }
 
+// A global setting is the daemon's own, not a camera's: no camera is named
+// (the daemon ignores it for such an id), and one intent is good whichever
+// camera is active, or none.
+function settingArgvGlobal(cli, id, word) {
+  if (!cliUsable(cli) || settingId(id) === "" || typeof word !== "string" || !SETTING_VALUE_RE.test(word))
+    return null
+  return [cli, "settings", "set", "--", id, word]
+}
+
 function resetSettingsArgv(cli, camera) {
   var cam = selectableId(camera)
   return cliUsable(cli) && cam !== "" ? [cli, "settings", "reset", "--camera=" + cam] : null
@@ -2048,14 +2174,16 @@ function settingIntentBound(intent, record) {
 
 // The argv for a setting intent ({ verb: "setting", id, value, camera })
 // under `record`: the settings are offered, the intent is bound to the set's
-// camera, the row is in the set and enabled now, and the value is one of
-// the row's; null otherwise.
+// camera (a camera row; a global row is bound to no camera), the row is in
+// the set and enabled now, and the value is one of the row's; null otherwise.
 function settingIntentArgv(cli, record, intent) {
-  if (!settingsSupported(record) || !settingIntentBound(intent, record)) return null
-  var row = findSetting(record, intent.id)
+  if (!settingsSupported(record)) return null
+  var row = isPlainObject(intent) ? findSetting(record, intent.id) : null
   if (!row || !row.enabled) return null
+  if (row.scope !== "global" && !settingIntentBound(intent, record)) return null
   var word = settingArgvValue(row, intent.value)
-  return word === null ? null : settingArgv(cli, record.settings.camera, row.id, word)
+  if (word === null) return null
+  return row.scope === "global" ? settingArgvGlobal(cli, row.id, word) : settingArgv(cli, record.settings.camera, row.id, word)
 }
 
 function isSettingIntent(intent) {
@@ -2103,7 +2231,9 @@ function enqueueIntent(queue, intent) {
     if (intent.verb === "setting") {
       if (p.verb === "setting" && p.id === intent.id) continue
     } else if (intent.verb === "reset-settings") {
-      if (isSettingIntent(p)) continue
+      // The camera's reset supersedes the camera's writes only: a global
+      // write (intent.scope) is not the camera's to reset.
+      if (isSettingIntent(p) && !isGlobalIntent(p)) continue
     } else if (!isSettingIntent(p)) {
       continue
     }
@@ -2114,11 +2244,33 @@ function enqueueIntent(queue, intent) {
   return out
 }
 
-// The queue without its setting and reset intents (a new array): what is
-// left once the settings belong to another camera.
+// A queued write of a global setting (made with its row's scope).
+function isGlobalIntent(intent) {
+  return isPlainObject(intent) && intent.verb === "setting" && intent.scope === "global"
+}
+
+// The queue without its camera setting and reset intents (a new array): what
+// is left once the settings belong to another camera. A write of a global
+// setting stays: it is the daemon's, whichever camera is active.
 function dropSettingIntents(queue) {
   var q = Array.isArray(queue) ? queue.slice(0, INTENT_QUEUE_CAP) : []
-  return q.filter(function(p) { return isPlainObject(p) && !isSettingIntent(p) })
+  return q.filter(function(p) { return isPlainObject(p) && (!isSettingIntent(p) || isGlobalIntent(p)) })
+}
+
+// `map` (setting id -> anything) without the ids that are not global
+// settings in any of `records`: what a camera change or a camera reset
+// leaves of the drafts, what was sent and what is settling.
+function keepGlobalSettings(map, records) {
+  var out = {}
+  var recs = Array.isArray(records) ? records : []
+  var d = withSetting(map, "", undefined)
+  for (var id in d) {
+    for (var i = 0; i < recs.length; i++) {
+      var row = findSetting(recs[i], id)
+      if (row && row.scope === "global") { out[id] = d[id]; break }
+    }
+  }
+  return out
 }
 
 // Whether an on/off toggle must wait: a command other than a camera setting
@@ -2291,8 +2443,10 @@ function statusRows(record) {
 // row (one stop; Left/Right change the tab), then only the stops of the tab
 // shown (`tab`, read through panelTabValue):
 //   effect  the effect choices (one stop for the row; Left/Right walk its
-//           choices, as in the shell's button groups) and the noise removal
-//           switch;
+//           choices, as in the shell's button groups), then the rows of
+//           the noise removal switch unless the generic rows hold it, then
+//           the rows of `effectSettings` (effectSettingsView: the daemon's
+//           global settings, drawn generically, no group header is a stop);
 //   camera  one per rendered camera row (`cameraCount` is the count the
 //           panel draws, so the cursor and the rows always agree), Next
 //           camera when it is shown, then from `settings` (the settingsView
@@ -2305,7 +2459,7 @@ function statusRows(record) {
 // effect row is no stop either when the CLI or the daemon predates effects
 // (none of its choices can be requested), nor the noise removal switch when
 // the daemon does not report it (it is not drawn).
-function cursorStops(record, cameraCount, previewControls, tab, settings) {
+function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (previewControls === true) {
@@ -2316,7 +2470,18 @@ function cursorStops(record, cameraCount, previewControls, tab, settings) {
   var shown = panelTabValue(tab)
   if (shown === "effect") {
     if (effectsSupported(record)) stops.push({ kind: "effect", index: -1 })
-    if (denoiseSupported(record)) stops.push({ kind: "denoise", index: -1 })
+    // The legacy switch stands only where its setting is not drawn; it sits
+    // above the generic rows.
+    if (denoiseSupported(record) && !effectSettingShown(effectSettings, LEGACY_DENOISE_SETTING))
+      stops.push({ kind: "denoise", index: -1 })
+    if (effectSettingsShown(effectSettings)) {
+      // The generic rows' stops number from 0 in this tab's view, as the
+      // camera's do in theirs (the two are never shown together).
+      for (var e = 0; e < effectSettings.groups.length && e < SETTINGS_GROUP_CAP; e++) {
+        var erows = Array.isArray(effectSettings.groups[e].rows) ? effectSettings.groups[e].rows : []
+        for (var q = 0; q < erows.length && q < SETTINGS_PER_GROUP_CAP; q++) stops.push({ kind: "setting", index: erows[q].stop })
+      }
+    }
   } else if (shown === "camera") {
     var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
     for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })

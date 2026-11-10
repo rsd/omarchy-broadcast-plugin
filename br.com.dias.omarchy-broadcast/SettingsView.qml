@@ -15,7 +15,9 @@ import "Model.js" as Model
 //           Model.SEGMENTED_MAX_OPTIONS short choices, else its Dropdown
 //   action  a Button
 // A group is a header that opens and closes, one open at a time (memory only:
-// the panel holds the choice, Model.openGroupId); a row the daemon greys out
+// the panel holds the choice, Model.openGroupId), or, where the view says it
+// is not collapsible (the Effect tab's), a plain heading over rows that are
+// always shown; a row the daemon greys out
 // keeps its label, value and the daemon's reason legible, only its control is
 // faded, and it takes no input. Nothing here knows any setting: no id is
 // named, every label, unit, reason and choice comes from the view, already
@@ -42,8 +44,13 @@ Column {
   id: root
 
   property QtObject bar: null
-  // Model.settingsView(record, open, drafts).
-  property var view: ({ visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "" })
+  // Put before the objectName of the section's own parts (settingsTitle,
+  // settingsFlick, ...), so that two sections in one panel are told apart.
+  property string namePrefix: ""
+  // Model.settingsView(record, open, drafts), or Model.effectSettingsView
+  // (the Effect tab's: no title, no Reset, groups that stay open).
+  property var view: ({ visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "",
+                        title: "", collapsible: true })
   // The panel's current stop ({ kind, index }) or null, and its chip cursor.
   property var cursorStop: null
   property int choiceCursor: -1
@@ -75,6 +82,9 @@ Column {
   // not take the drag over.
   signal heldChanged(int delta)
 
+  // The left inset of headings and rows: none in the Effect tab, where they
+  // line up with the panel's section headers and choices.
+  readonly property real inset: view.collapsible === false ? 0 : Style.space(6)
   readonly property Item flick: settingsFlick
   readonly property Item resetItem: resetButton
 
@@ -123,21 +133,23 @@ Column {
   Item {
     id: sectionTitle
     width: parent.width
-    height: Math.max(titleText.implicitHeight, resetButton.visible ? resetButton.implicitHeight : 0)
+    // Nothing to say (the Effect tab's section): no line, no gap.
+    visible: root.view.title !== "" || root.view.reset === true
+    height: visible ? Math.max(titleText.implicitHeight, resetButton.visible ? resetButton.implicitHeight : 0) : 0
 
     PanelSectionHeader {
       id: titleText
-      objectName: "settingsTitle"
+      objectName: root.namePrefix + "settingsTitle"
       anchors.left: parent.left
       anchors.verticalCenter: parent.verticalCenter
-      text: Model.SETTINGS_TITLE
+      text: root.view.title
       foreground: root.foreground
       fontFamily: root.fontFamily
     }
 
     Button {
       id: resetButton
-      objectName: "settingsReset"
+      objectName: root.namePrefix + "settingsReset"
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       visible: root.view.reset === true
@@ -159,7 +171,7 @@ Column {
   // Where a change applies: live, or at the camera's next open.
   Text {
     id: noteText
-    objectName: "settingsNote"
+    objectName: root.namePrefix + "settingsNote"
     textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap
@@ -174,7 +186,7 @@ Column {
   // or a camera with nothing to show.
   Text {
     id: hintText
-    objectName: "settingsHint"
+    objectName: root.namePrefix + "settingsHint"
     textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap
@@ -193,7 +205,7 @@ Column {
 
     Flickable {
       id: settingsFlick
-      objectName: "settingsFlick"
+      objectName: root.namePrefix + "settingsFlick"
       readonly property real fullHeight: groupsColumn.implicitHeight
       readonly property real roomLeft: root.room > 0 ? Math.max(Style.space(160), root.room - root.pinnedHeight) : fullHeight
       readonly property bool moreBelow: interactive && contentY + height < contentHeight - 1
@@ -207,7 +219,7 @@ Column {
       interactive: contentHeight > height + 0.5 && root.slidersHeld === 0
       // At rest too while it scrolls: the cue that more is there.
       ScrollBar.vertical: ScrollBar {
-        objectName: "settingsScrollBar"
+        objectName: root.namePrefix + "settingsScrollBar"
         policy: settingsFlick.contentHeight > settingsFlick.height + 0.5 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
       }
 
@@ -220,7 +232,7 @@ Column {
 
         Repeater {
           id: groupRepeater
-          objectName: "settingsGroupRepeater"
+          objectName: root.namePrefix + "settingsGroupRepeater"
           model: root.view.groups.length
 
           delegate: Column {
@@ -228,9 +240,17 @@ Column {
             required property int index
             readonly property var group: root.view.groups[index] || ({ id: "", label: "", expanded: false, glyph: "", rows: [], truncation: "" })
             readonly property Item header: groupHeader
-            objectName: "settingsGroup-" + group.id
+            objectName: root.namePrefix + "settingsGroup-" + group.id
             width: groupsColumn.width
             spacing: Style.space(1)
+
+            // Not collapsible (the Effect tab): a gap above each group after
+            // the first, so the groups read as sections.
+            Item {
+              width: parent.width
+              height: Style.space(8)
+              visible: root.view.collapsible === false && groupBlock.index > 0
+            }
 
             function rowFor(stop) {
               for (var r = 0; r < rowRepeater.count; r++) {
@@ -245,30 +265,33 @@ Column {
             // opens or closes it.
             CursorSurface {
               id: groupHeader
-              objectName: "settingsGroupHeader-" + groupBlock.group.id
+              objectName: root.namePrefix + "settingsGroupHeader-" + groupBlock.group.id
               width: parent.width
               implicitHeight: headerLabel.implicitHeight + Style.space(6)
               hasCursor: root.hasCursor("group", groupBlock.index)
               foreground: root.foreground
               fill: root.hoverFill
-              Accessible.role: Accessible.Button
+              Accessible.role: root.view.collapsible !== false ? Accessible.Button : Accessible.StaticText
               Accessible.name: groupBlock.group.label
-              Accessible.description: groupBlock.group.expanded ? "Expanded" : "Collapsed"
+              Accessible.description: root.view.collapsible === false ? "" : (groupBlock.group.expanded ? "Expanded" : "Collapsed")
 
               Text {
                 id: headerLabel
-                objectName: "settingsGroupLabel-" + groupBlock.group.id
+                objectName: root.namePrefix + "settingsGroupLabel-" + groupBlock.group.id
                 textFormat: Text.PlainText
                 anchors.left: parent.left
-                anchors.leftMargin: Style.space(6)
+                anchors.leftMargin: root.inset
                 anchors.right: headerGlyph.left
                 anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
                 elide: Text.ElideRight
-                text: groupBlock.group.label
-                color: root.foreground
+                // Collapsible: bold body text. Not (the Effect tab): the look of
+                // the panel's section headers (PanelSectionHeader), small caps.
+                readonly property bool section: root.view.collapsible === false
+                text: section ? groupBlock.group.label.toUpperCase() : groupBlock.group.label
+                color: section ? Qt.darker(root.foreground, 1.4) : root.foreground
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: section ? Style.font.caption : Style.font.body
                 font.bold: true
               }
               Text {
@@ -286,6 +309,7 @@ Column {
               }
               MouseArea {
                 anchors.fill: parent
+                enabled: root.view.collapsible !== false
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onEntered: root.cursorRequested("group", groupBlock.index)
@@ -342,9 +366,9 @@ Column {
 
                 Column {
                   id: rowColumn
-                  x: Style.space(6)
+                  x: root.inset
                   y: Style.space(2)
-                  width: parent.width - Style.space(12)
+                  width: parent.width - 2 * root.inset
                   spacing: Style.space(1)
 
                   // The label on the left (an action's label is its button),
@@ -638,10 +662,10 @@ Column {
 
             // Rows past the caps or skipped: said, never silently dropped.
             Text {
-              objectName: "settingsGroupTruncated-" + groupBlock.group.id
+              objectName: root.namePrefix + "settingsGroupTruncated-" + groupBlock.group.id
               textFormat: Text.PlainText
-              x: Style.space(6)
-              width: parent.width - Style.space(12)
+              x: root.inset
+              width: parent.width - 2 * root.inset
               wrapMode: Text.Wrap
               visible: text !== ""
               text: groupBlock.group.truncation
@@ -656,7 +680,7 @@ Column {
 
     // More below the edge: the bottom fades into the card.
     Rectangle {
-      objectName: "settingsMoreBelow"
+      objectName: root.namePrefix + "settingsMoreBelow"
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.bottom: parent.bottom
@@ -671,7 +695,7 @@ Column {
 
   Text {
     id: groupsNote
-    objectName: "settingsTruncated"
+    objectName: root.namePrefix + "settingsTruncated"
     textFormat: Text.PlainText
     width: parent.width
     wrapMode: Text.Wrap

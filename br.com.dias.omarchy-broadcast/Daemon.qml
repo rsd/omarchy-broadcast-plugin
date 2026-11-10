@@ -301,20 +301,24 @@ Singleton {
     // Cameras are compared raw: two ids that differ only in what sanitising
     // strips are still two cameras.
     var before = record.settings
+    var beforeRecord = record
     if (result.record !== record) record = result.record
     if (result.outcome === "snapshot") commandError = ""
     var after = record.settings
     // The settings are another camera's, or none: no queued write or reset
     // made for the camera shown before runs against it (each also names its
     // camera, see Model.settingIntentBound).
+    // (A write of a global setting is the daemon's, not the camera's: it stays.)
     if ((after ? after.camera : "") !== (before ? before.camera : "")) dropQueuedSettings()
     var sameSet = !!before && !!after && before.camera === after.camera && before.serial === after.serial
     if (result.outcome === "snapshot" || result.outcome === "error" || result.outcome === "settings_clear"
         || (result.outcome === "settings" && !sameSet)) {
       // A fresh picture of the daemon, another camera or another structure:
       // nothing of the user's pending moves applies to it, and no change is
-      // still due.
-      clearSettingDrafts()
+      // still due. Moves of a global setting survive another camera or
+      // structure (the daemon's own settings do not change with it).
+      if (result.outcome === "settings") clearSettingDrafts([beforeRecord, record])
+      else clearSettingDrafts()
       settingLinesDue = settingLines
     } else if (result.outcome === "settings_delta" || result.outcome === "settings") {
       // One more change read when the set's rev moved (a large change set is
@@ -358,12 +362,25 @@ Singleton {
     settingSent = sent
   }
 
-  function clearSettingDrafts() {
-    settingsTimer.stop()
-    settingsDeferred = false
-    settingDrafts = ({})
-    settingSent = ({})
-    settingSettling = ({})
+  // All drafts go; given `records` (the sets the settings were of), the
+  // drafts of global settings stay, with what was sent and what is settling
+  // for them.
+  function clearSettingDrafts(records) {
+    if (records === undefined) {
+      settingsTimer.stop()
+      settingsDeferred = false
+      settingDrafts = ({})
+      settingSent = ({})
+      settingSettling = ({})
+      return
+    }
+    settingDrafts = Model.keepGlobalSettings(settingDrafts, records)
+    settingSent = Model.keepGlobalSettings(settingSent, records)
+    settingSettling = Model.keepGlobalSettings(settingSettling, records)
+    if (Object.keys(settingDrafts).length === 0) {
+      settingsTimer.stop()
+      settingsDeferred = false
+    }
   }
 
   // ---- commands --------------------------------------------------------------
@@ -526,7 +543,10 @@ Singleton {
         settingsDeferred = true
         continue
       }
-      if (request({ verb: "setting", id: id, value: v, camera: camera })) {
+      var row = Model.findSetting(record, id)
+      var intent = { verb: "setting", id: id, value: v, camera: camera }
+      if (row && row.scope === "global") intent.scope = "global"
+      if (request(intent)) {
         settingSent = Model.withSetting(settingSent, id, v)
       } else {
         settingDrafts = Model.withSetting(settingDrafts, id, undefined)
@@ -546,7 +566,7 @@ Singleton {
   // written yet is dropped with the queued writes (Model.enqueueIntent).
   function resetSettings() {
     if (!record.settings || !request({ verb: "reset-settings", camera: record.settings.camera })) return false
-    clearSettingDrafts()
+    clearSettingDrafts([record])
     return true
   }
 
