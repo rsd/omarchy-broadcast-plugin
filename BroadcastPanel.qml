@@ -614,6 +614,22 @@ Item {
           font.pixelSize: Style.font.bodySmall
         }
 
+        // ---- the daemon's warning (it keeps streaming): the normal text
+        // colour behind a caution sign, never the urgent colour
+        Text {
+          objectName: "daemonWarning"
+          Accessible.role: Accessible.StaticText
+          Accessible.name: "Warning: " + root.record.warning
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          visible: root.available && root.record.warning !== ""
+          text: Model.GLYPH_WARNING + " " + root.record.warning
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
         // ---- the last control command's failure; its text and the path it
         // may end on read as one message, so they sit close together
         Column {

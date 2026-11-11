@@ -271,10 +271,62 @@ TestCase {
     verify(r.stats !== null, "the old record is not mutated")
   }
 
+  function test_warning_parsing_visual_and_tooltip() {
+    compare(snap({ warning: "effect blur unavailable: no module" }).warning, "effect blur unavailable: no module")
+    compare(snap({}).warning, "", "absent (an older daemon)")
+    compare(snap({ warning: 42 }).warning, "", "not a string")
+    compare(snap({ warning: null }).warning, "")
+    compare(snap({ warning: "a <b>w</b>&\nx" }).warning, "a bw/b x", "sanitised")
+    compare(Model.emptyRecord("connecting").warning, "")
+    var w = snap({ state: "active", consumers: 1, warning: "effect blur unavailable" })
+    compare(Model.visualKey(w), "active", "a warning never makes the error visual")
+    compare(Model.visualFor(Model.visualKey(w)).colorRole, "accent")
+    compare(Model.visualKey(snap({ warning: "w" })), "idle")
+    compare(Model.tooltipText(w), "Omarchy Broadcast: active \u00b7 Logitech MX Brio \u00b7 1 consumer \u00b7 warning: effect blur unavailable")
+    var both = Model.tooltipText(snap({ state: "idle", error: "e1", warning: "w1" }))
+    verify(both.indexOf("error: e1") !== -1 && both.indexOf("warning: w1") > both.indexOf("error: e1"), both)
+    verify(Model.tooltipText(snap({ state: "idle", warning: "w1" })).indexOf("error") === -1)
+    verify(Model.tooltipText(snap({ state: "idle", warning: new Array(200).join("w") })).length <= Model.TOOLTIP_CAP)
+  }
+
+  function test_status_reason_text() {
+    compare(Model.statusReasonText("Disabled", "Disabled"), "Disabled")
+    compare(Model.statusReasonText("Disabled", "disabled"), "Disabled")
+    compare(Model.statusReasonText("Disabled", ""), "Disabled")
+    compare(Model.statusReasonText("Disabled", "Disabled after crashing the daemon twice in a row"),
+            "Disabled: Disabled after crashing the daemon twice in a row")
+    compare(Model.statusReasonText("Unavailable", "Maxine SDK not found"), "Unavailable: Maxine SDK not found")
+    var off = Model.modulesSectionView(Model.withSetupRead(fullSetup(), "modules", Model.readModules(moduleLines([
+      moduleObj("org.example.hello", { status: "disabled", enabled: false, reason: "Disabled" })]))), setupRecord(10))
+    compare(off.rows[0].statusLine, "Disabled", "no Disabled: Disabled")
+    var d = Model.diagnosticsView(Model.withSetupRead(fullSetup(), "modules", Model.readModules(moduleLines([
+      moduleObj("org.example.hello", { name: "Hello", status: "disabled", enabled: false, reason: "Disabled" })]))), setupRecord(10))
+    compare(d.problems[0].reason, "Disabled")
+  }
+
   function test_off_tooltip_includes_error() {
     compare(Model.tooltipText(snap({ state: "off", enabled: false, error: "config <b>rejected</b>" })),
             "Omarchy Broadcast: off \u00b7 error: config brejected/b")
     compare(Model.tooltipText(snap({ state: "off", enabled: false })), "Omarchy Broadcast: off")
+  }
+
+  function test_error_and_off_tooltips_include_warning() {
+    compare(Model.tooltipText(snap({ state: "error", error: "loopback missing", warning: "w <b>1</b>" })),
+            "Omarchy Broadcast: error \u00b7 loopback missing \u00b7 warning: w b1/b")
+    compare(Model.tooltipText(snap({ state: "error", warning: "w1" })), "Omarchy Broadcast: error \u00b7 warning: w1")
+    compare(Model.tooltipText(snap({ state: "off", enabled: false, error: "e1", warning: "w1" })),
+            "Omarchy Broadcast: off \u00b7 error: e1 \u00b7 warning: w1")
+    compare(Model.tooltipText(snap({ state: "off", enabled: false, warning: "w1" })), "Omarchy Broadcast: off \u00b7 warning: w1")
+  }
+
+  function test_glyph_warning_is_alert_outline() {
+    compare(Model.GLYPH_WARNING.codePointAt(0), 0xF002A)
+  }
+
+  function test_diagnostics_view_shows_warning_row() {
+    var d = Model.diagnosticsView(fullSetup(), snap(rev10({ error: "e1", warning: "effect blur unavailable" })))
+    compare(JSON.stringify(d.rows), JSON.stringify([{ label: "D-Bus API", value: "revision 10" },
+      { label: "Daemon warning", value: "effect blur unavailable" }, { label: "Daemon error", value: "e1" }]))
   }
 
   function test_active_camera_not_in_list() {
