@@ -667,7 +667,7 @@ Item {
                   accent: root.accent
                   Accessible.role: Accessible.CheckBox
                   Accessible.name: modelData.title
-                  Accessible.description: modelData.statusText + (modelData.reason !== "" ? ". " + modelData.reason : "")
+                  Accessible.description: modelData.statusLine
                     + (modelData.note !== "" ? ". " + modelData.note : "")
                   Accessible.checkable: true
                   Accessible.checked: modelData.checked
@@ -697,7 +697,7 @@ Item {
                         text: moduleRow.modelData.title
                       }
                     }
-                    Note { text: moduleRow.modelData.statusText + (moduleRow.modelData.reason !== "" ? ": " + moduleRow.modelData.reason : "") }
+                    Note { text: moduleRow.modelData.statusLine }
                     Note { text: moduleRow.modelData.stagesText; font.pixelSize: Style.font.caption }
                     Note { text: moduleRow.modelData.note }
                   }

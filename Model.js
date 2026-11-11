@@ -87,6 +87,7 @@ var GLYPH_VIDEO = String.fromCodePoint(0xF0567)
 var GLYPH_VIDEO_OUTLINE = String.fromCodePoint(0xF0BDC)
 var GLYPH_VIDEO_OFF_OUTLINE = String.fromCodePoint(0xF0BDB)
 var GLYPH_ALERT = String.fromCodePoint(0xF0028)
+var GLYPH_WARNING = String.fromCodePoint(0xF002A) // mdi-alert-outline
 var GLYPH_RADIO_ON = String.fromCodePoint(0xF043E)
 var GLYPH_RADIO_OFF = String.fromCodePoint(0xF043D)
 var GLYPH_NEXT = String.fromCodePoint(0xF04AD)
@@ -201,6 +202,7 @@ function emptyRecord(link, linkText) {
     rawState: "",
     enabled: false,
     error: "",
+    warning: "",
     activeCamera: "",
     activeCameraName: "",
     consumers: -1,
@@ -277,6 +279,9 @@ function applyScalars(r, m) {
   r.rawState = sanitize(m.state, MODE_CAP)
   r.enabled = m.enabled === true
   r.error = sanitize(m.error, ERROR_CAP)
+  // Interface revision 11; absent from an older daemon, and not an error:
+  // the daemon keeps streaming (see visualFor).
+  r.warning = sanitize(m.warning, ERROR_CAP)
   r.activeCamera = rawId(m.active_camera)
   r.activeCameraName = sanitize(m.active_camera_name, NAME_CAP)
   r.consumers = count(m.consumers)
@@ -510,7 +515,7 @@ function visualKey(record) {
 // starting and active share the accent and differ by glyph (outline vs
 // filled); off and unavailable are both dimmed and differ by glyph. A
 // non-empty `error` outside the `error` state only shows in the tooltip and
-// the panel.
+// the panel. A `warning` never changes the visual: it follows `state` only.
 function visualFor(key) {
   switch (key) {
   case "off": return { key: key, glyph: GLYPH_WEBCAM_OFF, colorRole: "foreground", dimmed: true }
@@ -566,8 +571,10 @@ function tooltipText(record) {
     text = prefix + linkLabel(record)
   } else if (record.state === "error") {
     text = prefix + "error" + (record.error !== "" ? " \u00b7 " + sanitize(record.error, 80) : "")
+    if (record.warning !== "") text += " \u00b7 warning: " + sanitize(record.warning, 60)
   } else if (record.state === "off") {
     text = prefix + "off" + (record.error !== "" ? " \u00b7 error: " + sanitize(record.error, 60) : "")
+    if (record.warning !== "") text += " \u00b7 warning: " + sanitize(record.warning, 60)
   } else {
     var camera = activeCameraLabel(record)
     var parts = [prefix + record.state]
@@ -576,6 +583,7 @@ function tooltipText(record) {
     var effect = effectSummary(record)
     if (effect !== "") parts.push(effect)
     if (record.error !== "") parts.push("error: " + sanitize(record.error, 60))
+    if (record.warning !== "") parts.push("warning: " + sanitize(record.warning, 60))
     text = parts.join(" \u00b7 ")
   }
   return sanitize(text, TOOLTIP_CAP)
@@ -3307,12 +3315,21 @@ function readHint(result) {
   return result.ok === true ? "" : (result.error !== "" ? result.error : "The daemon could not be read")
 }
 
+// A status word and the daemon's reason as one line: "Status: reason", or the
+// status alone when the reason is empty or only repeats it (the daemon sends
+// status "disabled" with reason "Disabled" for a module the user turned off).
+function statusReasonText(statusText, reason) {
+  var r = typeof reason === "string" ? reason : ""
+  if (r === "" || r.toLowerCase() === String(statusText).toLowerCase()) return statusText
+  return statusText + ": " + r
+}
+
 function overriddenText(file) {
   return typeof file === "string" && file !== "" ? OVERRIDDEN_PREFIX + file : ""
 }
 
 // The Modules section: { hint, rows, truncation }; a row:
-//   { id, title, statusText, reason, stagesText, checked, switchable, note,
+//   { id, title, statusText, reason, statusLine, stagesText, checked, switchable, note,
 //     index }
 // `switchable` is false while a later config file sets the module's
 // enabled key (`note` says which file).
@@ -3328,10 +3345,11 @@ function modulesSectionView(setup, record) {
     var m = list.modules[i]
     var ids = []
     for (var s = 0; s < m.stages.length && s < MODULE_STAGE_CAP; s++) ids.push(m.stages[s].id)
+    var statusText = m.status === "available" ? "Available" : (m.status === "disabled" ? "Disabled" : "Unavailable")
     out.rows.push({
       id: m.id, title: m.name + (m.version !== "" ? " " + m.version : ""),
-      statusText: m.status === "available" ? "Available" : (m.status === "disabled" ? "Disabled" : "Unavailable"),
-      reason: m.reason, stagesText: ids.length > 0 ? "Stages: " + ids.join(", ") + (m.stagesTruncated ? ", …" : "") : "",
+      statusText: statusText,
+      reason: m.reason, statusLine: statusReasonText(statusText, m.reason), stagesText: ids.length > 0 ? "Stages: " + ids.join(", ") + (m.stagesTruncated ? ", …" : "") : "",
       checked: m.enabled, switchable: m.overriddenBy === "", note: overriddenText(m.overriddenBy), index: i
     })
   }
@@ -3500,6 +3518,7 @@ function diagnosticsView(setup, record) {
   var out = { rows: [], filesHint: "", dir: "", files: [], problems: [], problemsHint: "", commands: DIAGNOSTIC_COMMANDS.slice() }
   var linkedOk = available(record)
   out.rows.push({ label: "D-Bus API", value: linkedOk && record.interfaceRevision >= 0 ? "revision " + record.interfaceRevision : UNKNOWN })
+  if (linkedOk && record.warning !== "") out.rows.push({ label: "Daemon warning", value: record.warning })
   out.rows.push({ label: "Daemon error", value: linkedOk ? (record.error !== "" ? record.error : "None") : unavailableMessage(record).title })
   var gate = setupGate(record)
   var files = isPlainObject(setup) ? setup.files : null
@@ -3520,7 +3539,7 @@ function diagnosticsView(setup, record) {
     for (var m = 0; m < list.modules.length && m < SETUP_MODULE_CAP; m++) {
       var mod = list.modules[m]
       if (mod.status !== "available") {
-        out.problems.push({ title: mod.name, reason: (mod.status === "disabled" ? "Disabled" : "Unavailable") + (mod.reason !== "" ? ": " + mod.reason : "") })
+        out.problems.push({ title: mod.name, reason: statusReasonText(mod.status === "disabled" ? "Disabled" : "Unavailable", mod.reason) })
         continue
       }
       for (var s = 0; s < mod.stages.length && s < MODULE_STAGE_CAP; s++)

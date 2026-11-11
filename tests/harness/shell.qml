@@ -1030,6 +1030,32 @@ ShellRoot {
     h.grabStep(function() { return strip }, "bar-error.png")
     h.grabStep(function() { return A().popup }, "panel-error.png")
 
+    // a daemon warning is not an error: the state stays active, the line is not urgent
+    h.step("warning state", function() {
+      h.feed([stateLine({ state: "active", consumers: 1, active_camera: fhdId, active_camera_name: "FHD Camera", error: "",
+                          warning: "effect blur unavailable: no effect module provides the background effect" })])
+    }, function() { return S().record.state === "active" && S().record.warning !== "" })
+    h.wait(200)
+    h.step("warning glyph and panel", function() {
+      h.eq("not the alert glyph", A().iconButton.text, glyphOf("active"))
+      h.check("not the error glyph", A().iconButton.text !== glyphOf("error"))
+      h.eq("not urgent", String(A().iconButton.activeColor), String(Commons.Color.accent))
+      h.eq("visual key stays active", h.model.visualKey(S().record), "active")
+      h.eq("no ERROR status", h.content(A()).heroMeta, "active")
+      h.eq("daemon error line hidden", h.find(A(), "daemonError").visible, false)
+      var w = h.find(A(), "daemonWarning")
+      h.eq("warning line shown", w.visible, true)
+      h.check("warning text present", w.text.indexOf("effect blur unavailable") >= 0, w.text)
+      h.check("warning line not urgent", String(w.color) !== String(barA.urgent), String(w.color))
+      h.check("tooltip names it a warning", A().iconButton.tooltipText.indexOf("warning: effect blur unavailable") >= 0, A().iconButton.tooltipText)
+      h.check("tooltip does not call it an error", A().iconButton.tooltipText.indexOf("error") < 0, A().iconButton.tooltipText)
+    })
+    h.step("back to the error state", function() {
+      h.feed([stateLine({ state: "error", consumers: 1, active_camera: fhdId, active_camera_name: "FHD Camera",
+                          error: "loopback device not found", warning: "" })])
+    }, function() { return S().record.state === "error" && S().record.warning === "" })
+    h.step("the warning line is gone", function() { h.eq("hidden", h.find(A(), "daemonWarning").visible, false) })
+
     // pending re-arm: three asks while one runs -> the first and the latest
     h.step("slow commands", function() { h.writeFile("delay", ["0.6"]) }, function() { return h.writerIdle() })
     h.step("three asks in one turn", function() {
@@ -3121,6 +3147,8 @@ ShellRoot {
       h.eq("argv", JSON.stringify(writes()), JSON.stringify([["modules", "disable", "br.com.dias.maxine-vfx"]]))
       h.eq("switch off, from the daemon's list", find("moduleSwitch-0").checked, false)
       h.eq("its status", D().modulesView.rows[0].statusText, "Disabled")
+      h.eq("a bare Disabled, not Disabled: Disabled", D().modulesView.rows[0].statusLine, "Disabled")
+      h.eq("a real reason keeps its status", D().modulesView.rows[1].statusLine, "Disabled: Disabled after crashing the daemon twice in a row")
       h.check("read again after modules_changed", reads().indexOf("modules list --json") >= 0, JSON.stringify(reads()))
       h.eq("no error", D().statusText, "")
       h.eq("the panel's error untouched", S().commandError, "")
