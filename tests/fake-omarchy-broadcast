@@ -36,6 +36,10 @@
 #     only global rows, settings-camera is empty and the lines carry camera "".
 #     Values: decimal (int), true/false (bool), an option value (enum), -
 #     (action).
+#     An option value may hold "@" and "/" (interface revision 12's capture
+#     modes, `camera.capture.mode`: auto:Automatic,3840x2160@30:3840x2160 · 30 fps,
+#     up to 16 options with one labelled "(gone)"); the fake checks a
+#     written enum against the options as it is, so a mode is a plain write.
 #     A feed line that is exactly {"fake":"settings-set"} is not printed:
 #     the settings set is, alone, as the real CLI prints it after a serial
 #     change (it reads the settings again, with no snapshot before them).
@@ -84,7 +88,9 @@
 # module object starts {"id":"ID", ...; `order set` rewrites the order line
 # (every stage movable, but the first up and the last down); `config set`
 # replaces the "value" of the row that starts {"id":"KEY","value":...
-# (true, false and numbers as given, anything else quoted); then a
+# (true, false and numbers as given, anything else quoted: an output mode
+# such as 1920x1080@60, `output.mode` of interface revision 12, is a string;
+# an enum written is not checked against its options, the dialog does); then a
 # `modules_changed` (modules, order) or `config_changed` (config) line with
 # the next serial of $FAKE_OB_DIR/setup-serial is appended to the feed, as
 # the daemon's signal would reach a watch.

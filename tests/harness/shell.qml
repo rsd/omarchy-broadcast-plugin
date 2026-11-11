@@ -568,6 +568,14 @@ ShellRoot {
     m.cameras_truncated = false
     return JSON.stringify(m)
   }
+  // A warning of several clauses and one line break, near the 512 bytes the
+  // daemon allows (interface revision 12 sets clauses like these).
+  function longWarning() {
+    return "Output 1280x720@30 applies when zoom, obs release the virtual camera; capture mode 3840x2160@30 is not offered by "
+      + "this camera, so it streams at 1920x1080@30 instead; effect blur, noise removal unavailable: NVIDIA Maxine video effects: Disabled"
+      + "\nOutput rate 60 fps cannot be made by frame generation, which no module provides; the video is sent at 30 fps; "
+      + "close the applications that hold the virtual camera, then start it again"
+  }
   function stateLine(o) {
     var m = scalars(o || {})
     m.v = 1
@@ -1050,6 +1058,25 @@ ShellRoot {
       h.check("tooltip names it a warning", A().iconButton.tooltipText.indexOf("warning: effect blur unavailable") >= 0, A().iconButton.tooltipText)
       h.check("tooltip does not call it an error", A().iconButton.tooltipText.indexOf("error") < 0, A().iconButton.tooltipText)
     })
+    // revision 12: a warning of several clauses (and one line break), near the 512 bytes
+    // the daemon allows: wrapped whole in the panel, never cut to one line
+    h.step("a long, multi-line warning", function() {
+      h.feed([stateLine({ state: "active", consumers: 1, active_camera: fhdId, active_camera_name: "FHD Camera", error: "",
+                          warning: longWarning() })])
+    }, function() { return S().record.warning.indexOf("start it again") >= 0 })
+    h.wait(200)
+    h.step("the long warning wraps in full", function() {
+      var w = h.find(A(), "daemonWarning")
+      h.eq("shown", w.visible, true)
+      h.check("under 512 characters, and none cut", longWarning().length < 512 && w.text.indexOf("start it again") >= 0 && w.text.indexOf("\u2026") < 0, w.text.length)
+      h.check("the line break reads as a space", w.text.indexOf("\n") < 0 && w.text.indexOf("Disabled Output rate") >= 0, w.text)
+      h.check("wrapped onto several lines", w.lineCount > 3, w.lineCount)
+      h.check("not elided or truncated", !w.truncated, "truncated")
+      h.check("the Text is as tall as its lines", w.height >= w.contentHeight - 0.5, w.height + " for " + w.contentHeight)
+      h.check("within its column", w.width <= w.parent.width + 0.5, w.width + " of " + w.parent.width)
+      h.fits(A(), "Status tab with a long warning")
+    })
+    h.grabStep(function() { return A().popup }, "panel-long-warning.png")
     h.step("back to the error state", function() {
       h.feed([stateLine({ state: "error", consumers: 1, active_camera: fhdId, active_camera_name: "FHD Camera",
                           error: "loopback device not found", warning: "" })])
@@ -2795,6 +2822,69 @@ ShellRoot {
       h.feed([snapshotLine(rev7({}))])
     }, function() { return !S().commandBusy && h.writerIdle() })
 
+    // revision 12: the Capture group, first, with the camera's capture mode:
+    // "auto", the modes it offers and, at most, one it no longer does (16)
+    function captureOptions() {
+      var modes = ["3840x2160@30", "3840x2160@24", "2560x1440@30", "1920x1200@30", "1920x1080@60", "1920x1080@30", "1920x1080@24",
+                   "1600x900@30", "1280x960@30", "1280x720@60", "1280x720@30", "1024x576@30", "960x540@30", "640x360@30"]
+      var opts = ["auto:Automatic"]
+      for (var i = 0; i < modes.length; i++) {
+        var wh = modes[i].split("@")
+        opts.push(modes[i] + ":" + wh[0] + " \u00b7 " + wh[1] + " fps")
+      }
+      opts.push("4096x2160@30:4096x2160 \u00b7 30 fps (gone)")
+      return opts.join(",")
+    }
+    h.step("settings: a revision-12 camera with the Capture group first", function() {
+      h.writeFile("settings-state", [stateRow("capture", "Capture", "camera.capture.mode", "enum", "Capture mode", "3840x2160@30", "auto",
+                                              { options: captureOptions(), stored: true })].concat(brioState()))
+      h.feed([snapshotLine(rev7({ interface_revision: 12 }))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 5 && S().record.settings.groups[0].id === "capture" && h.writerIdle() })
+    h.wait(250)
+    h.step("settings: the capture mode is a dropdown of 16, labelled with a dot", function() {
+      var r = S().record.settings.groups[0].rows[0]
+      h.eq("the row", r.id + ":" + h.model.settingWidget(r) + ":" + r.options.length, "camera.capture.mode:dropdown:16")
+      h.eq("the first group, the first option", S().record.settings.groups[0].label + "/" + r.options[0].value + "/" + r.options[0].label, "Capture/auto/Automatic")
+      h.eq("a mode's label", r.options[1].value + "/" + r.options[1].label, "3840x2160@30/3840x2160 \u00b7 30 fps")
+      h.eq("the mode that is gone keeps its words", r.options[15].label, "4096x2160 \u00b7 30 fps (gone)")
+      openOnly(["capture"])
+    }, function() { return !!h.find(A(), "settingDropdown-camera.capture.mode") })
+    h.wait(250)
+    h.step("settings: the capture mode's box", function() {
+      var dd = h.find(A(), "settingDropdown-camera.capture.mode")
+      h.eq("its value", dd.value + "/" + dd.currentLabel(), "3840x2160@30/3840x2160 \u00b7 30 fps")
+      h.eq("the row's label", h.find(A(), "settingLabel-camera.capture.mode").text, "Capture mode")
+      // the widest label (a mode that is gone) fits the box and the list rows, so
+      // "(gone)" is never cut off
+      var probe = Qt.createQmlObject('import QtQuick; TextMetrics { }', h, "labelProbe")
+      probe.font.family = Commons.Style.font.family
+      probe.font.pixelSize = Commons.Style.font.body
+      var widest = 0
+      for (var i = 0; i < dd.options.length; i++) { probe.text = dd.options[i].label; widest = Math.max(widest, probe.advanceWidth) }
+      probe.destroy()
+      var room = dd.width - 2 * Commons.Style.spacing.controlPaddingX - 8 // the list's border and padding
+      h.check("the widest label fits a list row (" + Math.round(widest) + " in " + Math.round(room) + ")", widest <= room, widest + " in " + room)
+      var lbl = h.find(A(), "settingLabel-camera.capture.mode")
+      h.check("the label's text is not elided by the box", lbl.implicitWidth <= lbl.width + 0.5, lbl.implicitWidth + " in " + lbl.width)
+      h.fits(A(), "Camera tab with the Capture group open")
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.capture.mode"))
+      keys.mouseMove(h.find(A(), "settingsTitle"), 1, 1)
+      h.key(Qt.Key_Return)
+    }, function() { return h.find(A(), "settingDropdown-camera.capture.mode").popupOpen })
+    h.step("settings: the capture list is open; Down, Enter", function() {
+      h.eq("nothing written by opening it", setArgs().length, 0)
+      h.key(Qt.Key_Down)
+      h.key(Qt.Key_Return)
+    }, function() { return value("camera.capture.mode") === "3840x2160@24" && !h.find(A(), "settingDropdown-camera.capture.mode").popupOpen }, 3000)
+    h.step("settings: a capture mode is written by settings set", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.capture.mode", "3840x2160@24")]))
+      h.eq("the box shows the daemon's word", h.find(A(), "settingDropdown-camera.capture.mode").value, "3840x2160@24")
+      h.check("the keyboard is the panel's again", h.catcher(A()).activeFocus)
+      h.writeFile("settings-state", brioState())
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !S().commandBusy && S().record.settings.groups[0].id === "image" && h.writerIdle() })
+
     // global settings (revision 9): the Effect tab draws the background
     // effect's choices from its mode setting, the others generically below
     // them; the Camera tab never does
@@ -2973,12 +3063,29 @@ ShellRoot {
     for (var k in o) m[k] = o[k]
     return m
   }
-  function setupConfigLines() {
+  // The 16 options of output.mode as a revision-12 daemon computes them (the
+  // selected camera's 16:9 sizes, each at four rates; 60 fps generated).
+  function outputModeOptions() {
+    var sizes = ["3840x2160", "2560x1440", "1920x1080", "1280x720"]
+    var rates = [15, 24, 30, 60]
+    var out = []
+    for (var i = 0; i < sizes.length; i++)
+      for (var j = 0; j < rates.length; j++)
+        out.push({ value: sizes[i] + "@" + rates[j], label: sizes[i] + " \u00b7 " + rates[j] + " fps" + (rates[j] === 60 ? " (generated)" : "") })
+    return out
+  }
+  // `editableMode`: the output.mode row of interface revision 12, an editable
+  // enum; else the read-only text of an older daemon.
+  function setupConfigLines(editableMode) {
+    var modeRow = editableMode === true
+      ? cfg("output.mode", "enum", "1920x1080@30", { label: "Output size and rate", "default": "1920x1080@30", apply: "reload",
+            description: "Size and frame rate of the virtual camera", options: outputModeOptions() })
+      : cfg("output.mode", "string", "1920x1080@30", { label: "Mode", editable: false, description: "The output size and rate" })
     var groups = [
       { id: "output", label: "Output", settings: [
         cfg("output.format", "enum", "nv12", { label: "Format", "default": "nv12", apply: "reload", description: "The pixel format apps receive",
             options: [{ value: "nv12", label: "NV12" }, { value: "yuyv", label: "YUYV" }] }),
-        cfg("output.mode", "string", "1920x1080@30", { label: "Mode", editable: false, description: "The output size and rate" })] },
+        modeRow] },
       { id: "lifecycle", label: "Lifecycle", settings: [
         cfg("lifecycle.idle_grace_s", "int", 5, { label: "Idle grace", "default": 5, min: 0, max: 60, step: 1, unit: "s" }),
         cfg("lifecycle.start_debounce_ms", "int", 200, { label: "Start debounce", min: 0, max: 5000, step: 10, unit: "ms",
@@ -3191,19 +3298,26 @@ ShellRoot {
     h.step("setup: 3 shows Backends", function() { h.key("3") }, function() { return D().section === "backends" })
     h.wait(250)
     h.step("setup: Backends", function() {
+      // A few short choices are buttons; the pin's long module name makes it a dropdown (Model.fitsSegmented)
       h.eq("rows", D().backendsView.groups.map(function(g) { return g.rows.map(function(r) { return r.id + ":" + r.widget }).join(",") }).join("|"),
-           "modules.profile:choices,modules.pin.background:choices")
+           "modules.profile:choices,modules.pin.background:dropdown")
       h.eq("Quality selected", find("configChoice-modules.profile-0").selected, true)
-      var flow = find("configChoices-modules.pin.background")
-      var pinRow = find("configRow-modules.pin.background")
-      h.eq("the pin's choices start at the left", flow.mapToItem(pinRow, 0, 0).x, find("configChoices-modules.profile").mapToItem(find("configRow-modules.profile"), 0, 0).x)
+      var flow = find("configChoices-modules.profile")
+      var profileRow = find("configRow-modules.profile")
       h.check("on their own line under the label", flow.y > 0, flow.y)
-      h.check("across the whole row", flow.width > pinRow.width * 0.8, flow.width + " of " + pinRow.width)
-      h.check("each chip within the row", find("configChoice-modules.pin.background-2").width <= flow.width + 0.5)
-      h.eq("a chip that fits has no tooltip", find("configChoice-modules.pin.background-2").tooltipText, "")
-      h.eq("a row of choices reads as a combo box", pinRow.Accessible.role, Accessible.ComboBox)
-      h.eq("a chip as a radio button", find("configChoice-modules.pin.background-1").Accessible.role, Accessible.RadioButton)
-      h.eq("Automatic selected", find("configChoice-modules.pin.background-0").selected, true)
+      h.check("across the whole row", flow.width > profileRow.width * 0.8, flow.width + " of " + profileRow.width)
+      h.check("each chip within the row", find("configChoice-modules.profile-1").width <= flow.width + 0.5)
+      h.eq("a chip that fits has no tooltip", find("configChoice-modules.profile-1").tooltipText, "")
+      h.eq("a row of choices reads as a combo box", profileRow.Accessible.role, Accessible.ComboBox)
+      h.eq("a chip as a radio button", find("configChoice-modules.profile-1").Accessible.role, Accessible.RadioButton)
+      var pinRow = find("configRow-modules.pin.background")
+      var dd = find("configDropdown-modules.pin.background")
+      h.eq("the pin has no chips", find("configChoices-modules.pin.background").visible, false)
+      h.eq("the pin's box shows Automatic", dd.value + "/" + dd.currentLabel(), "/Automatic")
+      h.eq("its three choices", dd.options.length, 3)
+      h.eq("a dropdown row reads as a combo box", pinRow.Accessible.role, Accessible.ComboBox)
+      var ddBox = dd.mapToItem(pinRow, 0, 0)
+      h.check("on the label's line, at the right", ddBox.x > pinRow.width * 0.3 && ddBox.x + dd.width <= pinRow.width + 0.5, ddBox.x + "+" + dd.width + " in " + pinRow.width)
       h.markLog()
       D().setCursor("config", 0)
       h.eq("lands on the current choice", D().choiceCursor, 0)
@@ -3211,16 +3325,15 @@ ShellRoot {
       h.eq("Battery has the cursor", find("configChoice-modules.profile-1").hasCursor, true)
       h.key(Qt.Key_Space)
     }, function() { return writes().length >= 1 && !S().setupBusy && h.model.findConfigRow(S().setup.config, "modules.profile").value === "battery" }, 8000)
-    // a narrow screen: the longest chip is wider than the row
+    // a narrow screen: the dropdown stays inside its row
     h.step("setup: Backends on a narrow screen", function() { h.notes.loader.width = 470 })
     h.wait(250)
-    h.step("setup: a chip wider than the row elides, with its tooltip", function() {
-      var flow = find("configChoices-modules.pin.background")
-      var longChip = find("configChoice-modules.pin.background-2")
-      var label = h.model.findConfigRow(S().setup.config, "modules.pin.background").options[2].label
-      h.check("it fits the row, elided", longChip.width <= flow.width + 0.5 && longChip.width < longChip.implicitWidth,
-              longChip.width + "/" + longChip.implicitWidth + " in " + flow.width)
-      h.eq("its tooltip has the whole name", longChip.tooltipText, label)
+    h.step("setup: a dropdown stays within the row on a narrow screen", function() {
+      var pinRow = find("configRow-modules.pin.background")
+      var dd = find("configDropdown-modules.pin.background")
+      var at = dd.mapToItem(pinRow, 0, 0)
+      h.check("inside the row", at.x >= 0 && at.x + dd.width <= pinRow.width + 0.5, at.x + "+" + dd.width + " in " + pinRow.width)
+      h.check("not collapsed", dd.width >= 100, dd.width)
       h.notes.loader.width = 900
     })
     h.wait(250)
@@ -3229,11 +3342,22 @@ ShellRoot {
       h.eq("Battery selected", find("configChoice-modules.profile-1").selected, true)
       h.eq("its apply note", D().backendsView.groups[0].rows[0].applyText, "Applies at next camera start")
       h.markLog()
-      var chip = find("configChoice-modules.pin.background-1")
-      keys.mouseClick(chip, chip.width / 2, chip.height / 2)
-    }, function() { return writes().length >= 1 && !S().setupBusy }, 8000)
+      D().setCursor("config", 1)
+      h.eq("the dropdown draws the one highlight", find("configDropdown-modules.pin.background").hasCursor + "/" + find("configRow-modules.pin.background").hasCursor, "true/false")
+      // the mouse away from where the list opens (its rows follow the mouse)
+      keys.mouseMove(find("setupTitle"), 1, 1)
+      h.key(Qt.Key_Return)
+    }, function() { return find("configDropdown-modules.pin.background").popupOpen })
+    h.step("setup: the pin's list is open; Down, Enter", function() {
+      h.eq("nothing written by opening it", writes().length, 0)
+      h.key(Qt.Key_Down)
+      h.key(Qt.Key_Return)
+    }, function() { return writes().length >= 1 && !S().setupBusy && !find("configDropdown-modules.pin.background").popupOpen }, 8000)
     h.step("setup: a pin is a config write of the module's id", function() {
       h.eq("argv", JSON.stringify(writes()), JSON.stringify([["config", "set", "--", "modules.pin.background", "br.com.dias.maxine-vfx"]]))
+      h.eq("the box shows the daemon's word", find("configDropdown-modules.pin.background").value, "br.com.dias.maxine-vfx")
+      h.eq("its apply note", D().backendsView.groups[0].rows[1].applyText, "Applies at next camera start")
+      h.check("the keyboard is the dialog's again", D().keyCatcher.activeFocus)
     })
     shot("setup-backends.png")
     // Daemon: rows by type
@@ -3294,6 +3418,67 @@ ShellRoot {
       h.writeFile("exit", ["0"])
       h.removeFile("stderr")
     }, function() { return h.writerIdle() })
+    // Interface revision 12: output.mode is an editable enum of up to 16 options
+    // the daemon computes: too many for buttons, so a dropdown
+    h.step("setup: a revision-12 daemon publishes output.mode as an enum", function() {
+      h.writeFile("config-show", setupConfigLines(true))
+      h.feed(['{"v":1,"type":"config_changed","serial":50}'])
+    }, function() {
+      var r = h.model.findConfigRow(S().setup.config, "output.mode")
+      return !!r && r.type === "enum" && !S().readArmed && S().readQueue.length === 0 && h.writerIdle()
+    }, 8000)
+    h.wait(250)
+    h.step("setup: output.mode is a dropdown with its 16 options", function() {
+      var row = D().daemonView.groups[0].rows[1]
+      h.eq("the row", row.id + ":" + row.widget + ":" + row.options.length, "output.mode:dropdown:16")
+      var dd = find("configDropdown-output.mode")
+      h.eq("the box is shown", dd.visible, true)
+      h.eq("no text value, no buttons", find("configValue-output.mode").visible + "/" + find("configChoices-output.mode").visible, "false/false")
+      h.eq("its value and label", dd.value + "/" + dd.currentLabel(), "1920x1080@30/1920x1080 \u00b7 30 fps")
+      h.eq("a generated rate keeps its words", dd.options[15].label, "1280x720 \u00b7 60 fps (generated)")
+      h.eq("a combo box", find("configRow-output.mode").Accessible.role, Accessible.ComboBox)
+      h.eq("its apply text", row.applyText, "Applies at next camera start")
+      h.eq("the stops: the dropdown is one", D().stops.filter(function(x) { return x.kind === "config" }).length, 4)
+      h.markLog()
+      D().setCursor("config", 1)
+      h.eq("the box draws the one highlight", dd.hasCursor + "/" + find("configRow-output.mode").hasCursor, "true/false")
+      h.key(Qt.Key_Right)
+      h.eq("Left/Right do not write", writes().length, 0)
+      keys.mouseMove(find("setupTitle"), 1, 1)
+      h.key(Qt.Key_Return)
+    }, function() { return find("configDropdown-output.mode").popupOpen })
+    h.step("setup: the output list is open; Down, Enter writes the mode", function() {
+      h.eq("nothing written by opening it", writes().length, 0)
+      h.key(Qt.Key_Down)
+      h.key(Qt.Key_Return)
+    }, function() { return writes().length >= 1 && !S().setupBusy && !find("configDropdown-output.mode").popupOpen }, 8000)
+    h.step("setup: the dropdown wrote output.mode by config set", function() {
+      h.eq("argv", JSON.stringify(writes()), JSON.stringify([["config", "set", "--", "output.mode", "1920x1080@60"]]))
+      h.eq("the daemon's word shows", find("configDropdown-output.mode").value, "1920x1080@60")
+      h.check("the keyboard is the dialog's again", D().keyCatcher.activeFocus)
+      h.markLog()
+      // the same value again writes nothing
+      D().chooseConfigValue(D().daemonView.groups[0].rows[1], "1920x1080@60")
+      h.eq("the current option is not written again", writes().length, 0)
+      // a value that is not an option is refused before any command runs
+      h.eq("an unknown value is refused", D().chooseConfigValue(D().daemonView.groups[0].rows[1], "800x600@30"), false)
+      h.eq("nothing written", writes().length, 0)
+    })
+    shot("setup-output-mode.png")
+    // back to the revision-10 daemon's read-only text, as the steps after expect
+    h.step("setup: output.mode read-only again", function() {
+      h.writeFile("config-show", setupConfigLines())
+      h.feed(['{"v":1,"type":"config_changed","serial":51}'])
+    }, function() {
+      var r = h.model.findConfigRow(S().setup.config, "output.mode")
+      return !!r && r.type === "string" && !S().readArmed && S().readQueue.length === 0 && h.writerIdle()
+    }, 8000)
+    h.wait(250)
+    h.step("setup: an older daemon's output.mode is text", function() {
+      h.eq("shown as a value", find("configValue-output.mode").visible, true)
+      h.eq("no dropdown", find("configDropdown-output.mode").visible, false)
+      h.eq("the stops again", D().stops.filter(function(x) { return x.kind === "config" }).length, 3)
+    })
     // Diagnostics, read-only
     h.step("setup: 5 shows Diagnostics", function() { h.key("5") }, function() { return D().section === "diagnostics" })
     h.wait(250)
@@ -3358,6 +3543,26 @@ ShellRoot {
       h.check("the keyboard is still the dialog's", D().keyCatcher.activeFocus)
       edit.deselect()
     })
+    // a long warning (revision 12 sets several clauses) is drawn under its label, in full
+    h.step("setup: Diagnostics with a long daemon warning", function() {
+      var m = rev(10)
+      m.warning = longWarning()
+      h.feed([snapshotLine(m)])
+    }, function() { return S().record.warning.indexOf("start it again") >= 0 })
+    h.wait(250)
+    h.step("setup: the warning wraps under its label", function() {
+      var row = find("diagnosticRow-Daemon warning")
+      var v = h.findByName(row, "infoValue")
+      h.check("a row for it", !!row && !!v, "none")
+      h.eq("the whole text", v.text, S().record.warning)
+      h.check("wrapped onto several lines, none elided", v.lineCount > 2 && !v.truncated, v.lineCount + " lines")
+      h.check("under the label, as wide as the row", v.y > 0 && Math.abs(v.width - row.width) < 0.5, v.y + ", " + v.width + " of " + row.width)
+      h.check("the row is tall enough for it", row.height >= v.y + v.contentHeight - 0.5, row.height + " for " + (v.y + v.contentHeight))
+      h.eq("a short value stays on its line", h.findByName(find("diagnosticRow-D-Bus API"), "infoValue").y, 0)
+      var m = rev(10)
+      h.feed([snapshotLine(m)])
+    }, function() { return S().record.warning === "" })
+    h.wait(250)
     shot("setup-diagnostics.png")
     // Escape closes through the shell; the reads stop
     h.step("setup: Escape", function() {
