@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
-  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, the background effect and the video effects' settings as the daemon's modules offer them, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom), a live preview, live stream figures, and a setup dialog for the effect modules, their order and backends, the daemon's configuration and diagnostics. Effects need omarchy-broadcastd 0.24.0, the configuration in the setup dialog 0.25.0.",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, the background effect and the video effects' settings as the daemon's modules offer them, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom), a live preview, live stream figures, the Omarchy Broadcast Mic (its noise and echo processing as the daemon's audio modules offer it, its input device, the default-microphone choice, and an indicator while apps record from it), and a setup dialog for the effect modules, their order and backends, the daemon's configuration and diagnostics. Effects need omarchy-broadcastd 0.24.0, the configuration in the setup dialog 0.25.0, the microphone D-Bus API revision 13.",
   "kinds": [
     "bar-widget",
     "overlay"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omarchy Broadcast",
-    "description": "Shows the virtual camera's state; left click opens the panel with the live preview, effects, cameras and status, middle click turns the camera on or off, right click opens the setup dialog (modules, stage order, backends, daemon configuration, diagnostics).",
+    "description": "Shows the virtual camera's state, and a microphone glyph while apps record from the Omarchy Broadcast Mic; left click opens the panel with the live preview, effects, cameras, the microphone and status, middle click turns the camera on or off, right click opens the setup dialog (modules, stage order, backends, daemon configuration, diagnostics).",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -56,7 +56,7 @@
         "key": "panelTab",
         "type": "enum",
         "label": "Panel tab",
-        "options": ["effect", "camera", "status"],
+        "options": ["effect", "camera", "mic", "status"],
         "defaultValue": "effect",
         "description": "The tab the panel shows under the preview; the panel remembers the last one chosen. Any other value reads as effect."
       }

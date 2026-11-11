@@ -8,7 +8,7 @@ import "Model.js" as Model
 
 // The popup's content, top to bottom: the header (state and switch), the
 // daemon's error or the last command's failure, the live preview in a fixed
-// 16:9 area with its switch and rate on one row under it, then three tabs:
+// 16:9 area with its switch and rate on one row under it, then four tabs:
 //   Effect  the background effect's choices as the daemon's settings schema
 //           offers them (the options of its mode setting; none named here),
 //           the background image it holds, then the daemon's other global
@@ -18,6 +18,13 @@ import "Model.js" as Model
 //           the daemon publishes them (SettingsView: groups that open and
 //           close, a widget per type, Reset to defaults), or the hint that
 //           replaces them;
+//   Mic     the Omarchy Broadcast Mic: its own switch (`mic on|off`), its
+//           state, the apps recording from it, the delay its processing
+//           adds, the modules it runs on and its error, then its settings
+//           as the daemon publishes them (the groups of surface "mic":
+//           processing, input device, the default-microphone actions, the
+//           audio modules' effects), drawn by the same renderer, or the
+//           hint that replaces it all (a daemon below revision 13);
 //   Status  state, camera, consumers (by kind where the daemon splits them),
 //           output mode, PipeWire output, the daemon's interface revision,
 //           and the live figures while active.
@@ -47,8 +54,8 @@ import "Model.js" as Model
 // and the stops of the tab shown (Model.cursorStops); Left/Right (or h/l)
 // change the tab on the tab row, walk the preview-rate, effect and a
 // setting's choices (nothing is written until Enter or Space), move a
-// slider, and open (Right) or close (Left) a settings group; 1, 2 and 3 show
-// the Effect, Camera and Status tab from anywhere; Enter or Space activates
+// slider, and open (Right) or close (Left) a settings group; 1 to 4 show
+// the Effect, Camera, Mic and Status tab from anywhere; Enter or Space activates
 // (a group header opens or closes, a choice is made, a dropdown opens its
 // list, a switch flips, an action runs); Escape closes; Tab moves to the
 // neighbouring panel. The mouse moves the same cursor, so only one highlight
@@ -64,6 +71,13 @@ Item {
   // so a widget re-injected with the same entry never undoes a choice the
   // shell could not store.
   property string storedTab: Model.PANEL_TAB_DEFAULT
+  // A tab asked for this opening only (the bar's microphone glyph asks for
+  // "mic"): shown without being stored; "" once the panel closes, which
+  // brings back the tab shown before it (tabBeforeRequest) unless the user
+  // chose another one meanwhile.
+  property string requestedTab: ""
+  property string tabBeforeRequest: ""
+  property bool ready: false
   // The card's room for this content on the screen (the popup's available
   // height less its padding); 0: unknown, no cap. Bounds the settings area.
   property real contentRoom: 0
@@ -102,9 +116,13 @@ Item {
   // effect choice, which has a row of its own).
   readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)
   readonly property bool genericEffect: Model.effectSettingsShown(effectSettings)
+  // The Mic tab: the microphone's own part, then its settings (the groups
+  // of surface "mic"), drawn generically.
+  readonly property var micView: Model.micView(record)
+  readonly property var micSettings: Model.micSettingsView(record, Daemon.settingDrafts)
   // What the keyboard walks and the rows act on: the tab shown's section.
-  readonly property var activeView: tab === "effect" ? effectSettings : settingsView
-  readonly property SettingsView activeBlock: tab === "effect" ? effectSettingsBlock : settingsBlock
+  readonly property var activeView: tab === "effect" ? effectSettings : (tab === "mic" ? micSettings : settingsView)
+  readonly property SettingsView activeBlock: tab === "effect" ? effectSettingsBlock : (tab === "mic" ? micSettingsBlock : settingsBlock)
   // A slider is held: the Flickables must not take the drag over.
   property int slidersHeld: 0
 
@@ -115,7 +133,7 @@ Item {
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings)
+  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
@@ -262,6 +280,7 @@ Item {
     if (value === undefined || !root.available) return false
     root.tabCursor = index
     if (value === root.tab) return false
+    root.tabBeforeRequest = ""
     root.showTab(value)
     root.settingsRequested({ panelTab: value })
     return true
@@ -350,10 +369,18 @@ Item {
     return Daemon.setEnabled(!root.record.enabled)
   }
 
+  // The microphone's own switch: `mic on` or `mic off`, by what the daemon
+  // reports. Nothing while its last on/off is still to come (Daemon.micBusy).
+  function toggleMic() {
+    if (!root.available || !root.micView.visible || Daemon.micBusy) return false
+    return Daemon.setMicHost(!root.micView.hostOn)
+  }
+
   function activateCursor() {
     var stop = currentStop
     if (!stop) return
     if (stop.kind === "switch") toggleSwitch()
+    else if (stop.kind === "mic-host") toggleMic()
     else if (stop.kind === "preview") togglePreview()
     else if (stop.kind === "fps") chooseFps(fpsCursor)
     else if (stop.kind === "tabs") chooseTab(tabCursor)
@@ -401,6 +428,7 @@ Item {
     else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index), true)
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
+    else if (stop.kind === "mic-host") scrollItemIntoView(micHostLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
   }
@@ -412,7 +440,24 @@ Item {
   }
   onStopsChanged: if (cursorIndex >= stops.length) cursorIndex = Math.max(0, stops.length - 1)
   onStoredTabChanged: showTab(storedTab)
-  Component.onCompleted: showTab(storedTab)
+  onRequestedTabChanged: {
+    if (requestedTab !== "") {
+      if (tabBeforeRequest === "") tabBeforeRequest = ready ? tab : Model.panelTabValue(storedTab)
+      showTab(requestedTab)
+    } else {
+      var back = tabBeforeRequest
+      tabBeforeRequest = ""
+      if (back !== "") showTab(back)
+    }
+  }
+  Component.onCompleted: {
+    showTab(storedTab)
+    if (requestedTab !== "") {
+      tabBeforeRequest = tab
+      showTab(requestedTab)
+    }
+    ready = true
+  }
 
   // A label and a value on one line, the value right-aligned and elided.
   component InfoRow: Item {
@@ -1199,6 +1244,152 @@ Item {
                 onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
                 onGroupToggled: function(id) { root.toggleGroup(id) }
                 onResetRequested: root.resetSettings()
+                onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
+              }
+            }
+          }
+
+          // ---- Mic: the microphone's own switch and state, then its
+          // settings (processing, input device, the default microphone and
+          // the audio modules' effects), or why there are none
+          Column {
+            id: micTab
+            objectName: "micTab"
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.tab === "mic"
+
+            // A daemon (or CLI) that predates the microphone.
+            Text {
+              objectName: "micHint"
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.Wrap
+              visible: !root.micView.visible && text !== ""
+              text: root.micView.hint
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            // The microphone itself, on or off (`mic on|off`).
+            Item {
+              id: micHostLine
+              objectName: "micHostRow"
+              width: parent.width
+              visible: root.micView.visible
+              implicitHeight: Math.max(micHostLabel.implicitHeight, micSwitch.implicitHeight)
+
+              Text {
+                id: micHostLabel
+                textFormat: Text.PlainText
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: Model.MIC_PRODUCT
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              ToggleSwitch {
+                id: micSwitch
+                objectName: "micSwitch"
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: root.micView.hostOn
+                busy: Daemon.micBusy
+                hasCursor: root.hasCursor("mic-host", -1)
+                foreground: root.foreground
+                accent: root.accent
+                onHovered: function(on) { if (on) root.setCursor("mic-host", -1) }
+                onToggled: root.toggleMic()
+                Accessible.role: Accessible.CheckBox
+                Accessible.name: Model.MIC_PRODUCT
+                Accessible.checkable: true
+                Accessible.checked: root.micView.hostOn
+
+                PanelToolTip {
+                  visible: micSwitch.containsMouse
+                  text: root.micView.hostOn ? "Turn the microphone off; the previous default microphone comes back if Omarchy Broadcast Mic was the default"
+                    : "Turn the microphone on; it starts again at every login"
+                  fontFamily: root.fontFamily
+                }
+              }
+            }
+
+            Column {
+              objectName: "micStatusBlock"
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.micView.visible
+
+              Repeater {
+                objectName: "micStatusRepeater"
+                model: root.micView.rows
+                delegate: InfoRow {
+                  required property var modelData
+                  label: modelData.label
+                  value: modelData.value
+                }
+              }
+              // The modules processing it, as the daemon words them.
+              Text {
+                objectName: "micRunsOn"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.micView.runsOn
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                objectName: "micError"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.micView.error
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            // ---- the microphone's settings, by the same renderer as the
+            // camera's and the effects'; its note says when no audio module
+            // is installed. Last in the tab: past the screen's room it
+            // scrolls, alone.
+            Column {
+              id: micSettingsArea
+              objectName: "micSettingsArea"
+              width: parent.width
+              spacing: Style.space(10)
+              visible: root.micSettings.visible
+
+              PanelSeparator { foreground: root.foreground }
+
+              SettingsView {
+                id: micSettingsBlock
+                objectName: "micSettingsView"
+                namePrefix: "mic-"
+                readonly property real areaTop: tabBlock.y + micTab.y + micSettingsArea.y + y
+                width: parent.width
+                room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
+                bar: root.bar
+                view: root.micSettings
+                cursorStop: root.tab === "mic" ? root.currentStop : null
+                choiceCursor: root.choiceCursor
+                keyCatcher: catcher
+                slidersHeld: root.slidersHeld
+                foreground: root.foreground
+                dim: root.dim
+                faint: root.faint
+                accent: root.accent
+                hoverFill: root.hoverFill
+                fontFamily: root.fontFamily
+                onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
+                onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
                 onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
               }
             }

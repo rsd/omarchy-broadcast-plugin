@@ -55,6 +55,14 @@ Singleton {
   // queued. Those writes never hold it; an on/off ask goes ahead of setting
   // writes in the queue.
   readonly property bool toggleBusy: Model.toggleBlocked(runningIntent, pendingIntents)
+  // The microphone's switch waits: its on/off is running or queued
+  // (Model.micBlocked), or has ended and the watch's `mic` line does not show
+  // it yet (micAwaiting, at most Model.MIC_SWITCH_WAIT_MS). It never holds the
+  // camera's, nor the camera's it.
+  readonly property bool micBusy: Model.micBlocked(runningIntent, pendingIntents) || micAwaiting !== null
+  // The target (true: on, false: off) of a finished `mic on|off` the record
+  // does not show yet, else null.
+  property var micAwaiting: null
 
   // ---- CLI resolution ------------------------------------------------------
   property var cliSetting: null
@@ -482,6 +490,7 @@ Singleton {
     var before = record.settings
     var beforeRecord = record
     if (result.record !== record) record = result.record
+    if (micAwaiting !== null && (!Model.available(record) || Model.micReflects(record, micAwaiting))) settleMicAwait()
     if (result.outcome === "snapshot") commandError = ""
     var after = record.settings
     // The settings are another camera's, or none: no queued write or reset
@@ -604,6 +613,11 @@ Singleton {
     return true
   }
 
+  function settleMicAwait() {
+    micAwaiting = null
+    micWaitTimer.stop()
+  }
+
   function flushPending() {
     if (commandProc.running || commandArmed || pendingIntents.length === 0) return
     var intent = pendingIntents[0]
@@ -634,6 +648,16 @@ Singleton {
     // again, unless a change line since it started has done so already.
     if (Model.isSetupIntent(intent) && (!ok || !setupChangeSeen)) Qt.callLater(root.refreshSetup)
     if (intent && intent.verb === "setting") settingEnded(intent, ok)
+    // A microphone on/off that went through is awaited on the watch's `mic`
+    // line (bounded), so the switch does not flip back to the old word first.
+    if (Model.isMicIntent(intent)) {
+      if (ok && !Model.micReflects(record, intent.on)) {
+        micAwaiting = intent.on === true
+        micWaitTimer.restart()
+      } else {
+        settleMicAwait()
+      }
+    }
     // A write that went through owes the change after its mark.
     // (None for a value already in force: the daemon prints no change then.)
     if (ok && Model.isSettingIntent(intent) && !Model.settingNoop(record, intent, settingLines, settingLinesDue))
@@ -679,6 +703,14 @@ Singleton {
 
   function setEnabled(on) {
     return request({ verb: "enable", on: on === true })
+  }
+
+  // The Omarchy Broadcast Mic on or off (`mic on|off`): only while the
+  // daemon reports it (Model.intentArgv checks it again when it runs), and
+  // not while the last one's result is still to come.
+  function setMicHost(on) {
+    if (micBusy || !Model.micSupported(record)) return false
+    return request({ verb: "mic-host", on: on === true })
   }
 
   function selectCamera(id) {
@@ -801,6 +833,13 @@ Singleton {
     interval: Model.CONTROLS_DEBOUNCE_MS
     repeat: false
     onTriggered: root.flushSettings()
+  }
+
+  // Bounds the microphone switch's wait for the watch's `mic` line.
+  property Timer micWaitTimer: Timer {
+    interval: Model.MIC_SWITCH_WAIT_MS
+    repeat: false
+    onTriggered: root.settleMicAwait()
   }
 
   property Timer backoffTimer: Timer {

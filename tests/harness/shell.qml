@@ -660,8 +660,9 @@ ShellRoot {
       h.eq("Effect chip selected", h.find(A(), "tab-effect").selected, true)
       h.eq("Effect tab shown", h.find(A(), "effectTab").visible, true)
       h.eq("Camera tab hidden", h.find(A(), "cameraTab").visible, false)
+      h.eq("Mic tab hidden", h.find(A(), "micTab").visible, false)
       h.eq("Status tab hidden", h.find(A(), "statusTab").visible, false)
-      h.eq("tab labels", ["effect", "camera", "status"].map(function(t) { return h.find(A(), "tab-" + t).text }).join(","), "Effect,Camera,Status")
+      h.eq("tab labels", ["effect", "camera", "mic", "status"].map(function(t) { return h.find(A(), "tab-" + t).text }).join(","), "Effect,Camera,Mic,Status")
       h.eq("camera rows", h.find(A(), "cameraRepeater").count, 3)
       h.eq("switch shown", h.find(A(), "enableSwitch").visible, true)
       h.eq("a revision-4 daemon: no effect choices", h.find(A(), "effectChoices").visible, false)
@@ -766,11 +767,14 @@ ShellRoot {
       h.eq("no command ran", h.newLogArgs().length, 0)
       h.eq("stops = switch + tab row + rendered rows + next (the Camera tab)", c.stops.length, h.find(A(), "cameraRepeater").count + 3)
       h.key(Qt.Key_Right)
+      h.eq("Right: Mic", c.tab, "mic")
       h.key(Qt.Key_Right)
-      h.eq("Right twice: Status, and no further", c.tab, "status")
+      h.key(Qt.Key_Right)
+      h.eq("Right twice more: Status, and no further", c.tab, "status")
       h.key(Qt.Key_Left)
-      h.eq("Left: Camera again", c.tab, "camera")
-      h.eq("a write per change", fakeShell.calls.length, h.notes.calls + 3)
+      h.key(Qt.Key_Left)
+      h.eq("Left twice: Camera again", c.tab, "camera")
+      h.eq("a write per change", fakeShell.calls.length, h.notes.calls + 5)
       h.key(Qt.Key_Down)
     })
     h.step("Down: first camera row", function() {
@@ -838,19 +842,21 @@ ShellRoot {
     h.step("tabs: number keys", function() {
       var c = h.content(A())
       h.notes.calls = fakeShell.calls.length
-      h.key("3")
-      h.eq("3: Status", c.tab, "status")
+      h.key("4")
+      h.eq("4: Status", c.tab, "status")
       h.eq("a number key shows no cursor", c.cursorActive, false)
+      h.key("3")
+      h.eq("3: Mic", c.tab, "mic")
       h.key("1")
       h.eq("1: Effect", c.tab, "effect")
       h.key("2")
       h.eq("2: Camera", c.tab, "camera")
-      h.key("4")
+      h.key("5")
       h.key("0")
       h.key("9")
       h.eq("other digits do nothing", c.tab, "camera")
       h.key("2")
-      h.eq("a write per change, none for the tab shown", fakeShell.calls.length, h.notes.calls + 3)
+      h.eq("a write per change, none for the tab shown", fakeShell.calls.length, h.notes.calls + 4)
     })
     h.step("tabs: a click on a chip", function() {
       var chip = h.find(A(), "tab-status")
@@ -907,7 +913,7 @@ ShellRoot {
     }, function() { return A().opened })
     h.step("tabs: a refused write holds for the session", function() {
       var c = h.content(A())
-      h.check("chosen", c.chooseTab(2))
+      h.check("chosen", c.chooseTab(3))
       h.eq("one refused write", fakeShell.refused.length, 1)
       h.eq("the refused entry", JSON.stringify(fakeShell.refused[0].entry),
            JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, panelTab: "status" }))
@@ -2154,7 +2160,7 @@ ShellRoot {
   // c1-layout-<tab>-<kind>.png; `back`: the tab shown again afterwards.
   function layoutGrabs(kind, back) {
     var A = function() { return h.widgetA }
-    var tabs = ["effect", "camera", "status"]
+    var tabs = ["effect", "camera", "mic", "status"]
     for (var i = 0; i < tabs.length; i++) {
       var t = tabs[i]
       h.step("layout: the " + t + " tab, " + kind, (function(t) { return function() { h.tab(A(), t) } })(t))
@@ -2179,12 +2185,13 @@ ShellRoot {
 
   // One settings-state line: group|label|id|type|label|value|default|stored|
   // min|max|step|unit|options|master|when|reason|fixed|scope ("global" for a
-  // setting of the daemon's own, else empty).
+  // setting of the daemon's own, else empty)|surface (the group's: "mic" for
+  // the microphone's, else empty).
   function stateRow(group, groupLabel, id, type, label, value, def, o) {
     var x = o || {}
     var f = function(v) { return v === undefined ? "" : String(v) }
     return [group, groupLabel, id, type, label, f(value), f(def), x.stored ? "1" : "0", f(x.min), f(x.max), f(x.step), f(x.unit),
-            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope)].join("|")
+            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope), f(x.surface)].join("|")
   }
   // The MX Brio as the daemon publishes it (its starting values).
   function brioState() {
@@ -2982,6 +2989,204 @@ ShellRoot {
     })
     h.grabStep(function() { return A().popup }, "e3-effect-no-module.png")
     h.step("global settings: back to the Camera tab", function() { h.tab(A(), "camera") }, function() { return h.find(A(), "settingsArea").visible })
+    h.wait(300)
+
+    // the microphone (revision 13): the Mic tab draws the groups of surface
+    // "mic" generically, below the microphone's own switch and state; the
+    // bar shows a glyph while apps record from it
+    var micDevice = "alsa_input.usb-C-Media-00.mono"
+    // a real node name, well past 32 characters (the cap was raised to 128)
+    var micLongDevice = "alsa_input.usb-K66_K66_20190805V001-00.analog-stereo"
+    var micRows = function() {
+      var m = function(group, groupLabel, id, type, label, v, d, o) {
+        var x = { scope: "global", surface: "mic" }
+        for (var k in o) x[k] = o[k]
+        return stateRow(group, groupLabel, id, type, label, v, d, x)
+      }
+      var voiceOff = { master: "mic.voice.enabled", when: "false", reason: "Studio voice already removes noise and echo" }
+      return [
+        m("input", "Microphone", "mic.input.enabled", "bool", "Noise and echo processing", "true", "true", {}),
+        m("input", "Microphone", "mic.input.device", "enum", "Input device", "default", "default",
+          { options: "default:System default," + micDevice + ":USB PnP Sound Device," + micLongDevice + ":K66" }),
+        m("input", "Microphone", "mic.input.make_default", "action", "Use as default microphone", "-", "-", {}),
+        m("input", "Microphone", "mic.input.restore_default", "action", "Use the previous default microphone", "-", "-",
+          { fixed: true, reason: "The Omarchy Broadcast Mic was not made the default here" }),
+        m("noise", "Noise removal", "mic.noise.enabled", "bool", "Noise removal", "true", "false", voiceOff),
+        m("noise", "Noise removal", "mic.noise.strength", "int", "Strength", 100, 100,
+          { min: 0, max: 100, step: 1, unit: "%", master: voiceOff.master, when: voiceOff.when, reason: voiceOff.reason }),
+        m("voice", "Studio voice", "mic.voice.enabled", "bool", "Studio voice (adds noticeable delay)", "false", "false", {}),
+        m("voice", "Studio voice", "mic.voice.profile", "enum", "Mic profile", "passthrough", "passthrough",
+          { options: "passthrough:None,bright:Bright,warm:Warm", master: "mic.voice.enabled", when: "true", reason: "Turn on studio voice to change this" })
+      ]
+    }
+    var micState = function(o) {
+      var m = { state: "active", consumers: 1, provider: "mic-denoise: NVIDIA Maxine AFX (GPU)", latency_ms: 20, error: "" }
+      for (var k in o) m[k] = o[k]
+      return m
+    }
+    var micLine = function(o) {
+      var m = micState(o)
+      m.v = 1
+      m.type = "mic"
+      return JSON.stringify(m)
+    }
+    var rev13 = function(o) {
+      var m = rev7({ interface_revision: 13, effect: "none", blur_strength: 0.5, denoise: false, mic: micState({}) })
+      for (var k in o) m[k] = o[k]
+      return m
+    }
+    var micArgs = function() { return h.newLogArgs().filter(function(a) { return a[0] === "mic" }) }
+    h.step("mic: a revision-13 daemon publishes the microphone's groups after the others", function() {
+      h.writeFile("settings-state", brioState().concat(micRows()))
+      h.feed([snapshotLine(rev13({}))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 7 && !!S().record.mic && h.writerIdle() })
+    h.step("mic: the Mic tab", function() { h.tab(A(), "mic") }, function() { return h.find(A(), "micSettingsArea").visible })
+    h.wait(300)
+    h.step("mic: the switch, the state, then the generic rows", function() {
+      h.eq("the Mic tab shown", h.find(A(), "micTab").visible, true)
+      h.eq("the Camera tab hidden", h.find(A(), "cameraTab").visible, false)
+      h.eq("the Mic view's groups", C().micSettings.groups.map(function(g) { return g.id }).join(","), "input,noise,voice")
+      h.eq("none in the Effect tab's", C().effectSettings.groups.length, 0)
+      h.eq("none in the Camera tab's", C().settingsView.groups.map(function(g) { return g.id }).join(","), "image,white_balance,exposure,focus")
+      h.eq("no hint", h.find(A(), "micHint").visible, false)
+      h.eq("the switch is on", h.find(A(), "micSwitch").checked, true)
+      h.eq("status rows", h.find(A(), "micStatusRepeater").count, 3)
+      h.eq("runs on", h.find(A(), "micRunsOn").text, "Runs on: mic-denoise: NVIDIA Maxine AFX (GPU)")
+      h.eq("no error", h.find(A(), "micError").visible, false)
+      h.eq("processing switch", !!h.find(A(), "settingSwitch-mic.input.enabled"), true)
+      h.eq("the device is a dropdown of node names", !!h.find(A(), "settingDropdown-mic.input.device"), true)
+      h.eq("the device's choices", h.model.findSetting(S().record, "mic.input.device").options.map(function(o) { return o.value }).join(","),
+           "default," + micDevice + "," + micLongDevice)
+      h.eq("Use as default microphone", h.find(A(), "settingAction-mic.input.make_default").text, "Use as default microphone")
+      h.eq("the restore greyed with its reason", h.find(A(), "settingReason-mic.input.restore_default").text,
+           "The Omarchy Broadcast Mic was not made the default here")
+      h.eq("studio voice says what it costs", h.find(A(), "settingLabel-mic.voice.enabled").text, "Studio voice (adds noticeable delay)")
+      h.eq("no modules note", h.find(A(), "mic-settingsNote").visible, false)
+      h.eq("stops", kinds(), "switch,preview,fps,tabs,mic-host,setting0,setting1,setting2,setting3,setting4,setting5,setting6,setting7")
+      h.eq("the bar's mic glyph", A().micButton.visible + "/" + A().micButton.text, "true/" + String.fromCodePoint(0xF036C))
+      h.eq("its tooltip", A().micButton.tooltipText, "Omarchy Broadcast Mic: processing · 1 app recording")
+      h.check("beside the camera's", A().micButton.x >= A().iconButton.x + A().iconButton.width - 0.5, A().micButton.x)
+      h.fits(A(), "Mic tab")
+    })
+    h.grabStep(function() { return A().popup }, "m1-mic.png")
+    h.step("mic: studio voice on, by the keyboard; noise removal greys with the daemon's reason", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("mic.voice.enabled"))
+      h.key(Qt.Key_Return)
+    }, function() { return setArgs().length >= 1 && value("mic.voice.enabled") === true && !S().commandBusy }, 3000)
+    h.step("mic: the write names no camera; the conflict greys", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.voice.enabled", true)]))
+      h.eq("noise removal greyed", h.model.findSetting(S().record, "mic.noise.enabled").enabled, false)
+      h.eq("its reason", h.find(A(), "settingReason-mic.noise.enabled").text, "Studio voice already removes noise and echo")
+      h.eq("the profile open", h.model.findSetting(S().record, "mic.voice.profile").enabled, true)
+      h.markLog()
+      h.check("the device, written as a node name", S().commitSetting("mic.input.device", micDevice))
+    }, function() { return setArgs().length >= 1 && value("mic.input.device") === micDevice && !S().commandBusy }, 3000)
+    h.grabStep(function() { return A().popup }, "m2-mic-studio-voice.png")
+    h.step("mic: the device write; Use as default microphone", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.device", micDevice)]))
+      h.eq("the box shows the daemon's word", h.find(A(), "settingDropdown-mic.input.device").value, micDevice)
+      h.markLog()
+      click(h.find(A(), "settingAction-mic.input.make_default"))
+    }, function() { return setArgs().length >= 1 && !S().commandBusy }, 3000)
+    h.step("mic: the action's argv; the switch off by the keyboard", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.make_default", true)]))
+      h.markLog()
+      C().setCursor("mic-host", -1)
+      h.eq("the switch has the cursor", h.find(A(), "micSwitch").hasCursor, true)
+      h.key(Qt.Key_Return)
+    }, function() { return micArgs().length >= 1 && !!S().record.mic && S().record.mic.state === "off" && !S().commandBusy }, 3000)
+    h.step("mic: off", function() {
+      h.eq("argv", JSON.stringify(micArgs()), JSON.stringify([["mic", "off"]]))
+      h.eq("the switch follows the daemon", h.find(A(), "micSwitch").checked, false)
+      h.eq("state row", h.find(A(), "micStatusRepeater").itemAt(0).value, "Off")
+      h.eq("no runs-on line", h.find(A(), "micRunsOn").visible, false)
+      h.eq("no bar glyph", A().micButton.visible, false)
+      h.eq("the camera's icon takes the widget back", A().iconButton.width, A().width)
+      h.eq("the camera's switch never waited", S().toggleBusy, false)
+      h.markLog()
+      h.check("on again", C().toggleMic())
+    }, function() { return micArgs().length >= 1 && S().record.mic.state === "passthrough" && !S().commandBusy }, 3000)
+    h.step("mic: on, not processed; an app starts recording", function() {
+      h.eq("argv", JSON.stringify(micArgs()), JSON.stringify([["mic", "on"]]))
+      h.eq("the switch", h.find(A(), "micSwitch").checked, true)
+      h.eq("state row", h.find(A(), "micStatusRepeater").itemAt(0).value, "On, not processed")
+      h.eq("nobody records: no glyph", A().micButton.visible, false)
+      h.feed([micLine({ consumers: 2, state: "error", error: "The audio worker stopped; the microphone passes through" })])
+    }, function() { return S().record.mic.consumers === 2 })
+    h.wait(200)
+    h.step("mic: the glyph while apps record, the error in the tab", function() {
+      h.eq("the glyph", A().micButton.visible, true)
+      h.eq("urgent on an error", A().micButton.activeColor + "", A().urgentColor + "")
+      h.eq("tooltip", A().micButton.tooltipText,
+           "Omarchy Broadcast Mic: error · 2 apps recording · error: The audio worker stopped; the microphone passes through")
+      h.eq("the error shown", h.find(A(), "micError").text, "The audio worker stopped; the microphone passes through")
+      h.markLog()
+      A().micButton.triggerPress(Qt.MiddleButton)
+      h.eq("its middle click runs nothing", h.newLogArgs().length, 0)
+      h.eq("and leaves the panel open", A().opened, true)
+      A().micButton.triggerPress(Qt.LeftButton)
+      h.eq("its left click closes the panel", A().opened, false)
+      A().open()
+    }, function() { return A().opened && h.content(A()) !== null })
+    h.grabStep(function() { return A().popup }, "m3-mic-error.png")
+    h.step("mic: error shows no delay and no module; a long node name is written as any other", function() {
+      h.eq("no added delay in an error", h.find(A(), "micStatusRepeater").itemAt(2).value, "None")
+      h.eq("no runs-on line in an error", h.find(A(), "micRunsOn").visible, false)
+      h.markLog()
+      h.check("the long device, written as a node name", S().commitSetting("mic.input.device", micLongDevice))
+    }, function() { return setArgs().length >= 1 && value("mic.input.device") === micLongDevice && !S().commandBusy }, 3000)
+    h.step("mic: the long device's argv", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.device", micLongDevice)]))
+      h.eq("the box shows it", h.find(A(), "settingDropdown-mic.input.device").value, micLongDevice)
+      h.tab(A(), "camera")
+    }, function() { return h.find(A(), "cameraTab").visible })
+    var storedBefore = ""
+    h.step("mic: a left click on the glyph opens the panel on the Mic tab, for this opening only", function() {
+      storedBefore = A().storedTab
+      A().close()
+      A().micButton.triggerPress(Qt.LeftButton)
+    }, function() { return A().opened && h.content(A()) !== null && h.find(A(), "micTab").visible })
+    h.step("mic: the stored tab is untouched; a second click closes", function() {
+      h.eq("the request", A().requestedTab, "mic")
+      h.eq("the stored tab", A().storedTab, storedBefore)
+      A().micButton.triggerPress(Qt.LeftButton)
+      h.eq("closed", A().opened, false)
+      h.eq("the request is gone", A().requestedTab, "")
+      A().open()
+    }, function() { return A().opened && h.content(A()) !== null && h.find(A(), "cameraTab").visible })
+    h.step("mic: back to the Mic tab", function() { h.tab(A(), "mic") }, function() { return h.find(A(), "micSettingsArea").visible })
+    h.step("mic: no audio module installed: only the daemon's group, and the note", function() {
+      h.writeFile("settings-state", brioState().concat(micRows().slice(0, 4)))
+      h.feed([snapshotLine(rev13({ mic: micState({ state: "passthrough", consumers: 0, provider: "", latency_ms: 0 }) }))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 5 && h.writerIdle() })
+    h.wait(300)
+    h.step("mic: the note", function() {
+      h.eq("the note", h.find(A(), "mic-settingsNote").text, h.model.MIC_NO_MODULES_TEXT)
+      h.eq("the daemon's group still drawn", C().micSettings.groups.map(function(g) { return g.id }).join(","), "input")
+      h.fits(A(), "Mic tab without modules")
+    })
+    h.step("mic: a daemon below revision 13", function() {
+      h.writeFile("settings-state", brioState())
+      h.feed([snapshotLine(rev7({ interface_revision: 12, mic: null }))])
+    }, function() { return S().record.interfaceRevision === 12 && h.writerIdle() })
+    h.wait(300)
+    h.step("mic: the tab says the daemon needs updating, and offers nothing", function() {
+      h.eq("the Mic tab still there", h.find(A(), "micTab").visible, true)
+      h.eq("the hint", h.find(A(), "micHint").text, h.model.DAEMON_NO_MIC)
+      h.eq("no switch", h.find(A(), "micHostRow").visible, false)
+      h.eq("no state", h.find(A(), "micStatusBlock").visible, false)
+      h.eq("no settings", h.find(A(), "micSettingsArea").visible, false)
+      h.eq("stops", kinds(), "switch,preview,fps,tabs")
+      h.check("the switch runs nothing", !C().toggleMic() && !S().setMicHost(true))
+      h.eq("no bar glyph", A().micButton.visible, false)
+      h.fits(A(), "Mic tab, old daemon")
+    })
+    h.grabStep(function() { return A().popup }, "m4-mic-old-daemon.png")
+    h.step("mic: back to the Camera tab", function() {
+      h.tab(A(), "camera")
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return h.find(A(), "settingsArea").visible && S().record.interfaceRevision === 7 && h.writerIdle() })
     h.wait(300)
 
     // an old daemon, an old CLI, a newer schema, no camera: a hint, no settings

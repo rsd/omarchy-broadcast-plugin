@@ -18,6 +18,12 @@ import "Model.js" as Model
 // running or queued it does nothing. Right click opens the setup dialog, the
 // plugin's overlay, through the shell (openSetup).
 //
+// While applications record from the Omarchy Broadcast Mic, a microphone
+// glyph shows beside the camera's (after it; under it on a vertical bar),
+// driven by the watch's `mic` lines: nothing polls. Its left click opens the
+// panel and its right click the setup dialog, as the camera icon's; its
+// middle click does nothing (the camera's on/off is the camera icon's).
+//
 // The manifest makes the plugin an overlay as well, so the shell routes the
 // plugin's summon and toggle (the panel hotkey) to SetupDialog.qml, which
 // forwards them here through the Daemon singleton (Daemon.openPanel, which
@@ -34,8 +40,14 @@ BarWidget {
   // default); the panel follows it when it changes.
   readonly property string storedTab: Model.panelTabValue(Model.settingValue(settings, "panelTab"))
   readonly property color urgentColor: bar ? bar.urgent : Commons.Color.urgent
+  // The microphone indicator (Model.micIndicator): shown while apps record.
+  readonly property var micIndicator: Model.micIndicator(record)
 
   property bool opened: false
+  // The tab a click on the microphone glyph asks for, for this opening only
+  // (never written to the layout; the panel shows the stored tab again once
+  // it is back to "", which it is at every close).
+  property string requestedTab: ""
   property bool popoutSwitchClosing: false
   // For Daemon.panelOwners: this is a bar widget with a panel (the setup
   // dialog attaches to the Daemon too, and is not one).
@@ -49,10 +61,11 @@ BarWidget {
   readonly property QtObject service: Daemon
   readonly property QtObject previewService: Preview
   readonly property Item iconButton: button
+  readonly property Item micButton: micIcon
   readonly property var popup: panel
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  implicitWidth: vertical ? button.implicitWidth : button.implicitWidth + (micIcon.visible ? micIcon.implicitWidth : 0)
+  implicitHeight: vertical ? button.implicitHeight + (micIcon.visible ? micIcon.implicitHeight : 0) : button.implicitHeight
 
   function open() { opened = true }
   function close() { opened = false }
@@ -98,6 +111,22 @@ BarWidget {
     else root.toggleCamera()
   }
 
+  // A click on the microphone indicator (Model.micClickAction): left opens
+  // the panel on the Mic tab (a transient choice: the stored tab is not
+  // written) or closes it when open, right the setup dialog, middle nothing.
+  function pressMic(buttonCode) {
+    var action = Model.micClickAction(buttonCode === Qt.MiddleButton ? "middle" : (buttonCode === Qt.RightButton ? "right" : "left"),
+                                      root.opened)
+    if (action === "setup") {
+      root.openSetup()
+    } else if (action === "open-mic") {
+      root.requestedTab = "mic"
+      root.open()
+    } else if (action === "close") {
+      root.close()
+    }
+  }
+
   // A user's change in the panel (a preview preference or the tab): in force
   // at once (Preview.choose; the panel holds its own tab), then
   // written to this widget's layout entry, merged over the settings the bar
@@ -129,6 +158,7 @@ BarWidget {
   onOpenedChanged: {
     if (root.opened) Preview.hold(root)
     else Preview.release(root)
+    if (!root.opened) root.requestedTab = ""
     Daemon.notePanels()
   }
 
@@ -144,9 +174,13 @@ BarWidget {
     Preview.release(root)
   }
 
+  // The camera's icon fills the widget but for the microphone's slot.
   BarIconButton {
     id: button
-    anchors.fill: parent
+    x: 0
+    y: 0
+    width: root.vertical || !micIcon.visible ? root.width : Math.max(0, root.width - micIcon.width)
+    height: !root.vertical || !micIcon.visible ? root.height : Math.max(0, root.height - micIcon.height)
     bar: root.bar
     text: root.visual.glyph
     active: root.visual.colorRole !== "foreground"
@@ -160,6 +194,26 @@ BarWidget {
     Accessible.role: Accessible.Button
     Accessible.name: Model.tooltipText(root.record)
     Accessible.description: Model.barClickHelp(root.record)
+  }
+
+  BarIconButton {
+    id: micIcon
+    objectName: "micIndicator"
+    visible: root.micIndicator.visible
+    x: root.vertical ? 0 : button.width
+    y: root.vertical ? button.height : 0
+    width: root.vertical ? root.width : implicitWidth
+    height: root.vertical ? implicitHeight : root.height
+    bar: root.bar
+    text: root.micIndicator.glyph
+    active: true
+    activeColor: root.micIndicator.urgent ? root.urgentColor : Commons.Color.accent
+    tooltipText: root.micIndicator.tooltip
+    onPressed: function(buttonCode) { root.pressMic(buttonCode) }
+
+    Accessible.role: Accessible.Button
+    Accessible.name: root.micIndicator.tooltip
+    Accessible.description: "Click: open the panel on the Mic tab, or close it. Right click: open the setup."
   }
 
   KeyboardPanel {
@@ -187,6 +241,7 @@ BarWidget {
         bar: root.bar
         opened: root.opened
         storedTab: root.storedTab
+        requestedTab: root.requestedTab
         // The card's room for the content on this screen: past it the
         // camera settings scroll inside the Camera tab, not the panel.
         contentRoom: panel.availableCardHeight > 0 ? Math.max(0, panel.availableCardHeight - panel.padding * 2) : 0
