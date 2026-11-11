@@ -91,6 +91,8 @@ var GLYPH_WARNING = String.fromCodePoint(0xF002A) // mdi-alert-outline
 var GLYPH_RADIO_ON = String.fromCodePoint(0xF043E)
 var GLYPH_RADIO_OFF = String.fromCodePoint(0xF043D)
 var GLYPH_NEXT = String.fromCodePoint(0xF04AD)
+// mdi-microphone, the glyph the shell's own microphone indicator draws.
+var GLYPH_MIC = String.fromCodePoint(0xF036C)
 
 // Unicode "—": what an unknown figure shows, never 0.
 var UNKNOWN = "\u2014"
@@ -246,7 +248,14 @@ function emptyRecord(link, linkText) {
     // A set whose settings_group lines are still arriving, or null.
     settingsAssembly: null,
     // A settings_clear line said there is nothing to show.
-    settingsCleared: false
+    settingsCleared: false,
+    // The snapshot's microphone (`mic`, interface revision MIC_REVISION):
+    // "absent" when the snapshot has no such field (a CLI that predates the
+    // microphone), "object" when it is one, "null" otherwise (a daemon below
+    // MIC_REVISION). `mic` is micFields() of it, or null; a `mic` line
+    // replaces it.
+    micField: "absent",
+    mic: null
   }
 }
 
@@ -383,7 +392,7 @@ function parseLine(text) {
 
 // Apply one raw line to a record. Returns { record, outcome }; `record` is the
 // same object when nothing changed. Outcomes: snapshot, state, cameras,
-// stats, settings_group (a part of a set kept), settings (a set committed),
+// stats, mic, settings_group (a part of a set kept), settings (a set committed),
 // settings_delta, settings_clear, config_changed, modules_changed, error, ignored (an unknown type, such as
 // the `controls` line of interface revision 6, or a line that cannot apply
 // in the current link state), dropped, invalid, unsupported.
@@ -416,6 +425,8 @@ function applyMessage(record, m) {
     r.settingsSchema = interfaceRevision(m.settings_schema)
     r.configSerial = settingsNumber(m.config_serial)
     r.modulesSerial = settingsNumber(m.modules_serial)
+    r.micField = m.mic === undefined ? "absent" : (isPlainObject(m.mic) ? "object" : "null")
+    r.mic = micFields(m.mic)
     return { record: r, outcome: "snapshot" }
   case "state":
     // Unavailable until the next snapshot (docs/cli-json.md, "Writing a client").
@@ -439,6 +450,14 @@ function applyMessage(record, m) {
       gpuPercent: statNumber(m.gpu_percent)
     }
     return { record: r, outcome: "stats" }
+  case "mic":
+    // The microphone changed (interface revision MIC_REVISION): its fields
+    // replace the snapshot's.
+    if (!linked(record)) return { record: record, outcome: "ignored" }
+    r = copyRecord(record)
+    r.micField = "object"
+    r.mic = micFields(m)
+    return { record: r, outcome: "mic" }
   case "settings_group":
     // A line of a settings set; the set is committed by its last line.
     if (!linked(record)) return { record: record, outcome: "ignored" }
@@ -871,7 +890,7 @@ function canNext(record) {
 // A control request is kept as an intent, { verb, on, id, effect, value, camera },
 // and turned into an argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera`/`settings`/`config`/`modules`/`order` would D-Bus-activate it) or
+// gone meanwhile (`on`/`off`/`camera`/`settings`/`config`/`modules`/`order`/`mic` would D-Bus-activate it) or
 // with a CLI path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
@@ -881,6 +900,7 @@ function intentArgv(intent, cli, record) {
   case "next": return canNext(record) ? nextArgv(cli) : null
   case "setup": return setupIntentArgv(cli, record, intent)
   case "setting": return settingIntentArgv(cli, record, intent)
+  case "mic-host": return micSupported(record) ? micHostArgv(cli, intent.on === true) : null
   case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null
   default: return null
   }
@@ -1270,6 +1290,12 @@ var SETTING_ID_CAP = 48
 // An option value is a word, or a capture mode (revision 12: WxH@FPS, the rate
 // a whole number or a fraction: 3840x2160@30, 1920x1080@30000/1001).
 var OPTION_VALUE_RE = /^[a-z0-9_@/]{1,32}$/
+// An option value of a microphone setting (a group of surface MIC_SURFACE)
+// may also be a PipeWire node name (the input device's choices:
+// alsa_input.usb-...): letters of either case, digits and _ . : @ / + -,
+// starting with a letter or a digit, at most 128 characters (the producer's
+// bound). A name the producer clipped ends in an ellipsis and is no value.
+var MIC_OPTION_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9_.:@/+-]{0,127}$/
 var GROUP_ID_RE = /^[a-z0-9_]{1,32}$/
 // Words the grammars above allow that must never be a key: assigning an
 // object's `__proto__` re-parents it (and reading it gives Object.prototype),
@@ -1287,8 +1313,10 @@ var OPTION_LABEL_CAP = 32
 // Rendering caps (the producer's are 64 settings a camera and 16 options a
 // setting); past them the panel says "Showing N of M".
 var SETTINGS_GROUP_CAP = 16
-// A set holds the groups of both scopes, each up to SETTINGS_GROUP_CAP.
-var SETTINGS_SET_GROUP_CAP = 2 * SETTINGS_GROUP_CAP
+// A set holds the groups of each place they are drawn (the camera's, the
+// global ones of the Effect tab and the microphone's), each up to
+// SETTINGS_GROUP_CAP.
+var SETTINGS_SET_GROUP_CAP = 3 * SETTINGS_GROUP_CAP
 var SETTINGS_PER_GROUP_CAP = 16
 var SETTING_OPTION_CAP = 16
 var SETTINGS_ROW_CAP = 64
@@ -1319,6 +1347,7 @@ var CONTROLS_DEBOUNCE_MS = 150
 //   slider write (setting, no quick), one per id             SETTING_QUEUE_CAP
 //   quick write (setting, quick, not action), one per id     QUICK_QUEUE_CAP
 //   settings action (setting, action:true), one per id       ACTION_QUEUE_CAP
+//   microphone on/off (mic-host)                             MIC_QUEUE_CAP
 // An action has no draft to keep for later, so a refusal would lose the
 // click: it is never refused for room. Its bound is SETTINGS_ROW_CAP, the most
 // rows (so action ids) a record can show, so no press of a real row is ever
@@ -1330,7 +1359,9 @@ var ACTION_QUEUE_CAP = SETTINGS_ROW_CAP
 // A setup write is refused while another is running or queued
 // (setupWriteBusy), so one is ever queued.
 var SETUP_QUEUE_CAP = 1
-var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + QUICK_QUEUE_CAP + ACTION_QUEUE_CAP + SETUP_QUEUE_CAP + 2
+// A microphone on/off ask replaces the one queued before it.
+var MIC_QUEUE_CAP = 1
+var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + QUICK_QUEUE_CAP + ACTION_QUEUE_CAP + SETUP_QUEUE_CAP + MIC_QUEUE_CAP + 2
 var SETTINGS_TITLE = "SETTINGS"
 var SETTINGS_RESET_LABEL = "Reset to defaults"
 var SETTINGS_RESET_TOOLTIP = "Set every setting of this camera back to its default and forget the stored values"
@@ -1385,8 +1416,9 @@ function settingId(value) {
   return typeof value === "string" && value.length <= SETTING_ID_CAP && SETTING_ID_RE.test(value) && !reservedKey(value) ? value : ""
 }
 
-function optionValueOf(value) {
-  return typeof value === "string" && OPTION_VALUE_RE.test(value) && !reservedKey(value) ? value : ""
+function optionValueOf(value, surface) {
+  var re = surface === MIC_SURFACE ? MIC_OPTION_VALUE_RE : OPTION_VALUE_RE
+  return typeof value === "string" && re.test(value) && !reservedKey(value) ? value : ""
 }
 
 // A group id as the daemon's grammar has it, else "".
@@ -1412,9 +1444,10 @@ function showingText(shown, total, what) {
 }
 
 // The options of an enum: at most SETTING_OPTION_CAP looked at; a valid,
-// new value each, with a label (its value when the label sanitises to
-// nothing). `total` counts the valid ones and those past the cap.
-function settingOptions(value) {
+// new value each (optionValueOf, by the group's surface), with a label (its
+// value when the label sanitises to nothing). `total` counts the valid ones
+// and those past the cap.
+function settingOptions(value, surface) {
   var src = Array.isArray(value) ? value : []
   var n = Math.min(src.length, SETTING_OPTION_CAP)
   var out = []
@@ -1422,7 +1455,7 @@ function settingOptions(value) {
   for (var i = 0; i < n; i++) {
     var o = src[i]
     if (!isPlainObject(o)) continue
-    var v = optionValueOf(o.value)
+    var v = optionValueOf(o.value, surface)
     if (v === "" || seen[v] === true) continue
     seen[v] = true
     var label = settingText(o.label, OPTION_LABEL_CAP)
@@ -1445,9 +1478,18 @@ function clampInt(value, min, max) {
 // Where a setting's value is kept: "global" (the daemon's own, such as the
 // background effect) or "camera" (per camera: every other value, an absent
 // scope included). The Camera tab draws the camera ones, the Effect tab the
-// global ones.
+// global ones, but those of a group of surface MIC_SURFACE: the Mic tab
+// draws those (groupSurface).
 function settingScope(s) {
   return isPlainObject(s) && s.scope === "global" ? "global" : "camera"
+}
+
+// Where a client shows a group (interface revision MIC_REVISION, the group's
+// `surface`): MIC_SURFACE for a group of global settings that says so, else
+// "" (a daemon that gives no surface, or one this plugin does not know, or
+// a group of camera settings: drawn by scope, as before the microphone).
+function groupSurface(g, scope) {
+  return scope === "global" && isPlainObject(g) && g.surface === MIC_SURFACE ? MIC_SURFACE : ""
 }
 
 // One setting of a settings_group line -> a row, or null (skipped): an id of
@@ -1459,19 +1501,24 @@ function settingScope(s) {
 //   enum    at least one valid option; a value (or default) that is not
 //           one of them reads as "" (no choice selected)
 //   action  nothing more
-// `scope` is read as settingScope reads it. Unknown fields (enabled_when,
-// hint, ...) are not read. A setting
+// `scope` is read as settingScope reads it; `surface` is the group's
+// (groupSurface), which decides the grammar of an option value
+// (optionValueOf). Unknown fields (enabled_when, hint, ...) are not read. A
+// setting
 // of a known type that is skipped (a fixed int, max == min; too many steps;
 // a field missing) still counts in its group's total (settingKnown), so the
 // group says that not all are shown; one of an unknown type does not.
-function settingEntry(s) {
+function settingEntry(s, surface) {
   if (!isPlainObject(s)) return null
   var id = settingId(s.id)
   if (id === "" || typeof s.type !== "string" || SETTING_TYPES.indexOf(s.type) < 0) return null
   var label = settingText(s.label, SETTING_LABEL_CAP)
   var enabled = s.enabled === true
+  var scope = settingScope(s)
   var e = {
-    id: id, type: s.type, label: label !== "" ? label : id, scope: settingScope(s), stored: s.stored === true, enabled: enabled,
+    id: id, type: s.type, label: label !== "" ? label : id, scope: scope,
+    // Only a global setting is the microphone's (groupSurface).
+    surface: surface === MIC_SURFACE && scope === "global" ? MIC_SURFACE : "", stored: s.stored === true, enabled: enabled,
     reason: enabled ? "" : settingText(s.disabled_reason, SETTING_REASON_CAP),
     value: null, defaultValue: null, min: 0, max: 0, step: 0, unit: "", options: [], optionsTotal: 0
   }
@@ -1494,7 +1541,7 @@ function settingEntry(s) {
     e.value = s.value
     e.defaultValue = s["default"] === true
   } else if (s.type === "enum") {
-    var opts = settingOptions(s.options)
+    var opts = settingOptions(s.options, e.surface)
     if (opts.options.length === 0) return null
     e.options = opts.options
     e.optionsTotal = opts.total
@@ -1552,16 +1599,17 @@ function settingsGroupLine(m) {
     envelope.group = { refused: true, key: "#" + index }
     return envelope
   }
+  var surface = groupSurface(g, scope)
   var n = Math.min(src.length, SETTINGS_LINE_LOOK)
   var rows = []
   var skipped = 0
   for (var i = 0; i < n; i++) {
-    var e = settingEntry(src[i])
+    var e = settingEntry(src[i], surface)
     if (e) rows.push(e)
     else if (settingKnown(src[i])) skipped++
   }
   var label = settingText(g.label, SETTING_LABEL_CAP)
-  envelope.group = { refused: false, id: gid, scope: scope, label: label !== "" ? label : gid, rows: rows,
+  envelope.group = { refused: false, id: gid, scope: scope, surface: surface, label: label !== "" ? label : gid, rows: rows,
                      total: rows.length + skipped + (src.length - n) }
   return envelope
 }
@@ -1592,12 +1640,12 @@ function commitSettings(a) {
       }
       continue
     }
-    // A group is told apart by its scope as well as its id: a camera group
-    // and a global one may share an id.
-    var key = line.group.scope + ":" + line.group.id
+    // A group is told apart by its scope and surface as well as its id: a
+    // camera group, a global one and a microphone one may share an id.
+    var key = line.group.scope + ":" + line.group.surface + ":" + line.group.id
     var g = byId[key]
     if (g === undefined) {
-      g = { id: line.group.id, scope: line.group.scope, label: line.group.label, rows: [], total: 0 }
+      g = { id: line.group.id, scope: line.group.scope, surface: line.group.surface, label: line.group.label, rows: [], total: 0 }
       byId[key] = g
       all.push(g)
     }
@@ -1609,24 +1657,27 @@ function commitSettings(a) {
       if (g.rows.length < SETTINGS_PER_GROUP_CAP) g.rows.push(row)
     }
   }
-  // The caps apply to each scope on its own, so that camera groups never
-  // crowd the global ones out (a refused group counts with the camera's).
+  // The caps apply to each place a group is drawn on its own (the camera's,
+  // the global ones, the microphone's), so that no tab's groups crowd
+  // another's out (a refused group counts with the camera's).
   var out = []
-  var counted = { camera: refusedCount, global: 0 }
-  var shown = { camera: 0, global: 0 }
-  var rows = { camera: 0, global: 0 }
+  var counted = { camera: refusedCount, global: 0, mic: 0 }
+  var shown = { camera: 0, global: 0, mic: 0 }
+  var rows = { camera: 0, global: 0, mic: 0 }
   for (var k = 0; k < all.length; k++) {
     var total = Math.max(all[k].rows.length, all[k].total)
     if (total === 0) continue
     var sc = all[k].scope
-    counted[sc]++
-    if (shown[sc] >= SETTINGS_GROUP_CAP) continue
-    var kept = all[k].rows.slice(0, Math.max(0, SETTINGS_ROW_CAP - rows[sc]))
-    rows[sc] += kept.length
-    shown[sc]++
-    out.push({ id: all[k].id, scope: sc, label: all[k].label, rows: kept, total: total })
+    var place = all[k].surface === MIC_SURFACE ? "mic" : sc
+    counted[place]++
+    if (shown[place] >= SETTINGS_GROUP_CAP) continue
+    var kept = all[k].rows.slice(0, Math.max(0, SETTINGS_ROW_CAP - rows[place]))
+    rows[place] += kept.length
+    shown[place]++
+    out.push({ id: all[k].id, scope: sc, surface: all[k].surface, label: all[k].label, rows: kept, total: total })
   }
-  return { rev: a.rev, serial: a.serial, camera: a.camera, groups: out, groupsTotal: counted.camera, globalGroupsTotal: counted.global }
+  return { rev: a.rev, serial: a.serial, camera: a.camera, groups: out, groupsTotal: counted.camera, globalGroupsTotal: counted.global,
+           micGroupsTotal: counted.mic }
 }
 
 // One settings_group line applied to the record (a copy): kept in the set
@@ -1695,7 +1746,8 @@ function settingsDelta(set, m) {
   var groups = []
   var where = Object.create(null)
   for (var g = 0; g < set.groups.length; g++) {
-    groups.push({ id: set.groups[g].id, scope: set.groups[g].scope, label: set.groups[g].label, rows: set.groups[g].rows.slice(), total: set.groups[g].total })
+    groups.push({ id: set.groups[g].id, scope: set.groups[g].scope, surface: set.groups[g].surface, label: set.groups[g].label,
+                  rows: set.groups[g].rows.slice(), total: set.groups[g].total })
     for (var r = 0; r < set.groups[g].rows.length; r++) where[set.groups[g].rows[r].id] = [g, r]
   }
   var changes = Array.isArray(m.changes) ? m.changes : []
@@ -1708,7 +1760,8 @@ function settingsDelta(set, m) {
     if (at === undefined) continue
     groups[at[0]].rows[at[1]] = settingChanged(groups[at[0]].rows[at[1]], c)
   }
-  return { rev: rev, serial: set.serial, camera: set.camera, groups: groups, groupsTotal: set.groupsTotal, globalGroupsTotal: set.globalGroupsTotal }
+  return { rev: rev, serial: set.serial, camera: set.camera, groups: groups, groupsTotal: set.groupsTotal, globalGroupsTotal: set.globalGroupsTotal,
+           micGroupsTotal: set.micGroupsTotal }
 }
 
 // ---- capability
@@ -1968,9 +2021,10 @@ var EFFECT_MODE_SETTING = "effect.background.mode"
 // The Effect tab's generic section: every group of global settings, all open
 // (no accordion, no reset: the camera's reset never reaches them), without
 // the setting the dedicated row owns (a group left with nothing is not
-// drawn). No groups (`visible` false) when the daemon publishes no other
-// global setting, or predates module effects (MODULES_REVISION: the tab
-// then says it needs updating).
+// drawn), and without the microphone's groups (the Mic tab draws those).
+// No groups (`visible` false) when the daemon publishes no other global
+// setting, or predates module effects (MODULES_REVISION: the tab then says
+// it needs updating).
 function effectSettingsView(record, drafts) {
   var out = emptySettingsView()
   out.collapsible = false
@@ -1981,7 +2035,7 @@ function effectSettingsView(record, drafts) {
   var skippedGroups = 0
   for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
     var group = set.groups[g]
-    if (group.scope !== "global") continue
+    if (group.scope !== "global" || group.surface === MIC_SURFACE) continue
     var rows = []
     var skipped = 0
     for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
@@ -2084,6 +2138,17 @@ function settingArgvGlobal(cli, id, word) {
   return [cli, "settings", "set", "--", id, word]
 }
 
+// A microphone setting is a global one: written as one, after `--`, with
+// the wider word grammar of its option values (a PipeWire node name, see
+// MIC_OPTION_VALUE_RE).
+var MIC_SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[A-Za-z0-9][A-Za-z0-9_.:@/+-]{0,127})$/
+
+function settingArgvMic(cli, id, word) {
+  if (!cliUsable(cli) || settingId(id) === "" || typeof word !== "string" || !MIC_SETTING_VALUE_RE.test(word))
+    return null
+  return [cli, "settings", "set", "--", id, word]
+}
+
 function resetSettingsArgv(cli, camera) {
   var cam = selectableId(camera)
   return cliUsable(cli) && cam !== "" ? [cli, "settings", "reset", "--camera=" + cam] : null
@@ -2108,6 +2173,7 @@ function settingIntentArgv(cli, record, intent) {
   if (row.scope !== "global" && !settingIntentBound(intent, record)) return null
   var word = settingArgvValue(row, intent.value)
   if (word === null) return null
+  if (row.surface === MIC_SURFACE) return settingArgvMic(cli, row.id, word)
   return row.scope === "global" ? settingArgvGlobal(cli, row.id, word) : settingArgv(cli, record.settings.camera, row.id, word)
 }
 
@@ -2152,14 +2218,16 @@ function queueKind(intent) {
 // every queued write and reset (it supersedes them), so a slider drag never
 // queues more than one command per setting. Any other ask replaces the
 // other ask queued before it (the latest wins); a setup write (the setup
-// dialog's) is neither replaced by one nor replaces one. The new intent goes last, so
-// the order of what the user did is kept, except an on/off ask: it goes
-// first, so turning the camera off never waits behind slider writes, and a
+// dialog's) is neither replaced by one nor replaces one, and a microphone
+// on/off replaces only the one before it. The new intent goes last, so
+// the order of what the user did is kept, except an on/off ask (the
+// camera's or the microphone's): it goes first, so turning the camera off
+// never waits behind slider writes, and a
 // discrete ask (isQuickIntent) goes ahead of the queued slider writes. A
 // write queueTakes refuses leaves the queue as it was. So the queue holds at
 // most one other ask, one reset, SETTING_QUEUE_CAP slider writes,
-// QUICK_QUEUE_CAP quick writes, ACTION_QUEUE_CAP actions and SETUP_QUEUE_CAP
-// setup writes, which is
+// QUICK_QUEUE_CAP quick writes, ACTION_QUEUE_CAP actions, SETUP_QUEUE_CAP
+// setup writes and MIC_QUEUE_CAP microphone on/off asks, which is
 // INTENT_QUEUE_CAP (the table above SETTING_QUEUE_CAP): the input is cut to it
 // as a backstop only, and nothing is ever cut from a queue this function made.
 function enqueueIntent(queue, intent) {
@@ -2178,13 +2246,18 @@ function enqueueIntent(queue, intent) {
     } else if (isSetupIntent(intent)) {
       // One setup write at a time (queueTakes); every other ask stays.
       if (isSetupIntent(p)) continue
-    } else if (!isSettingIntent(p) && !isSetupIntent(p)) {
-      // An other ask replaces the other ask before it; a setup write stays.
+    } else if (isMicIntent(intent)) {
+      // The latest microphone on/off wins; every other ask stays.
+      if (isMicIntent(p)) continue
+    } else if (!isSettingIntent(p) && !isSetupIntent(p) && !isMicIntent(p)) {
+      // An other ask replaces the other ask before it; a setup write and a
+      // microphone on/off stay.
       continue
     }
     out.push(p)
   }
-  if (intent.verb === "enable") {
+  if (intent.verb === "enable" || isMicIntent(intent)) {
+    // An on/off ask of the camera or the microphone goes first.
     out.unshift(intent)
   } else if (isQuickIntent(intent)) {
     // A discrete ask (an effect, noise removal, a switch, a choice, a
@@ -2243,12 +2316,13 @@ function keepGlobalSettings(map, records) {
 }
 
 // Whether an on/off toggle must wait: a command other than a camera setting
-// write or a setup write is running or queued, so its result (and with it
-// the target of the toggle) has not arrived. Setting writes never hold the
-// switch, and the setup dialog's writes (a module, the order, a config key)
-// are settings-type writes too: they do not either.
+// write, a setup write or a microphone on/off is running or queued, so its
+// result (and with it the target of the toggle) has not arrived. Setting
+// writes never hold the switch, and the setup dialog's writes (a module, the
+// order, a config key) are settings-type writes too: they do not either; the
+// microphone's on/off is another device's (micBlocked holds its own switch).
 function toggleBlocked(running, queue) {
-  var holds = function(intent) { return isPlainObject(intent) && !isSettingIntent(intent) && !isSetupIntent(intent) }
+  var holds = function(intent) { return isPlainObject(intent) && !isSettingIntent(intent) && !isSetupIntent(intent) && !isMicIntent(intent) }
   if (holds(running)) return true
   var q = Array.isArray(queue) ? queue : []
   for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++)
@@ -2357,15 +2431,16 @@ function settleWritten(drafts, settling, lines) {
 
 // ---------------------------------------------------------------- panel tabs
 
-// The panel's three tabs, in order, under the preview: the words are the
+// The panel's four tabs, in order, under the preview: the words are the
 // stored `panelTab` setting's values (manifest schema `options`, same order),
 // and the only ones ever written. The first is the default.
-var PANEL_TABS = ["effect", "camera", "status"]
+var PANEL_TABS = ["effect", "camera", "mic", "status"]
 var PANEL_TAB_DEFAULT = "effect"
-var PANEL_TAB_LABELS = { effect: "Effect", camera: "Camera", status: "Status" }
+var PANEL_TAB_LABELS = { effect: "Effect", camera: "Camera", mic: "Mic", status: "Status" }
 var PANEL_TAB_DESCRIPTIONS = {
   effect: "Background effect and the video effects' settings",
   camera: "Camera choice and camera settings",
+  mic: "The Omarchy Broadcast Mic: its processing, input and state",
   status: "State, consumers, outputs and live figures"
 }
 
@@ -2422,6 +2497,227 @@ function statusRows(record) {
   return rows
 }
 
+// ---------------------------------------------------------------- microphone
+
+// The Omarchy Broadcast Mic (interface revision 13, docs/cli-json.md): the
+// snapshot's `mic` and the `mic` line give its state, the applications
+// recording from it, the modules processing it, the delay they add and any
+// error; its settings are global settings whose groups carry `surface`
+// "mic" (the daemon's own input group, then one group per audio module
+// stage), which the Mic tab draws generically, as the Effect tab draws the
+// video effects'. Nothing here names an effect or a setting: labels,
+// choices, why a row is greyed (studio voice already removing noise and
+// echo, say) and what a row costs (its label) are the daemon's.
+var MIC_REVISION = 13
+var MIC_SURFACE = "mic"
+var MIC_STATES = ["off", "passthrough", "starting", "active", "error"]
+var MIC_STATE_LABELS = { off: "Off", passthrough: "On, not processed", starting: "Starting", active: "Processing", error: "Error" }
+// The producer's bounds (crates/omarchy-broadcast/src/json.rs).
+var MIC_PROVIDER_CAP = 256
+// The daemon's own group of the microphone (its switch, its input device and
+// the default-microphone actions): every other group is a module's.
+var MIC_INPUT_GROUP = "input"
+var DAEMON_NO_MIC = "The daemon needs updating for the microphone (omarchy-broadcastd 0.29 or newer)."
+var CLI_NO_MIC = "The omarchy-broadcast CLI needs updating for the microphone."
+var MIC_NO_MODULES_TEXT = "No microphone modules installed: the microphone passes the sound through unprocessed."
+// The same while the microphone is off: nothing passes through then.
+var MIC_NO_MODULES_OFF_TEXT = "No microphone modules installed"
+var MIC_PRODUCT = "Omarchy Broadcast Mic"
+
+// The `mic` of a snapshot, or a `mic` line -> { state, rawState, consumers,
+// provider, latencyMs, error }, or null (not an object). An unknown state
+// reads as "unknown" (a later revision's word), shown as the daemon sent it.
+function micFields(m) {
+  if (!isPlainObject(m)) return null
+  return {
+    state: MIC_STATES.indexOf(m.state) >= 0 ? m.state : "unknown",
+    rawState: sanitize(m.state, MODE_CAP),
+    consumers: count(m.consumers),
+    provider: sanitize(m.provider, MIC_PROVIDER_CAP),
+    latencyMs: statNumber(m.latency_ms),
+    error: sanitize(m.error, ERROR_CAP)
+  }
+}
+
+// Whether the microphone can be shown and driven: an available daemon at
+// MIC_REVISION or later, through a CLI that reports it. An unknown revision
+// counts as no.
+function micSupported(record) {
+  return available(record) && record.interfaceRevision >= MIC_REVISION && isPlainObject(record.mic)
+}
+
+// Why the Mic tab cannot show the microphone while the daemon is available:
+// the daemon (below MIC_REVISION, or an unknown revision), or the CLI (a
+// snapshot with no `mic` at all). "" otherwise.
+function micMissingText(record) {
+  if (!available(record) || micSupported(record)) return ""
+  if (record.interfaceRevision >= MIC_REVISION && record.micField === "absent") return CLI_NO_MIC
+  return DAEMON_NO_MIC
+}
+
+// The microphone host runs (its state is not `off`): what `mic on` started.
+function micHostOn(record) {
+  return micSupported(record) && record.mic.state !== "off"
+}
+
+// Whether the record already shows the microphone host as `on` says (true:
+// not off, false: off): what the switch waits for after `mic on|off` ends.
+function micReflects(record, on) {
+  return micSupported(record) && (record.mic.state !== "off") === (on === true)
+}
+
+// How long the microphone's switch waits for the watch's `mic` line after
+// its command ended, at most (ms).
+var MIC_SWITCH_WAIT_MS = 3000
+
+// "N apps recording", or UNKNOWN.
+function micConsumersText(n) {
+  if (typeof n !== "number" || n < 0) return UNKNOWN
+  if (n === 0) return "None"
+  return n === 1 ? "1 app" : n + " apps"
+}
+
+function micStateLabel(mic) {
+  if (!isPlainObject(mic)) return UNKNOWN
+  var known = ownValue(MIC_STATE_LABELS, mic.state)
+  if (known !== undefined) return known
+  return mic.rawState !== "" ? mic.rawState : UNKNOWN
+}
+
+// Whether the daemon's `provider` and `latency_ms` describe something in
+// force: only while the microphone starts or processes. In the other states
+// (passthrough, error) the sound is not processed and no module runs.
+function micProcessing(mic) {
+  return isPlainObject(mic) && (mic.state === "active" || mic.state === "starting")
+}
+
+// The delay the processing adds: "None" while nothing is processed (the
+// daemon reports 0), else in milliseconds; UNKNOWN when not reported.
+function micLatencyText(mic) {
+  if (!isPlainObject(mic) || mic.latencyMs === null) return UNKNOWN
+  if (mic.latencyMs === 0) return "None"
+  return formatStat(mic.latencyMs, 1, " ms")
+}
+
+// The Mic tab's own part, above the settings, exactly as drawn:
+//   { visible, hint, hostOn, rows, runsOn, error }
+// `visible`: the microphone is shown (else `hint` says why: an old daemon
+// or CLI). `hostOn`: the switch of the microphone itself (`mic on|off`).
+// rows: { label, value }; `runsOn` the modules processing it, as the daemon
+// words it ("" unless the state is active or starting, as the added delay is
+// "None" unless it is); `error` the daemon's.
+function micView(record) {
+  var out = { visible: false, hint: "", hostOn: false, rows: [], runsOn: "", error: "" }
+  if (!available(record)) return out
+  if (!micSupported(record)) { out.hint = micMissingText(record); return out }
+  var m = record.mic
+  out.visible = true
+  out.hostOn = m.state !== "off"
+  out.rows = [
+    { label: "State", value: micStateLabel(m) },
+    { label: "Consumers", value: out.hostOn ? micConsumersText(m.consumers) : "None" },
+    { label: "Added delay", value: micProcessing(m) ? micLatencyText(m) : "None" }
+  ]
+  out.runsOn = micProcessing(m) && m.provider !== "" ? "Runs on: " + m.provider : ""
+  out.error = m.error
+  return out
+}
+
+// The Mic tab's settings: every group of surface MIC_SURFACE, all open (no
+// accordion, no reset), as effectSettingsView draws the Effect tab's. `note`
+// says that no audio module is installed when the daemon's own group is the
+// only one; nothing while the set is still loading, or the microphone is
+// not supported (micView says why).
+function micSettingsView(record, drafts) {
+  var out = emptySettingsView()
+  out.collapsible = false
+  if (!micSupported(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out
+  var set = record.settings
+  // The microphone's settings are global: no camera in the key, so another
+  // camera never closes an open dropdown or lets go of a held slider (that
+  // is all a key change does, see SettingsView's rowKey).
+  out.setKey = JSON.stringify([MIC_SURFACE, set.serial])
+  var stop = 0
+  var modules = false
+  var undrawn = 0
+  for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
+    var group = set.groups[g]
+    if (group.surface !== MIC_SURFACE) continue
+    if (group.id !== MIC_INPUT_GROUP) modules = true
+    if (out.groups.length >= SETTINGS_GROUP_CAP) continue
+    var rows = []
+    for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) rows.push(viewRowOf(group.rows[r], drafts, stop++))
+    if (rows.length === 0) { undrawn++; continue }
+    out.groups.push({
+      id: group.id, label: group.label, index: out.groups.length, expanded: true, glyph: "",
+      rows: rows, truncation: showingText(rows.length, group.total, "settings")
+    })
+  }
+  out.rowCount = stop
+  // "Showing N of M groups": M counts the groups the view could draw, not
+  // one it never draws (no row to show).
+  var groupsTotal = typeof set.micGroupsTotal === "number" ? Math.max(0, set.micGroupsTotal - undrawn) : 0
+  out.truncation = showingText(out.groups.length, groupsTotal, "groups")
+  out.note = modules ? "" : (micHostOn(record) ? MIC_NO_MODULES_TEXT : MIC_NO_MODULES_OFF_TEXT)
+  out.visible = out.groups.length > 0 || out.note !== ""
+  return out
+}
+
+function micSettingsShown(view) {
+  return isPlainObject(view) && Array.isArray(view.groups) && view.groups.length > 0
+}
+
+// The bar's microphone indicator: { visible, glyph, tooltip }. Shown while
+// applications record from the Omarchy Broadcast Mic, whatever the camera
+// does; nothing polls for it (the watch's `mic` lines move it).
+function micInUse(record) {
+  return micHostOn(record) && record.mic.consumers > 0
+}
+
+function micTooltipText(record) {
+  if (!micSupported(record)) return ""
+  var m = record.mic
+  var parts = [MIC_PRODUCT + ": " + micStateLabel(m).toLowerCase()]
+  if (m.state !== "off" && m.consumers >= 0) parts.push(m.consumers === 1 ? "1 app recording" : m.consumers + " apps recording")
+  if (m.error !== "") parts.push("error: " + sanitize(m.error, 60))
+  return sanitize(parts.join(" · "), TOOLTIP_CAP)
+}
+
+function micIndicator(record) {
+  var on = micInUse(record)
+  return { visible: on, glyph: GLYPH_MIC, tooltip: on ? micTooltipText(record) : "", urgent: on && record.mic.state === "error" }
+}
+
+// A click on the bar's microphone indicator: left opens the panel on the Mic
+// tab ("open-mic": for this opening only, the stored tab is left as it is),
+// or closes it when it is open ("close"); right opens the setup dialog
+// ("setup"); the middle click is the camera icon's and does nothing here
+// ("ignore").
+function micClickAction(button, opened) {
+  if (button === "right") return "setup"
+  if (button === "middle") return "ignore"
+  return opened === true ? "close" : "open-mic"
+}
+
+// `mic on` (enabled and started, again at every login) or `mic off` (the
+// previous default microphone back, then stopped and disabled).
+function micHostArgv(cli, on) {
+  return cliUsable(cli) && typeof on === "boolean" ? [cli, "mic", on ? "on" : "off"] : null
+}
+
+function isMicIntent(intent) {
+  return isPlainObject(intent) && intent.verb === "mic-host"
+}
+
+// Whether the microphone's switch must wait: its on/off is running or
+// queued, so its result has not arrived.
+function micBlocked(running, queue) {
+  if (isMicIntent(running)) return true
+  var q = Array.isArray(queue) ? queue : []
+  for (var i = 0; i < q.length && i < INTENT_QUEUE_CAP; i++) if (isMicIntent(q[i])) return true
+  return false
+}
+
 // ---------------------------------------------------------------- keyboard cursor
 
 // The panel's keyboard stops, top to bottom, as the panel lays them out: the
@@ -2441,11 +2737,13 @@ function statusRows(record) {
 //           stops): Reset to defaults (on the settings' title line), each
 //           group header (index: its place in the view) and the rows of an
 //           open group (index: the row's `stop`);
+//   mic     the microphone's switch (while micView shows it), then the
+//           rows of `micSettings` (micSettingsView, drawn generically);
 //   status  nothing (it only shows figures).
 // Nothing is a stop while the daemon is unavailable: no control is drawn. The
 // effect row is no stop either while it is not drawn (effectModeView: the
 // daemon predates module effects, or offers no background effect).
-function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings) {
+function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (previewControls === true) {
@@ -2463,6 +2761,13 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
         var erows = Array.isArray(effectSettings.groups[e].rows) ? effectSettings.groups[e].rows : []
         for (var q = 0; q < erows.length && q < SETTINGS_PER_GROUP_CAP; q++) stops.push({ kind: "setting", index: erows[q].stop })
       }
+    }
+  } else if (shown === "mic") {
+    if (micSupported(record)) stops.push({ kind: "mic-host", index: -1 })
+    var mgroups = micSettingsShown(micSettings) ? micSettings.groups : []
+    for (var mg = 0; mg < mgroups.length && mg < SETTINGS_GROUP_CAP; mg++) {
+      var mrows = Array.isArray(mgroups[mg].rows) ? mgroups[mg].rows : []
+      for (var mr = 0; mr < mrows.length && mr < SETTINGS_PER_GROUP_CAP; mr++) stops.push({ kind: "setting", index: mrows[mr].stop })
     }
   } else if (shown === "camera") {
     var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
@@ -2673,6 +2978,10 @@ var CONFIG_WORD_RE = /^(-?[0-9]{1,16}(\.[0-9]{1,6})?|true|false|[a-z0-9][a-z0-9_
 var CONFIG_TYPES = ["bool", "int", "float", "enum", "string", "path", "list"]
 var CONFIG_APPLY = ["live", "reload", "restart"]
 var MODULE_STATUSES = ["available", "unavailable", "disabled"]
+// A module's kind (docs/modules.md; `kind` of a module line from interface
+// revision 13) as the Modules section names it; another kind is shown as
+// the daemon words it, and a daemon that gives none shows no kind.
+var MODULE_KIND_LABELS = { "video-stage": "Camera effect", "audio-filter": "Microphone effect", "analyser": "Analyser" }
 var FILE_STATUSES = ["loaded", "absent", "error"]
 
 // ---- payload and the panel it forwards to
@@ -2829,7 +3138,7 @@ function moduleEntry(o) {
   }
   return {
     id: id, name: name !== "" ? name : id, version: settingText(o.version, MODULE_VERSION_CAP),
-    enabled: o.enabled === true, status: status,
+    kind: sanitize(o.kind, STAGE_WORD_CAP), enabled: o.enabled === true, status: status,
     reason: status === "available" ? "" : settingText(o.reason, MODULE_REASON_CAP),
     overriddenBy: fileText(o.overridden_by), stages: stages,
     stagesTruncated: o.stages_truncated === true || src.length > MODULE_STAGE_CAP
@@ -3341,9 +3650,17 @@ function overriddenText(file) {
   return typeof file === "string" && file !== "" ? OVERRIDDEN_PREFIX + file : ""
 }
 
+// A module's kind for the screen (MODULE_KIND_LABELS), or "".
+function moduleKindText(kind) {
+  if (typeof kind !== "string" || kind === "") return ""
+  var known = ownValue(MODULE_KIND_LABELS, kind)
+  return known !== undefined ? known : kind
+}
+
 // The Modules section: { hint, rows, truncation }; a row:
-//   { id, title, statusText, reason, statusLine, stagesText, checked, switchable, note,
-//     index }
+//   { id, title, statusText, reason, statusLine, kindText, stagesText, checked,
+//     switchable, note, index }
+// `stagesText` leads with the kind (moduleKindText), when the daemon gives one.
 // `switchable` is false while a later config file sets the module's
 // enabled key (`note` says which file).
 function modulesSectionView(setup, record) {
@@ -3359,10 +3676,13 @@ function modulesSectionView(setup, record) {
     var ids = []
     for (var s = 0; s < m.stages.length && s < MODULE_STAGE_CAP; s++) ids.push(m.stages[s].id)
     var statusText = m.status === "available" ? "Available" : (m.status === "disabled" ? "Disabled" : "Unavailable")
+    var kindText = moduleKindText(m.kind)
+    var stages = ids.length > 0 ? "Stages: " + ids.join(", ") + (m.stagesTruncated ? ", …" : "") : ""
     out.rows.push({
       id: m.id, title: m.name + (m.version !== "" ? " " + m.version : ""),
-      statusText: statusText,
-      reason: m.reason, statusLine: statusReasonText(statusText, m.reason), stagesText: ids.length > 0 ? "Stages: " + ids.join(", ") + (m.stagesTruncated ? ", …" : "") : "",
+      statusText: statusText, kindText: kindText,
+      reason: m.reason, statusLine: statusReasonText(statusText, m.reason),
+      stagesText: [kindText, stages].filter(function(t) { return t !== "" }).join(" \u00b7 "),
       checked: m.enabled, switchable: m.overriddenBy === "", note: overriddenText(m.overriddenBy), index: i
     })
   }

@@ -1508,9 +1508,12 @@ TestCase {
     var raw = []
     for (var g = 0; g < groups.length; g++) {
       var parts = Math.max(1, Math.ceil(groups[g].settings.length / opt.per))
-      for (var p = 0; p < parts; p++)
+      for (var p = 0; p < parts; p++) {
+        var group = { id: groups[g].id, label: groups[g].label, settings: groups[g].settings.slice(p * opt.per, (p + 1) * opt.per) }
+        if (groups[g].surface !== undefined) group.surface = groups[g].surface
         raw.push({ v: 1, type: "settings_group", schema: 1, rev: opt.rev, serial: opt.serial, camera: opt.camera, part: p + 1, parts: parts,
-                   group: { id: groups[g].id, label: groups[g].label, settings: groups[g].settings.slice(p * opt.per, (p + 1) * opt.per) } })
+                   group: group })
+      }
     }
     for (var i = 0; i < raw.length; i++) { raw[i].index = i; raw[i].count = raw.length }
     return raw
@@ -2697,12 +2700,13 @@ TestCase {
   // ---- the panel tabs and the Status tab ---------------------------------------
 
   function test_panel_tab_value() {
-    compare(JSON.stringify(Model.PANEL_TABS), JSON.stringify(["effect", "camera", "status"]))
+    compare(JSON.stringify(Model.PANEL_TABS), JSON.stringify(["effect", "camera", "mic", "status"]))
     compare(Model.PANEL_TAB_DEFAULT, "effect")
     compare(Model.panelTabValue("effect"), "effect")
     compare(Model.panelTabValue("camera"), "camera")
+    compare(Model.panelTabValue("mic"), "mic")
     compare(Model.panelTabValue("status"), "status")
-    var bad = [undefined, null, "", "Camera", " camera", "camera ", "cameras", "live", 1, 0, true, ["camera"], { tab: "camera" },
+    var bad = [undefined, null, "", "Camera", " camera", "camera ", "cameras", "live", "Mic", "microphone", 1, 0, true, ["camera"], { tab: "camera" },
                "<b>status</b>", "status\n", NaN]
     for (var i = 0; i < bad.length; i++) compare(Model.panelTabValue(bad[i]), "effect", JSON.stringify(bad[i]) + " " + i)
     // reading never writes
@@ -2714,8 +2718,9 @@ TestCase {
   function test_panel_tab_options() {
     var o = Model.panelTabOptions("camera")
     compare(JSON.stringify(o.map(function(x) { return x.value })), JSON.stringify(Model.PANEL_TABS))
-    compare(JSON.stringify(o.map(function(x) { return x.label })), JSON.stringify(["Effect", "Camera", "Status"]))
-    compare(JSON.stringify(o.map(function(x) { return x.selected })), JSON.stringify([false, true, false]))
+    compare(JSON.stringify(o.map(function(x) { return x.label })), JSON.stringify(["Effect", "Camera", "Mic", "Status"]))
+    compare(JSON.stringify(o.map(function(x) { return x.selected })), JSON.stringify([false, true, false, false]))
+    compare(Model.panelTabOptions("mic")[2].selected, true)
     verify(o.every(function(x) { return typeof x.description === "string" && x.description !== "" && !/[<>&]/.test(x.description) }))
     compare(Model.panelTabOptions("junk")[0].selected, true, "anything else reads as the default")
     compare(Model.panelTabOptions(undefined).filter(function(x) { return x.selected }).length, 1)
@@ -3411,7 +3416,8 @@ TestCase {
     compare(JSON.stringify(mods.rows.map(function(m) { return m.title + "|" + m.statusText + "|" + m.checked + "|" + m.switchable })),
             JSON.stringify(["Module br.com.dias.maxine-vfx 1.0.0|Available|true|true", "Hello tint 0.1.0|Disabled|false|true"]))
     compare(mods.rows[1].reason, "Disabled after crashing the daemon twice in a row", "a crash-ledger disable says so")
-    compare(mods.rows[0].stagesText, "Stages: background")
+    compare(mods.rows[0].stagesText, "Camera effect \u00b7 Stages: background", "the kind leads")
+    compare(mods.rows[0].kindText, "Camera effect")
     var order = Model.orderSectionView(setup, r)
     compare(JSON.stringify(order.rows.map(function(x) { return x.position + x.id + x.up + x.down })),
             JSON.stringify(["1enhancefalsetrue", "2denoisetruetrue", "3backgroundtruefalse"]))
@@ -3519,5 +3525,367 @@ TestCase {
     var trunc = Model.readConfigFiles(filesLines({ files_truncated: true }), 0, "")
     compare(trunc.truncated, true)
     compare(Model.readConfigFiles(filesLines({ files: [{ path: "x.toml", status: "odd", managed: 1, reason: "<b>" }] }), 0, "").files[0].status, "error")
+  }
+
+  // ---- the microphone (interface revision 13) -------------------------------
+
+  readonly property string micDevice: "alsa_input.usb-C-Media-00.mono"
+  function micObj(o) {
+    return merged({ state: "active", consumers: 2, provider: "mic-denoise: NVIDIA Maxine AFX (GPU)", latency_ms: 20, error: "" }, o || {})
+  }
+  function micLine(o) { return merged({ v: 1, type: "mic" }, micObj(o)) }
+  function rev13(o) { return merged({ interface_revision: 13, settings_schema: 1, settings_revision: 5, mic: micObj() }, o || {}) }
+  // The microphone's groups as the daemon publishes them: its own, then the
+  // audio modules' (surface "mic", scope global).
+  function micGroups(o) {
+    var opt = merged({ voice: false, modules: true, surface: "mic" }, o || {})
+    var g = function(id, label, settings) {
+      var out = { id: id, label: label, settings: settings }
+      if (opt.surface !== undefined) out.surface = opt.surface
+      return out
+    }
+    var glob = { scope: "global" }
+    var groups = [g("input", "Microphone", [
+      boolS("mic.input.enabled", "Noise and echo processing", glob),
+      enumS("mic.input.device", "Input device", [{ value: "default", label: "System default" }, { value: micDevice, label: "USB PnP Sound Device" },
+                                                 { value: "alsa_input.pci-0000_00_1f.3.analog-ste…", label: "Built-in" }], glob),
+      merged({ id: "mic.input.make_default", label: "Use as default microphone", type: "action", scope: "global", stored: false, enabled: true,
+               disabled_reason: "", enabled_when: [] }, {}),
+      merged({ id: "mic.input.restore_default", label: "Use the previous default microphone", type: "action", scope: "global", stored: false,
+               enabled: false, disabled_reason: "The Omarchy Broadcast Mic was not made the default here", enabled_when: [] }, {})])]
+    if (!opt.modules) return groups
+    var off = opt.voice ? { enabled: false, disabled_reason: "Studio voice already removes noise and echo" } : {}
+    groups.push(g("noise", "Noise removal", [boolS("mic.noise.enabled", "Noise removal", merged({ scope: "global" }, off)),
+                                             intS("mic.noise.strength", "Strength", merged({ scope: "global", min: 0, max: 100, value: 100, "default": 100, unit: "%" }, off))]))
+    groups.push(g("voice", "Studio voice", [boolS("mic.voice.enabled", "Studio voice (adds noticeable delay)", { scope: "global", value: opt.voice }),
+                                            enumS("mic.voice.profile", "Mic profile", [{ value: "passthrough", label: "None" }, { value: "bright", label: "Bright" }],
+                                                  { scope: "global" })]))
+    return groups
+  }
+  function micRecord(o, g, setOpt) {
+    return feedAll(snap(rev13(o)), setLines(brioGroups().concat(globalGroups()).concat(micGroups(g)), setOpt)).record
+  }
+
+  function test_mic_snapshot_and_lines() {
+    var r = snap(rev13({}))
+    compare(r.micField, "object")
+    compare(JSON.stringify(r.mic), JSON.stringify({ state: "active", rawState: "active", consumers: 2, provider: "mic-denoise: NVIDIA Maxine AFX (GPU)",
+                                                    latencyMs: 20, error: "" }))
+    var res = Model.reduce(r, line(micLine({ state: "passthrough", consumers: 0, provider: "", latency_ms: 0 })))
+    compare(res.outcome, "mic")
+    compare(res.record.mic.state, "passthrough")
+    compare(res.record.mic.consumers, 0)
+    compare(r.mic.state, "active", "records are never mutated")
+    // a state line keeps the microphone; a snapshot replaces it
+    compare(Model.reduce(res.record, line(stateObject({ interface_revision: 13 }))).record.mic.state, "passthrough")
+    compare(Model.reduce(res.record, line(snapshotObject(rev13({ mic: micObj({ state: "off" }) })))).record.mic.state, "off")
+    // a daemon below revision 13 (null) and a CLI that predates it (absent)
+    var old = snap(rev9({ mic: null }))
+    compare(old.micField, "null")
+    compare(old.mic, null)
+    compare(snap(rev9({})).micField, "absent")
+    // not linked: ignored
+    compare(Model.reduce(Model.emptyRecord("not-running"), line(micLine())).outcome, "ignored")
+    compare(Model.reduce(Model.emptyRecord("connecting"), line(micLine())).record.mic, null)
+    // hostile fields
+    var h = Model.reduce(r, line(micLine({ state: "<b>dancing</b>", consumers: -3, provider: "<img src=x>‮GPU", latency_ms: "20", error: 7 }))).record.mic
+    compare(h.state, "unknown")
+    compare(h.rawState, "bdancing/b")
+    compare(h.consumers, -1)
+    compare(h.provider, "img src=xGPU")
+    compare(h.latencyMs, null)
+    compare(h.error, "")
+    compare(Model.reduce(r, line(micLine({ latency_ms: 1e9 }))).record.mic.latencyMs, null, "past STAT_MAX: unknown")
+  }
+
+  function test_mic_supported_and_hints() {
+    compare(Model.micSupported(snap(rev13({}))), true)
+    compare(Model.micMissingText(snap(rev13({}))), "")
+    compare(Model.micSupported(snap(rev9({ mic: null }))), false)
+    compare(Model.micMissingText(snap(rev9({ mic: null }))), Model.DAEMON_NO_MIC)
+    compare(Model.micMissingText(snap(rev9({}))), Model.DAEMON_NO_MIC, "an old daemon, whatever the CLI")
+    var noField = snapshotObject(rev13({}))
+    delete noField.mic
+    compare(Model.micMissingText(Model.reduce(Model.emptyRecord("connecting"), line(noField)).record), Model.CLI_NO_MIC)
+    compare(Model.micMissingText(snap(rev13({ mic: null }))), Model.DAEMON_NO_MIC)
+    compare(Model.micMissingText(snap(rev13({ interface_revision: "13" }))), Model.DAEMON_NO_MIC, "an unknown revision counts as no")
+    compare(Model.micMissingText(Model.emptyRecord("not-running")), "", "unavailable: the panel says why")
+    var v = Model.micView(snap(rev9({})))
+    compare(v.visible, false)
+    compare(v.hint, Model.DAEMON_NO_MIC)
+    compare(Model.micSettingsView(snap(rev9({})), {}).visible, false)
+    compare(Model.micIndicator(snap(rev9({}))).visible, false)
+  }
+
+  function test_mic_view_rows() {
+    var v = Model.micView(snap(rev13({})))
+    compare(v.visible, true)
+    compare(v.hostOn, true)
+    compare(JSON.stringify(v.rows), JSON.stringify([{ label: "State", value: "Processing" }, { label: "Consumers", value: "2 apps" },
+                                                    { label: "Added delay", value: "20.0 ms" }]))
+    compare(v.runsOn, "Runs on: mic-denoise: NVIDIA Maxine AFX (GPU)")
+    compare(v.error, "")
+    var pass = Model.micView(snap(rev13({ mic: micObj({ state: "passthrough", consumers: 1, provider: "", latency_ms: 0 }) })))
+    compare(JSON.stringify(pass.rows.map(function(x) { return x.value })), JSON.stringify(["On, not processed", "1 app", "None"]))
+    compare(pass.runsOn, "", "nothing processes it")
+    // the delay and the module are shown only while processing or starting
+    var passStale = Model.micView(snap(rev13({ mic: micObj({ state: "passthrough", consumers: 1, provider: "stale", latency_ms: 20 }) })))
+    compare(passStale.rows[2].value, "None", "not processed: no added delay")
+    compare(passStale.runsOn, "", "and no module")
+    var starting = Model.micView(snap(rev13({ mic: micObj({ state: "starting", latency_ms: 20 }) })))
+    compare(starting.rows[2].value, "20.0 ms")
+    compare(starting.runsOn, "Runs on: mic-denoise: NVIDIA Maxine AFX (GPU)")
+    var off = Model.micView(snap(rev13({ mic: micObj({ state: "off", consumers: 0, provider: "x", latency_ms: 12 }) })))
+    compare(off.hostOn, false)
+    compare(JSON.stringify(off.rows.map(function(x) { return x.value })), JSON.stringify(["Off", "None", "None"]))
+    compare(off.runsOn, "")
+    var err = Model.micView(snap(rev13({ mic: micObj({ state: "error", error: "The audio worker is not installed" }) })))
+    compare(err.rows[0].value, "Error")
+    compare(err.rows[2].value, "None", "an error: no added delay")
+    compare(err.runsOn, "", "and no module")
+    compare(err.error, "The audio worker is not installed")
+    compare(Model.micView(snap(rev13({ mic: micObj({ state: "warming" }) }))).rows[0].value, "warming", "a later state as the daemon words it")
+    compare(Model.micView(snap(rev13({ mic: micObj({ consumers: -1, latency_ms: -1 }) }))).rows[1].value, Model.UNKNOWN)
+    compare(Model.micView(Model.emptyRecord("not-running")).visible, false)
+    compare(Model.micView(Model.emptyRecord("not-running")).hint, "")
+  }
+
+  function test_mic_settings_routed_by_surface() {
+    var r = micRecord({ cameras: [cameraObjects()[0]] })
+    var ids = function(v) { return JSON.stringify(v.groups.map(function(g) { return g.id })) }
+    compare(ids(Model.micSettingsView(r, {})), JSON.stringify(["input", "noise", "voice"]), "the Mic tab draws the mic groups")
+    compare(ids(Model.effectSettingsView(r, {})), JSON.stringify(["background", "video"]), "the Effect tab does not")
+    compare(ids(Model.settingsView(r, {}, {})), JSON.stringify(["image", "white_balance", "exposure", "focus"]), "nor the Camera tab")
+    var v = Model.micSettingsView(r, {})
+    compare(v.visible, true)
+    compare(v.collapsible, false)
+    compare(v.reset, false)
+    compare(v.title, "")
+    compare(v.note, "")
+    compare(v.truncation, "")
+    compare(JSON.stringify(v.groups[0].rows.map(function(x) { return x.widget })), JSON.stringify(["switch", "dropdown", "action", "action"]))
+    compare(v.rowCount, 8)
+    // the device's choices: node names, but never a clipped one
+    var device = Model.viewRow(v, 1)
+    compare(JSON.stringify(device.options.map(function(o) { return o.value })), JSON.stringify(["default", micDevice]))
+    compare(device.optionsNote, "")
+    // the restore action greyed with the daemon's reason
+    compare(Model.viewRow(v, 3).enabled, false)
+    compare(Model.viewRow(v, 3).reason, "The Omarchy Broadcast Mic was not made the default here")
+    // studio voice on: noise removal greyed with the daemon's reason, its label says what it costs
+    var sv = Model.micSettingsView(micRecord({}, { voice: true }), {})
+    compare(Model.viewRow(sv, 4).enabled, false)
+    compare(Model.viewRow(sv, 4).reason, "Studio voice already removes noise and echo")
+    compare(Model.viewRow(sv, 6).label, "Studio voice (adds noticeable delay)")
+    // no audio module: only the daemon's own group, and the note
+    var none = Model.micSettingsView(micRecord({}, { modules: false }), {})
+    compare(ids(none), JSON.stringify(["input"]))
+    compare(none.note, Model.MIC_NO_MODULES_TEXT)
+    compare(Model.micSettingsView(micRecord({ mic: micObj({ state: "off" }) }, { modules: false }), {}).note, Model.MIC_NO_MODULES_OFF_TEXT,
+            "the switch is off: only that none is installed")
+    compare(Model.MIC_NO_MODULES_OFF_TEXT, "No microphone modules installed")
+    // no mic group at all (the worker never answered): the note alone
+    var empty = Model.micSettingsView(withGlobals(rev13({})), {})
+    compare(empty.groups.length, 0)
+    compare(empty.note, Model.MIC_NO_MODULES_TEXT)
+    compare(empty.visible, true)
+    compare(Model.micSettingsShown(empty), false)
+    // still loading: nothing said
+    compare(Model.micSettingsView(snap(rev13({})), {}).visible, false)
+    // an older daemon gives no surface: the groups stay where they were drawn (the Effect tab)
+    var plain = micRecord({}, { surface: undefined })
+    compare(ids(Model.effectSettingsView(plain, {})), JSON.stringify(["background", "video", "input", "noise", "voice"]))
+    compare(Model.micSettingsView(plain, {}).groups.length, 0)
+    // without the mic surface a node name is no option value
+    compare(JSON.stringify(Model.findSetting(plain, "mic.input.device").options.map(function(o) { return o.value })), JSON.stringify(["default"]))
+    // an unknown surface, or the mic surface on camera settings: drawn by scope
+    var odd = feedAll(snap(rev13({})), setLines([{ id: "x", label: "X", surface: "captions", settings: [boolS("effect.x.on", "On", { scope: "global" })] },
+                                                  { id: "y", label: "Y", surface: "mic", settings: [boolS("camera.y.on", "On")] }])).record
+    compare(ids(Model.effectSettingsView(odd, {})), JSON.stringify(["x"]))
+    compare(ids(Model.settingsView(odd, {}, {})), JSON.stringify(["y"]))
+    compare(Model.micSettingsView(odd, {}).groups.length, 0)
+    // a group id may repeat across places: told apart by surface
+    var twin = feedAll(snap(rev13({})), setLines([{ id: "noise", label: "Video noise", settings: [boolS("effect.noise.on", "On", { scope: "global" })] },
+                                                  { id: "noise", label: "Noise removal", surface: "mic", settings: [boolS("mic.noise.enabled", "On", { scope: "global" })] }])).record
+    compare(rowIds(twin.settings), JSON.stringify(["noise:1", "noise:1"]))
+    compare(Model.effectSettingsView(twin, {}).groups[0].label, "Video noise")
+    compare(Model.micSettingsView(twin, {}).groups[0].label, "Noise removal")
+  }
+
+  function test_mic_settings_caps_and_deltas() {
+    // the mic groups have caps of their own: the effects' never crowd them out
+    var many = []
+    for (var i = 0; i < 18; i++) many.push({ id: "fx" + i, label: "Fx " + i, settings: [boolS("effect.fx" + i + ".on", "On", { scope: "global" })] })
+    for (var j = 0; j < 17; j++) many.push({ id: "m" + j, label: "M " + j, surface: "mic", settings: [boolS("mic.m" + j + ".on", "On", { scope: "global" })] })
+    var r = feedAll(snap(rev13({ active_camera: "", cameras: [] })), setLines(many, { camera: "", per: 1 })).record
+    compare(Model.effectSettingsView(r, {}).groups.length, Model.SETTINGS_GROUP_CAP)
+    var v = Model.micSettingsView(r, {})
+    compare(v.groups.length, Model.SETTINGS_GROUP_CAP)
+    compare(v.truncation, "Showing 16 of 17 groups")
+    compare(r.settings.micGroupsTotal, 17)
+    compare(r.settings.globalGroupsTotal, 18)
+    // "Showing N of M groups": M counts only the groups the view can draw (the
+    // fifth is past the set's 64 rows: no row to show, so never drawn)
+    var wide = []
+    for (var w = 0; w < 5; w++) {
+      var ws = []
+      for (var x = 0; x < 16; x++) ws.push(boolS("mic.w" + w + ".s" + x, "S" + x, { scope: "global" }))
+      wide.push({ id: "w" + w, label: "W " + w, surface: "mic", settings: ws })
+    }
+    var rw = feedAll(snap(rev13({ active_camera: "", cameras: [] })), setLines(wide, { camera: "", per: 16 })).record
+    compare(rw.settings.micGroupsTotal, 5)
+    var vw = Model.micSettingsView(rw, {})
+    compare(vw.groups.length, 4)
+    compare(vw.truncation, "", "the undrawn group is not counted")
+    // a delta keeps the surface, and moves a mic row
+    var m = micRecord({})
+    var d = Model.reduce(m, line(deltaLine([{ id: "mic.noise.enabled", value: false, stored: true }]))).record
+    compare(d.settings.micGroupsTotal, 3)
+    compare(Model.findSetting(d, "mic.noise.enabled").value, false)
+    compare(Model.micSettingsView(d, {}).groups.length, 3, "still the Mic tab's")
+    // a draft shows on a mic row
+    var drafts = {}
+    drafts["mic.input.device"] = micDevice
+    compare(Model.viewRow(Model.micSettingsView(m, drafts), 1).valueText, "USB PnP Sound Device")
+  }
+
+  function test_mic_setting_argv() {
+    var r = micRecord({})
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "mic.input.device", value: micDevice, camera: brioId, scope: "global" }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", "mic.input.device", micDevice]), "a node name, no camera named")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "mic.input.make_default", value: true, camera: "", quick: true }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", "mic.input.make_default", "true"]), "an action, bound to no camera")
+    compare(Model.intentArgv({ verb: "setting", id: "mic.input.restore_default", value: true, camera: "" }, cli, r), null, "greyed: not run")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "mic.noise.strength", value: 42, camera: "" }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", "mic.noise.strength", "42"]))
+    compare(Model.intentArgv({ verb: "setting", id: "mic.input.device", value: "alsa_input.other", camera: "" }, cli, r), null, "not one of its options")
+    // the wider word grammar is the mic's only
+    compare(Model.settingArgvGlobal(cli, "effect.x.y", micDevice), null)
+    compare(JSON.stringify(Model.settingArgvMic(cli, "mic.input.device", micDevice)), JSON.stringify([cli, "settings", "set", "--", "mic.input.device", micDevice]))
+    var bad = ["", "-rf", "a b", "a\nb", "x…", "a;b", "$(x)", "a".repeat(129), "_x"]
+    for (var i = 0; i < bad.length; i++) compare(Model.settingArgvMic(cli, "mic.input.device", bad[i]), null, JSON.stringify(bad[i]))
+    compare(Model.settingArgvMic("relative", "mic.input.device", micDevice), null)
+    compare(Model.settingArgvMic(cli, "Mic.Input", micDevice), null)
+    // an old daemon: nothing is written to a mic row it never sent
+    compare(Model.intentArgv({ verb: "setting", id: "mic.input.device", value: micDevice, camera: "" }, cli, withGlobals({})), null)
+  }
+
+  function test_mic_host_argv_and_queue() {
+    var r = snap(rev13({}))
+    compare(JSON.stringify(Model.micHostArgv(cli, true)), JSON.stringify([cli, "mic", "on"]))
+    compare(JSON.stringify(Model.micHostArgv(cli, false)), JSON.stringify([cli, "mic", "off"]))
+    compare(Model.micHostArgv(cli, "on"), null)
+    compare(Model.micHostArgv("", true), null)
+    compare(JSON.stringify(Model.intentArgv({ verb: "mic-host", on: false }, cli, r)), JSON.stringify([cli, "mic", "off"]))
+    compare(Model.intentArgv({ verb: "mic-host", on: true }, cli, snap(rev9({}))), null, "an old daemon: never run")
+    compare(Model.intentArgv({ verb: "mic-host", on: true }, cli, Model.emptyRecord("not-running")), null, "never D-Bus-activates a stopped daemon")
+    // the queue: the latest mic ask wins, goes first, and leaves the camera's asks alone
+    var sel = { verb: "select", id: fhdId }
+    var slider = { verb: "setting", id: "mic.noise.strength", value: 40, camera: "", scope: "global" }
+    var q = Model.enqueueIntent([], sel)
+    q = Model.enqueueIntent(q, slider)
+    q = Model.enqueueIntent(q, { verb: "mic-host", on: true })
+    q = Model.enqueueIntent(q, { verb: "mic-host", on: false })
+    compare(JSON.stringify(q.map(function(x) { return x.verb + (x.on === undefined ? "" : ":" + x.on) })), JSON.stringify(["mic-host:false", "select", "setting"]))
+    q = Model.enqueueIntent(q, { verb: "next" })
+    compare(JSON.stringify(q.map(function(x) { return x.verb })), JSON.stringify(["mic-host", "setting", "next"]), "another ask replaces the select, not the mic")
+    q = Model.enqueueIntent(q, { verb: "enable", on: false })
+    compare(JSON.stringify(q.map(function(x) { return x.verb })), JSON.stringify(["enable", "mic-host", "setting"]),
+            "turning the camera off still goes first, and replaces the other ask only")
+    // the mic's on/off never holds the camera's switch, and holds its own
+    compare(Model.toggleBlocked({ verb: "mic-host", on: true }, []), false)
+    compare(Model.toggleBlocked(null, [{ verb: "mic-host", on: true }]), false)
+    compare(Model.micBlocked({ verb: "mic-host", on: true }, []), true)
+    compare(Model.micBlocked(null, [sel, { verb: "mic-host", on: true }]), true)
+    compare(Model.micBlocked({ verb: "enable", on: true }, [sel]), false)
+    compare(Model.queueTakes([], { verb: "mic-host", on: true }), true)
+    compare(Model.INTENT_QUEUE_CAP, Model.SETTING_QUEUE_CAP + Model.QUICK_QUEUE_CAP + Model.ACTION_QUEUE_CAP + Model.SETUP_QUEUE_CAP + Model.MIC_QUEUE_CAP + 2)
+  }
+
+  function test_mic_indicator() {
+    var on = Model.micIndicator(snap(rev13({})))
+    compare(on.visible, true)
+    compare(on.glyph, String.fromCodePoint(0xF036C))
+    compare(on.tooltip, "Omarchy Broadcast Mic: processing · 2 apps recording")
+    compare(on.urgent, false)
+    compare(Model.micIndicator(snap(rev13({ mic: micObj({ consumers: 1, state: "passthrough" }) }))).tooltip,
+            "Omarchy Broadcast Mic: on, not processed · 1 app recording")
+    var err = Model.micIndicator(snap(rev13({ mic: micObj({ state: "error", error: "The worker crashed" }) })))
+    compare(err.urgent, true)
+    compare(err.tooltip, "Omarchy Broadcast Mic: error · 2 apps recording · error: The worker crashed")
+    compare(Model.micIndicator(snap(rev13({ mic: micObj({ consumers: 0 }) }))).visible, false, "nobody records")
+    compare(Model.micIndicator(snap(rev13({ mic: micObj({ consumers: -1 }) }))).visible, false, "unknown")
+    compare(Model.micIndicator(snap(rev13({ mic: micObj({ state: "off", consumers: 3 }) }))).visible, false, "the host is off")
+    compare(Model.micIndicator(Model.emptyRecord("not-running")).visible, false)
+    compare(Model.micIndicator(snap(rev13({ state: "off", enabled: false }))).visible, true, "whatever the camera does")
+    // the line moves it, nothing polls
+    var r = Model.reduce(snap(rev13({ mic: micObj({ consumers: 0 }) })), line(micLine({ consumers: 1 }))).record
+    compare(Model.micIndicator(r).visible, true)
+    compare(Model.micClickAction("left", false), "open-mic", "the panel opens on the Mic tab")
+    compare(Model.micClickAction("left", true), "close", "an open panel closes")
+    compare(Model.micClickAction("left"), "open-mic")
+    compare(Model.micClickAction("right", true), "setup")
+    compare(Model.micClickAction("right", false), "setup")
+    compare(Model.micClickAction("middle", true), "ignore")
+    compare(Model.micClickAction("middle", false), "ignore")
+  }
+
+  // Device names to 128 characters, as the daemon and the CLI carry them.
+  function test_mic_long_node_names() {
+    var k66 = "alsa_input.usb-K66_K66_20190805V001-00.analog-stereo"
+    verify(k66.length > 32 && k66.length < 128)
+    compare(Model.optionValueOf(k66, Model.MIC_SURFACE), k66)
+    compare(Model.optionValueOf("a".repeat(128), Model.MIC_SURFACE), "a".repeat(128))
+    compare(Model.optionValueOf("a".repeat(129), Model.MIC_SURFACE), "", "past 128")
+    compare(Model.optionValueOf(k66, ""), "", "never another surface's")
+    compare(JSON.stringify(Model.settingArgvMic(cli, "mic.input.device", k66)), JSON.stringify([cli, "settings", "set", "--", "mic.input.device", k66]))
+    compare(Model.settingArgvMic(cli, "mic.input.device", "a".repeat(129)), null)
+    var groups = micGroups({})
+    groups[0].settings[1] = enumS("mic.input.device", "Input device", [{ value: "default", label: "System default" }, { value: k66, label: "K66" }],
+                                  { scope: "global" })
+    var r = feedAll(snap(rev13({})), setLines(brioGroups().concat(globalGroups()).concat(groups), {})).record
+    var device = Model.viewRow(Model.micSettingsView(r, {}), 1)
+    compare(JSON.stringify(device.options.map(function(o) { return o.value })), JSON.stringify(["default", k66]), "offered, not clipped")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: "mic.input.device", value: k66, camera: "", scope: "global" }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--", "mic.input.device", k66]))
+  }
+
+  function test_mic_set_key_ignores_the_camera() {
+    var a = micRecord({ cameras: [cameraObjects()[0]] })
+    var v = Model.micSettingsView(a, {})
+    verify(v.setKey.indexOf(String(a.settings.camera)) < 0 || a.settings.camera === "", "no camera in the key")
+    compare(v.setKey, JSON.stringify(["mic", a.settings.serial]))
+  }
+
+  function test_mic_tab_stops() {
+    var r = micRecord({ cameras: [cameraObjects()[0]] })
+    var mv = Model.micSettingsView(r, {})
+    var stops = Model.cursorStops(r, 1, false, "mic", Model.settingsView(r, {}, {}), Model.effectSettingsView(r, {}), mv)
+    compare(kindsOf(stops), JSON.stringify(["switch", "tabs", "mic-host", "setting", "setting", "setting", "setting", "setting", "setting", "setting", "setting"]))
+    compare(JSON.stringify(stops.slice(3).map(function(s) { return s.index })), JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7]))
+    compare(Model.stopIndex(stops, "mic-host", -1), 2)
+    compare(kindsOf(Model.cursorStops(snap(rev9({})), 1, false, "mic")), JSON.stringify(["switch", "tabs"]), "an old daemon: no control")
+    compare(kindsOf(Model.cursorStops(r, 1, false, "status")), JSON.stringify(["switch", "tabs"]))
+    compare(Model.stopIndex(Model.cursorStops(r, 1, false, "camera"), "mic-host", -1), -1, "another tab's stop")
+  }
+
+  function test_module_kind_and_mic_pins() {
+    var list = Model.readModules(moduleLines([moduleObj("br.com.dias.maxine-afx", { kind: "audio-filter", stages: [
+      { id: "mic-denoise", slot: "clean", rank: 300, device: "nvidia-gpu", available: true, reason: "", selected: true }] }),
+      moduleObj("org.example.odd", { kind: "<b>sensor</b>" }), moduleObj("org.example.old", { kind: undefined, stages: [] })]), 0, "")
+    compare(JSON.stringify(list.modules.map(function(m) { return m.kind })), JSON.stringify(["audio-filter", "bsensor/b", ""]))
+    var setup = Model.withSetupRead(fullSetup(), "modules", list)
+    var rows = Model.modulesSectionView(setup, setupRecord(13)).rows
+    compare(JSON.stringify(rows.map(function(x) { return x.stagesText })),
+            JSON.stringify(["Microphone effect · Stages: mic-denoise", "bsensor/b · Stages: background", ""]), "an older daemon: no kind")
+    compare(Model.moduleKindText("analyser"), "Analyser")
+    compare(Model.moduleKindText("constructor"), "constructor", "never an inherited member")
+    // the Backends section shows the mic stages' pins as any other
+    var groups = cfgGroups()
+    groups[4].settings.push(cfgRow("modules.pin.mic-denoise", "enum", { label: "Module for mic-denoise", value: "", "default": "", apply: "reload",
+      options: [{ value: "", label: "Automatic" }, { value: "br.com.dias.maxine-afx", label: "NVIDIA Maxine AFX" }, { value: "br.com.dias.voice-cpu", label: "DeepFilterNet" }] }))
+    var back = Model.backendsSectionView(Model.withSetupRead(setup, "config", Model.readConfig(configLines(groups), 0, "")), setupRecord(13))
+    compare(JSON.stringify(back.groups[0].rows.map(function(x) { return x.id })),
+            JSON.stringify(["modules.profile", "modules.pin.background", "modules.pin.mic-denoise"]))
   }
 }

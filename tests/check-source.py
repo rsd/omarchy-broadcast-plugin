@@ -68,7 +68,15 @@ widget would hide.
     Model.PANEL_TABS through Model.settingsEntry, and the manifest's enum
     options are exactly Model.PANEL_TABS; each tab page is drawn only for its
     own word; the card is 520 wide and as tall as its content (the screen's
-    available height is the only cap; past it the Flickable scrolls).
+    available height is the only cap; past it the Flickable scrolls);
+  - the microphone: the Mic tab is drawn from Model.micView and
+    Model.micSettingsView only (the groups of surface "mic", routed in
+    Model by the group's surface, never by an id), its switch runs only
+    `mic on|off` (Model.micHostArgv, fixed words) as an intent of the queue
+    from Daemon.setMicHost, a microphone setting is written as a global one
+    after `--` with its own word grammar (Model.settingArgvMic), and the
+    bar's microphone glyph follows Model.micIndicator, a pure function of
+    the watch's record (no timer, no other process).
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -352,7 +360,15 @@ check("flushSettings walks only the drafts, bounded by Model.withSetting",
 check("a move is made a value of its enabled row before it is kept",
       "var v = row && row.enabled ? Model.rowValue(row, value) : null" in block(daemon, "function moveSetting"))
 timers = re.findall(r"property Timer (\w+): Timer \{", daemon)
-check("the Daemon's timers are the backoff and the settings debounce", sorted(timers) == ["backoffTimer", "settingsTimer"], str(timers))
+check("the Daemon's timers are the backoff, the settings debounce and the microphone switch's bounded wait",
+      sorted(timers) == ["backoffTimer", "micWaitTimer", "settingsTimer"], str(timers))
+mic_timer = block(daemon, "property Timer micWaitTimer")
+check("the microphone switch's wait is a one-shot of Model.MIC_SWITCH_WAIT_MS, started only when a mic on/off command ended",
+      re.search(r"^\s*repeat:\s*false\s*$", mic_timer, re.M) is not None
+      and "interval: Model.MIC_SWITCH_WAIT_MS" in mic_timer and "running:" not in mic_timer
+      and "triggeredOnStart" not in mic_timer and "var MIC_SWITCH_WAIT_MS = 3000" in model
+      and re.findall(r"micWaitTimer\.(start|restart)\(\)", daemon) == ["restart"]
+      and "micWaitTimer.restart()" in block(daemon, "function commandEnded"), mic_timer[:200])
 settings_timer = block(daemon, "property Timer settingsTimer")
 check("the settings debounce is a one-shot of Model.CONTROLS_DEBOUNCE_MS",
       re.search(r"^\s*repeat:\s*false\s*$", settings_timer, re.M) is not None
@@ -393,7 +409,7 @@ check("the settings section is drawn only from Model.settingsView",
       and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible', panel) is not None
       and "view: root.settingsView" in panel
       and "readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)" in panel
-      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings)" in panel
+      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings)" in panel
       and re.search(r'objectName: "effectSettingsArea"[^}]*visible: root\.genericEffect', panel) is not None
       and "view: root.effectSettings" in panel)
 check("the set's lines, options and changes are capped before they are walked",
@@ -403,6 +419,43 @@ check("the set's lines, options and changes are capped before they are walked",
       and "var count = lineIndex(m.count, 1, SETTINGS_LINES_CAP)" in block(model, "function settingsGroupLine"))
 check("the revision-6 controls code is gone (no fallback below 0.22)",
       all(n not in model + daemon + panel for n in ("CONTROL_NAMES", "controlArgv", "controlsSection", "camera_controls", '"controls"')))
+
+# ---- the microphone -------------------------------------------------------------
+check("the Mic tab is drawn only from Model.micView and Model.micSettingsView",
+      "readonly property var micView: Model.micView(record)" in panel
+      and "readonly property var micSettings: Model.micSettingsView(record, Daemon.settingDrafts)" in panel
+      and "view: root.micSettings" in panel
+      and re.search(r'objectName: "micSettingsArea"[^}]*visible: root\.micSettings\.visible', panel) is not None
+      and 'readonly property var activeView: tab === "effect" ? effectSettings : (tab === "mic" ? micSettings : settingsView)' in panel)
+check("the mic groups are routed by the group's surface, only for global settings",
+      re.search(r'function groupSurface\(g, scope\)\s*\{\s*return scope === "global" && isPlainObject\(g\) && g\.surface === MIC_SURFACE \? MIC_SURFACE : ""\s*\}', model) is not None
+      and 'var MIC_SURFACE = "mic"' in model
+      and "if (group.scope !== \"global\" || group.surface === MIC_SURFACE) continue" in block(model, "function effectSettingsView")
+      and "if (group.surface !== MIC_SURFACE) continue" in block(model, "function micSettingsView"))
+check("the microphone's switch runs only `mic on|off`, as an intent from Daemon.setMicHost",
+      re.search(r'function micHostArgv\(cli, on\)\s*\{\s*return cliUsable\(cli\) && typeof on === "boolean" \? \[cli, "mic", on \? "on" : "off"\] : null\s*\}', model) is not None
+      and 'case "mic-host": return micSupported(record) ? micHostArgv(cli, intent.on === true) : null' in model
+      and re.findall(r'request\(\{ verb: "mic-host"[^)]*\)', daemon) == ['request({ verb: "mic-host", on: on === true })']
+      and "request({ verb: \"mic-host\", on: on === true })" in block(daemon, "function setMicHost")
+      and "if (micBusy || !Model.micSupported(record)) return false" in block(daemon, "function setMicHost")
+      and "Daemon.setMicHost(!root.micView.hostOn)" in block(panel, "function toggleMic")
+      and "if (!root.available || !root.micView.visible || Daemon.micBusy) return false" in block(panel, "function toggleMic")
+      and re.search(r'objectName: "micSwitch"[^}]*busy: Daemon\.micBusy', panel) is not None)
+check("a microphone setting is written as `settings set -- ID VALUE`, its word of the mic grammar",
+      re.search(r'function settingArgvMic\(cli, id, word\)\s*\{\s*'
+                r'if \(!cliUsable\(cli\) \|\| settingId\(id\) === "" \|\| typeof word !== "string" \|\| !MIC_SETTING_VALUE_RE\.test\(word\)\)\s*'
+                r'return null\s*return \[cli, "settings", "set", "--", id, word\]', model) is not None
+      and "var MIC_SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[A-Za-z0-9][A-Za-z0-9_.:@/+-]{0,127})$/" in model
+      and "var MIC_OPTION_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9_.:@/+-]{0,127}$/" in model
+      and "if (row.surface === MIC_SURFACE) return settingArgvMic(cli, row.id, word)" in block(model, "function settingIntentArgv"))
+check("the bar's microphone glyph follows Model.micIndicator only; its clicks go through Model.micClickAction",
+      "readonly property var micIndicator: Model.micIndicator(record)" in bar_src
+      and re.search(r'id: micIcon\s*objectName: "micIndicator"\s*visible: root\.micIndicator\.visible', bar_src) is not None
+      and "var action = Model.micClickAction(" in block(bar_src, "function pressMic")
+      and "toggleCamera" not in block(bar_src, "function pressMic"))
+check("the mic's on/off holds neither the camera's switch nor is held by it",
+      "!isSettingIntent(intent) && !isSetupIntent(intent) && !isMicIntent(intent)" in block(model, "function toggleBlocked")
+      and "readonly property bool micBusy: Model.micBlocked(runningIntent, pendingIntents) || micAwaiting !== null" in daemon)
 
 # ---- every Process is in a singleton -----------------------------------------
 for path, src in sources.items():
@@ -464,7 +517,7 @@ check("a stored tab is read only through Model.panelTabValue",
       and 'readonly property string storedTab: Model.panelTabValue(Model.settingValue(settings, "panelTab"))' in bar_src
       and "var next = Model.panelTabValue(value)" in block(panel, "function showTab")
       and re.findall(r"root\.tab = ([^\n]*)", panel) == ["next"])
-for word, name in (("effect", "effectTab"), ("camera", "cameraTab"), ("status", "statusTab")):
+for word, name in (("effect", "effectTab"), ("camera", "cameraTab"), ("mic", "micTab"), ("status", "statusTab")):
     check(f"the {word} tab is drawn only while it is the tab shown",
           re.search(r'objectName: "' + name + r'"[^}]*visible: root\.tab === "' + word + r'"', panel) is not None)
 check("the clicks go through Model.clickAction: middle toggles through Model.middleClickAction, right opens the setup, left the panel",
