@@ -40,7 +40,9 @@ import "Model.js" as Model
 // previous one; the first arrow key shows the cursor; Up/Down (or k/j) walk
 // the section list and then the shown section's controls (Model.setupStops);
 // Right from the list goes into the section, Left back to it; on a row of
-// choices Left/Right walk them, on a number Left/Right step it, on a stage
+// choices Left/Right walk them, on a dropdown (an enum of many or long
+// choices, as the panel's Model.settingWidget tells them apart) Enter or Space
+// opens its list, on a number Left/Right step it, on a stage
 // Left/Right pick Move up or Move down; Enter or Space activates; Ctrl+Up/Down
 // moves the stage under the cursor; PageUp/PageDown scroll the section,
 // and in a section with nothing to act on (Diagnostics, or one that only
@@ -78,8 +80,21 @@ Item {
   readonly property var sections: Model.setupSectionOptions(section)
   readonly property var modulesView: Model.modulesSectionView(Daemon.setup, record)
   readonly property var orderView: Model.orderSectionView(Daemon.setup, record)
-  readonly property var backendsView: Model.backendsSectionView(Daemon.setup, record)
-  readonly property var daemonView: Model.daemonSectionView(Daemon.setup, record)
+  // The configuration views are only replaced when what they draw changes:
+  // `record` is a new object on every line the watch prints (a Stats line
+  // about once a second while the camera runs), and a new array makes the
+  // repeaters rebuild every row, which would close an open dropdown list.
+  readonly property var backendsFresh: Model.backendsSectionView(Daemon.setup, record)
+  readonly property var daemonFresh: Model.daemonSectionView(Daemon.setup, record)
+  property var backendsView: ({ hint: "", groups: [], stops: 0 })
+  property var daemonView: ({ hint: "", groups: [], stops: 0 })
+  onBackendsFreshChanged: syncViews()
+  onDaemonFreshChanged: syncViews()
+  Component.onCompleted: syncViews()
+  function syncViews() {
+    if (JSON.stringify(backendsFresh) !== JSON.stringify(backendsView)) backendsView = backendsFresh
+    if (JSON.stringify(daemonFresh) !== JSON.stringify(daemonView)) daemonView = daemonFresh
+  }
   readonly property var diagnostics: Model.diagnosticsView(Daemon.setup, record)
   readonly property var activeView: section === "modules" ? modulesView
     : (section === "order" ? orderView
@@ -252,7 +267,16 @@ Item {
       if (!row) return
       if (row.widget === "switch") Daemon.setConfig(row.id, row.value !== true)
       else if (row.widget === "choices") chooseConfig(row, root.choiceCursor)
+      else if (row.widget === "dropdown") openConfigList(stop.index)
     }
+  }
+
+  // Enter or Space on a dropdown row: its list opens and takes the keyboard
+  // (the shell Dropdown's own keys: Up/Down or j/k walk, Enter chooses,
+  // Escape closes); the dialog's key catcher gets it back on close.
+  function openConfigList(stop) {
+    var item = findConfigItem(stop)
+    return item ? item.openList() : false
   }
 
   // ---- writes (Daemon checks each against the data it read) ---------------------
@@ -274,6 +298,15 @@ Item {
     var option = row && row.options ? row.options[index] : undefined
     if (!option || option.selected) return false
     return Daemon.setConfig(row.id, option.value)
+  }
+
+  // A dropdown's choice, by value (the Dropdown emits the value). The row is
+  // a repeater's modelData, whose options are a list, not an Array.
+  function chooseConfigValue(row, value) {
+    var options = row && row.options ? row.options : []
+    for (var i = 0; i < options.length && i < Model.CONFIG_OPTION_CAP; i++)
+      if (options[i].value === value) return chooseConfig(row, i)
+    return false
   }
 
   function stepConfig(row, direction) {
@@ -340,15 +373,24 @@ Item {
 
   onStopsChanged: if (cursorIndex >= stops.length) cursorIndex = Math.max(0, stops.length - 1)
 
+  // Every read of the setup rebuilds the rows (the repeaters' models are the
+  // views' arrays), and a dropdown's list that was open goes with its row,
+  // taking the keyboard with it: the key catcher has it back.
+  onConfigViewChanged: Qt.callLater(function() { if (root.shown && !catcher.activeFocus) catcher.forceActiveFocus() })
+
   // ---- pieces -----------------------------------------------------------------------
 
-  // A label and a value on one line, the value right-aligned and elided.
+  // A label and a value on one line, the value right-aligned and elided; a
+  // value that is a sentence (`wrap`: the daemon's warning or error, up to 512
+  // characters) goes under its label instead, in full and wrapped.
   component InfoRow: Item {
     id: infoRow
     property string label: ""
     property string value: ""
+    property bool wrap: false
     width: parent ? parent.width : 0
-    implicitHeight: Math.max(infoLabel.implicitHeight, infoValue.implicitHeight)
+    implicitHeight: wrap ? infoLabel.implicitHeight + Style.space(2) + infoValue.implicitHeight
+      : Math.max(infoLabel.implicitHeight, infoValue.implicitHeight)
 
     // The value keeps at least this much of the line; a long label (a file
     // path) gives way, elided in the middle.
@@ -357,7 +399,8 @@ Item {
     Text {
       id: infoLabel
       textFormat: Text.PlainText
-      width: Math.min(implicitWidth, Math.max(0, infoRow.width - infoRow.valueRoom - Style.space(12)))
+      width: infoRow.wrap ? Math.min(implicitWidth, infoRow.width)
+        : Math.min(implicitWidth, Math.max(0, infoRow.width - infoRow.valueRoom - Style.space(12)))
       elide: Text.ElideMiddle
       text: infoRow.label
       color: root.dim
@@ -366,11 +409,14 @@ Item {
     }
     Text {
       id: infoValue
+      objectName: "infoValue"
       textFormat: Text.PlainText
-      anchors.right: parent.right
-      width: Math.max(0, parent.width - infoLabel.width - Style.space(12))
-      horizontalAlignment: Text.AlignRight
-      elide: Text.ElideMiddle
+      x: infoRow.wrap ? 0 : parent.width - width
+      y: infoRow.wrap ? infoLabel.implicitHeight + Style.space(2) : 0
+      width: infoRow.wrap ? parent.width : Math.max(0, parent.width - infoLabel.width - Style.space(12))
+      horizontalAlignment: infoRow.wrap ? Text.AlignLeft : Text.AlignRight
+      wrapMode: infoRow.wrap ? Text.Wrap : Text.NoWrap
+      elide: infoRow.wrap ? Text.ElideNone : Text.ElideMiddle
       text: infoRow.value
       color: root.foreground
       font.family: root.fontFamily
@@ -879,18 +925,45 @@ Item {
                       readonly property var row: modelData
                       objectName: "configRow-" + modelData.id
                       width: parent ? parent.width : 0
+
+                      // A dropdown is wide enough for its longest label (the
+                      // list's rows are as wide as the box), within the line.
+                      readonly property real listWidth: row.widget === "dropdown"
+                        ? widestOption() + 2 * Style.spacing.controlPaddingX + Style.space(36) : 0
+                      TextMetrics {
+                        id: optionProbe
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+                      function widestOption() {
+                        var widest = 0
+                        for (var i = 0; i < row.options.length; i++) {
+                          optionProbe.text = row.options[i].label
+                          widest = Math.max(widest, optionProbe.advanceWidth)
+                        }
+                        return widest
+                      }
+
+                      // Opens a dropdown row's list; false on any other row.
+                      function openList() {
+                        if (row.widget !== "dropdown") return false
+                        configList.open()
+                        return true
+                      }
+
                       implicitHeight: configColumn.implicitHeight + Style.spacing.controlPaddingY * 2
                       // One highlight: the row's on a switch or a number, the
-                      // chip's on a row of choices.
-                      hasCursor: row.stop >= 0 && root.hasCursor("config", row.stop) && row.widget !== "choices"
+                      // chip's on a row of choices, the box's on a dropdown.
+                      hasCursor: row.stop >= 0 && root.hasCursor("config", row.stop)
+                        && row.widget !== "choices" && row.widget !== "dropdown"
                       foreground: root.foreground
                       accent: root.accent
                       // As SettingsView maps its rows: a switch is a check
                       // box, a number a spin box, a row of choices a combo
-                      // box; a value only shown is text.
+                      // box (as is a dropdown); a value only shown is text.
                       Accessible.role: row.widget === "switch" ? Accessible.CheckBox
                         : (row.widget === "stepper" ? Accessible.SpinBox
-                          : (row.widget === "choices" ? Accessible.ComboBox : Accessible.StaticText))
+                          : (row.widget === "choices" || row.widget === "dropdown" ? Accessible.ComboBox : Accessible.StaticText))
                       Accessible.name: row.label
                       Accessible.description: row.valueText + (row.note !== "" ? ". " + row.note : "")
                         + (row.description !== "" ? ". " + row.description : "")
@@ -939,11 +1012,13 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             implicitWidth: configRow.row.widget === "switch" ? configSwitch.implicitWidth
                               : (configRow.row.widget === "choices" ? 0
-                                : (configRow.row.widget === "stepper" ? configStepper.implicitWidth
-                                  : Math.min(configValue.implicitWidth, configColumn.width * 0.55)))
+                                : (configRow.row.widget === "dropdown" ? Math.min(Math.max(Style.space(260), configRow.listWidth), configColumn.width * 0.7)
+                                  : (configRow.row.widget === "stepper" ? configStepper.implicitWidth
+                                    : Math.min(configValue.implicitWidth, configColumn.width * 0.55))))
                             implicitHeight: configRow.row.widget === "switch" ? configSwitch.implicitHeight
                               : (configRow.row.widget === "choices" ? 0
-                                : (configRow.row.widget === "stepper" ? configStepper.implicitHeight : configValue.implicitHeight))
+                                : (configRow.row.widget === "dropdown" ? configList.implicitHeight
+                                  : (configRow.row.widget === "stepper" ? configStepper.implicitHeight : configValue.implicitHeight)))
                             width: implicitWidth
                             height: implicitHeight
 
@@ -1002,6 +1077,34 @@ Item {
                                 onHovered: function(on) { if (on) root.setCursor("config", configRow.row.stop) }
                                 onClicked: root.stepConfig(configRow.row, 1)
                               }
+                            }
+
+                            // An enum of many or long choices (Model.configWidget):
+                            // the shell's Dropdown, its list over the rows
+                            // below. The Dropdown sets its own value on a
+                            // choice: bound to the row's again, so the
+                            // daemon's word shows (a refused write reverts).
+                            Dropdown {
+                              id: configList
+                              objectName: "configDropdown-" + configRow.row.id
+                              anchors.left: parent.left
+                              anchors.right: parent.right
+                              anchors.verticalCenter: parent.verticalCenter
+                              visible: configRow.row.widget === "dropdown"
+                              showLabel: false
+                              options: configRow.row.widget === "dropdown" ? configRow.row.options : []
+                              value: typeof configRow.row.value === "string" ? configRow.row.value : ""
+                              hasCursor: root.hasCursor("config", configRow.row.stop)
+                              foreground: root.foreground
+                              accent: root.accent
+                              fontFamily: root.fontFamily
+                              Accessible.name: configRow.row.label
+                              onHovered: function(isHovered) { if (isHovered) root.setCursor("config", configRow.row.stop) }
+                              onChanged: function(value) {
+                                configList.value = Qt.binding(function() { return typeof configRow.row.value === "string" ? configRow.row.value : "" })
+                                root.chooseConfigValue(configRow.row, value)
+                              }
+                              onPopupOpenChanged: if (!popupOpen && root.shown) catcher.forceActiveFocus()
                             }
 
                             Text {
@@ -1084,8 +1187,10 @@ Item {
                 model: root.diagnostics.rows
                 delegate: InfoRow {
                   required property var modelData
+                  objectName: "diagnosticRow-" + modelData.label
                   label: modelData.label
                   value: modelData.value
+                  wrap: modelData.value.length > Model.INFO_WRAP_CHARS
                 }
               }
 

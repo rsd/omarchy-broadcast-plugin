@@ -3190,6 +3190,149 @@ TestCase {
     compare(Model.configSetArgv("", "output.format", "nv12"), null)
   }
 
+  // output.mode of interface revision 12: an editable enum of up to 16 options
+  // the daemon computes ("WxH@FPS" values, labels with a dot).
+  function outputModeOptions(n) {
+    var sizes = ["3840x2160", "2560x1440", "1920x1080", "1280x720"]
+    var rates = [15, 24, 30, 60]
+    var out = []
+    for (var i = 0; i < n; i++) {
+      var size = sizes[Math.floor(i / 4) % 4], rate = rates[i % 4]
+      out.push({ value: size + "@" + rate, label: size + " \u00b7 " + rate + " fps" + (rate === 60 ? " (generated)" : "") })
+    }
+    return out
+  }
+  function modeRow(options, o) {
+    return Model.configEntry(cfgRow("output.mode", "enum", merged({ label: "Output size and rate", value: "1920x1080@30", "default": "1920x1080@30",
+                                                                    apply: "reload", options: options }, o || {})))
+  }
+
+  function test_config_enum_dropdown_for_many_or_long_choices() {
+    // many choices: a dropdown, as the panel draws a long setting
+    var mode = modeRow(outputModeOptions(16))
+    compare(mode.options.length, 16)
+    compare(Model.configWidget(mode), "dropdown")
+    var v = Model.configRowView(mode, 3)
+    compare(v.widget, "dropdown")
+    compare(v.options.length, 16)
+    compare(v.stop, 3, "a dropdown is a keyboard stop")
+    compare(Model.configSelected(v), 10)
+    compare(v.options[10].selected, true)
+    compare(v.options[15].label, "1280x720 \u00b7 60 fps (generated)", "a label keeps its generated note")
+    compare(v.valueText, "1920x1080 \u00b7 30 fps")
+    compare(v.applyText, "Applies at next camera start", "the apply note stays")
+    // few and short: the row of buttons stays
+    var short4 = modeRow([{ value: "a", label: "A" }, { value: "b", label: "B" }, { value: "c", label: "C" }, { value: "d", label: "D" }], { value: "a", "default": "a" })
+    compare(Model.configWidget(short4), "choices")
+    compare(Model.configRowView(short4, 0).widget, "choices")
+    compare(Model.configRowView(short4, 0).applyText, "Applies at next camera start")
+    var fmt = Model.configEntry(cfgRow("output.format", "enum", { value: "nv12", options: [{ value: "nv12", label: "NV12" }, { value: "i420", label: "I420" }] }))
+    compare(Model.configWidget(fmt), "choices", "two short choices")
+    // the same limits as the panel's settings (Model.SEGMENTED_MAX_OPTIONS and _CHARS)
+    var five = modeRow([{ value: "a", label: "A" }, { value: "b", label: "B" }, { value: "c", label: "C" }, { value: "d", label: "D" },
+                        { value: "e", label: "E" }], { value: "a", "default": "a" })
+    compare(Model.configWidget(five), "dropdown", "five short choices")
+    compare(Model.SEGMENTED_MAX_OPTIONS, 4)
+    var longLabels = modeRow([{ value: "a", label: "A fairly long first choice" }, { value: "b", label: "Second" }], { value: "a", "default": "a" })
+    compare(Model.configWidget(longLabels), "dropdown", "labels together over " + Model.SEGMENTED_MAX_CHARS + " characters")
+    var edge = modeRow([{ value: "a", label: new Array(Model.SEGMENTED_MAX_CHARS).join("x") + "y" }], { value: "a", "default": "a" })
+    compare(edge.options[0].label.length, Model.SEGMENTED_MAX_CHARS)
+    compare(Model.configWidget(edge), "choices", "exactly the limit still fits")
+    compare(Model.fitsSegmented([{ label: "A" }, { label: "B" }]), true)
+    compare(Model.fitsSegmented([]), true)
+    compare(Model.fitsSegmented(null), true)
+    compare(Model.fitsSegmented(outputModeOptions(3)), false)
+    // a settings row and a config row of the same options get the same widget
+    var setting = { type: "enum", options: outputModeOptions(16) }
+    compare(Model.settingWidget(setting), Model.configWidget(mode))
+    // the options a dropdown shows are the daemon's, at most 16, labels up to a config label's 48
+    var many = modeRow(outputModeOptions(16).concat([{ value: "800x600@30", label: "800x600 \u00b7 30 fps" }]))
+    compare(many.options.length, 16, "at most 16 are looked at")
+    var wide = modeRow([{ value: "a", label: new Array(48).join("w") + "xyz" }], { value: "a", "default": "a" })
+    compare(wide.options[0].label.length, 48, "a config option label is kept up to 48 characters")
+    // an older daemon: output.mode is read-only text, never a dropdown
+    var old = Model.configEntry(cfgRow("output.mode", "string", { label: "Mode", value: "1920x1080@30", editable: false }))
+    compare(Model.configWidget(old), "text")
+    compare(Model.configRowView(old, 3).stop, -1)
+    // an enum the daemon marks read-only, greyed, or overridden is text too
+    compare(Model.configWidget(modeRow(outputModeOptions(16), { editable: false })), "text")
+    compare(Model.configWidget(modeRow(outputModeOptions(16), { enabled: false, disabled_reason: "No camera" })), "text")
+    compare(Model.configWidget(modeRow(outputModeOptions(16), { overridden_by: "config.d/90-local.toml", enabled: false })), "text")
+  }
+
+  function test_config_dropdown_value_is_written_by_config_set() {
+    var c = Model.readConfig(configLines([{ id: "output", label: "Output", settings: [
+      cfgRow("output.mode", "enum", { label: "Output size and rate", value: "1920x1080@30", "default": "1920x1080@30", apply: "reload",
+              options: outputModeOptions(16) })] }]), 0, "")
+    var row = Model.findConfigRow(c, "output.mode")
+    compare(row.options.length, 16)
+    // the word is the option's value, checked against the row's options
+    compare(Model.configWord(row, "1920x1080@60"), "1920x1080@60")
+    compare(Model.configWord(row, "2560x1440@24"), "2560x1440@24")
+    compare(Model.configWord(row, "800x600@30"), null, "only the row's options")
+    compare(Model.configWord(row, "1920x1080 \u00b7 60 fps"), null, "a label is not a value")
+    compare(Model.configWord(row, 60), null)
+    compare(JSON.stringify(Model.configSetArgv(cli, "output.mode", "1920x1080@60")),
+            JSON.stringify([cli, "config", "set", "--", "output.mode", "1920x1080@60"]), "after `--`, one element")
+    compare(JSON.stringify(Model.configSetArgv(cli, "output.mode", "1920x1080@30000/1001")),
+            JSON.stringify([cli, "config", "set", "--", "output.mode", "1920x1080@30000/1001"]), "a fractional rate")
+    compare(Model.configSetArgv(cli, "output.mode", "1920x1080 @60"), null, "no space")
+    compare(Model.configSetArgv(cli, "output.mode", "@60"), null, "starts with a letter or digit")
+    compare(Model.configSetArgv(cli, "output.mode", "-1920x1080@60"), null)
+    compare(Model.configSetArgv(cli, "output.mode", "1920x1080;60"), null)
+    // the write is an intent of the setup queue, from revision 10 (the row itself arrives from 12)
+    var go = function(word, r) { return JSON.stringify(Model.intentArgv({ verb: "setup", op: "config", id: "output.mode", word: word }, cli, r)) }
+    compare(go("1920x1080@60", setupRecord(12)), JSON.stringify([cli, "config", "set", "--", "output.mode", "1920x1080@60"]))
+    compare(go("1920x1080@60", setupRecord(9)), "null", "config writes need revision 10")
+    // a refused value (the dialog asks chooseConfigValue first) never reaches argv
+    compare(Model.configOptionIndex(Model.configRowView(row, 0).options, "1920x1080@60"), 11)
+    compare(Model.configOptionIndex(Model.configRowView(row, 0).options, "800x600@30"), -1)
+  }
+
+  function test_capture_mode_setting_is_a_dropdown_and_written_by_settings_set() {
+    var modes = ["3840x2160@30", "3840x2160@24", "2560x1440@30", "1920x1200@30", "1920x1080@60", "1920x1080@30", "1920x1080@24",
+                 "1600x900@30", "1280x960@30", "1280x720@60", "1280x720@30", "1024x576@30", "960x540@30", "640x360@30"]
+    var options = [{ value: "auto", label: "Automatic" }]
+    for (var i = 0; i < modes.length; i++) {
+      var parts = modes[i].split("@")
+      options.push({ value: modes[i], label: parts[0] + " \u00b7 " + parts[1] + " fps" })
+    }
+    options.push({ value: "4096x2160@30", label: "4096x2160 \u00b7 30 fps (gone)" })
+    compare(options.length, 16)
+    var groups = [{ id: "capture", label: "Capture", settings: [
+      enumS("camera.capture.mode", "Capture mode", options, { value: "3840x2160@30", "default": "auto", stored: true, hint: "dropdown" })] }].concat(brioGroups())
+    var r = feedAll(snap(rev7({ interface_revision: 12 })), setLines(groups, { rev: 12 })).record
+    var mode = Model.findSetting(r, "camera.capture.mode")
+    verify(mode !== null, "the row is kept: values with @ are valid")
+    compare(mode.options.length, 16)
+    compare(mode.options[1].value, "3840x2160@30")
+    compare(mode.options[15].label, "4096x2160 \u00b7 30 fps (gone)", "the whole label, within 32 characters")
+    compare(Model.settingWidget(mode), "dropdown")
+    compare(r.settings.groups[0].id, "capture", "the first group")
+    compare(Model.settingValueText(mode, "3840x2160@30"), "3840x2160 \u00b7 30 fps")
+    var v = Model.settingsView(r, {}, {})
+    compare(v.groups[0].id, "capture")
+    compare(v.groups[0].expanded, false, "Image stays the group open by default")
+    compare(v.groups[1].expanded, true)
+    v = Model.settingsView(r, "capture", {})
+    compare(v.groups[0].expanded, true, "opened by the user")
+    compare(v.groups[0].rows[0].widget, "dropdown")
+    compare(v.groups[0].rows[0].options.length, 16)
+    // the write
+    var argv = function(value) {
+      return JSON.stringify(Model.intentArgv({ verb: "setting", id: "camera.capture.mode", value: value, camera: brioId }, cli, r))
+    }
+    compare(argv("1920x1080@60"), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.capture.mode", "1920x1080@60"]))
+    compare(argv("auto"), JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", "camera.capture.mode", "auto"]))
+    compare(argv("800x600@30"), "null", "not one of the row's options")
+    compare(Model.settingArgv(cli, brioId, "camera.capture.mode", "1920x1080@30000/1001") !== null, true, "a fractional rate")
+    compare(Model.settingArgv(cli, brioId, "camera.capture.mode", "1920x1080 60"), null)
+    // an older daemon never publishes it: no capture group, nothing to draw
+    var old = feedAll(snap(rev7({ interface_revision: 7 })), setLines(brioGroups())).record
+    compare(Model.findSetting(old, "camera.capture.mode"), null)
+    compare(old.settings.groups[0].id, "image")
+  }
+
   function test_setup_intents() {
     var r10 = setupRecord(10)
     var r9 = setupRecord(9)

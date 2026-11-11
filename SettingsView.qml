@@ -592,8 +592,29 @@ Column {
                   Item {
                     id: dropdownBox
                     property string openKey: ""
-                    implicitWidth: Style.space(220)
+                    // Wide enough for the longest label (the list's rows are
+                    // as wide as the box, and a label cut off at "(gone)"
+                    // would hide the point), never less than 220;
+                    // the row's loader holds it within the line.
+                    readonly property real labelsWidth: widestLabel()
+                    implicitWidth: Math.max(Style.space(220), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
                     implicitHeight: choiceList.implicitHeight
+
+                    TextMetrics {
+                      id: labelProbe
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+
+                    function widestLabel() {
+                      var options = settingRow.row.options
+                      var widest = 0
+                      for (var i = 0; i < options.length; i++) {
+                        labelProbe.text = options[i].label
+                        widest = Math.max(widest, labelProbe.advanceWidth)
+                      }
+                      return widest
+                    }
 
                     function openList() {
                       choiceList.open()

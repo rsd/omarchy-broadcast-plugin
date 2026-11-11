@@ -304,7 +304,7 @@ check("settingArgv: the camera in --camera=, then --, then the id and the value,
       re.search(r'function settingArgv\(cli, camera, id, word\)\s*\{\s*var cam = selectableId\(camera\)\s*'
                 r'if \(!cliUsable\(cli\) \|\| cam === "" \|\| settingId\(id\) === "" \|\| typeof word !== "string" \|\| !SETTING_VALUE_RE\.test\(word\)\)\s*'
                 r'return null\s*return \[cli, "settings", "set", "--camera=" \+ cam, "--", id, word\]', model) is not None
-      and 'var SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[a-z0-9_]{1,32})$/' in model
+      and 'var SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[a-z0-9_@/]{1,32})$/' in model
       and 'var SETTING_ID_RE = /^[a-z0-9]+(\\.[a-z0-9_]+){1,3}$/' in model)
 check("a reset is the constant `settings reset` with the checked camera",
       re.search(r'function resetSettingsArgv\(cli, camera\)\s*\{\s*var cam = selectableId\(camera\)\s*'

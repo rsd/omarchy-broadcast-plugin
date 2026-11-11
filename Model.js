@@ -1267,7 +1267,9 @@ var SETTINGS_SCHEMA = 1
 // grammar allows them; anything else is not a setting of a v1 producer.
 var SETTING_ID_RE = /^[a-z0-9]+(\.[a-z0-9_]+){1,3}$/
 var SETTING_ID_CAP = 48
-var OPTION_VALUE_RE = /^[a-z0-9_]{1,32}$/
+// An option value is a word, or a capture mode (revision 12: WxH@FPS, the rate
+// a whole number or a fraction: 3840x2160@30, 1920x1080@30000/1001).
+var OPTION_VALUE_RE = /^[a-z0-9_@/]{1,32}$/
 var GROUP_ID_RE = /^[a-z0-9_]{1,32}$/
 // Words the grammars above allow that must never be a key: assigning an
 // object's `__proto__` re-parents it (and reading it gives Object.prototype),
@@ -1834,17 +1836,25 @@ function settingDescription(row) {
   return parts.join(". ")
 }
 
-// The widget an enum gets: a row of buttons while it has at most
-// SEGMENTED_MAX_OPTIONS choices whose labels fit SEGMENTED_MAX_CHARS, else a
+// Whether an enum's options are drawn as a row of buttons: at most
+// SEGMENTED_MAX_OPTIONS of them, with labels that fit SEGMENTED_MAX_CHARS
+// together. The panel's settings and the setup dialog's configuration rows
+// share the rule; a row that fails it is a dropdown.
+function fitsSegmented(options) {
+  var list = Array.isArray(options) ? options : []
+  var chars = 0
+  for (var i = 0; i < list.length; i++) chars += String(list[i].label).length
+  return list.length <= SEGMENTED_MAX_OPTIONS && chars <= SEGMENTED_MAX_CHARS
+}
+
+// The widget an enum gets: a row of buttons while fitsSegmented, else a
 // dropdown.
 function settingWidget(row) {
   if (!row) return ""
   if (row.type === "int") return "slider"
   if (row.type === "bool") return "switch"
   if (row.type === "action") return "action"
-  var chars = 0
-  for (var i = 0; i < row.options.length; i++) chars += row.options[i].label.length
-  return row.options.length <= SEGMENTED_MAX_OPTIONS && chars <= SEGMENTED_MAX_CHARS ? "segmented" : "dropdown"
+  return fitsSegmented(row.options) ? "segmented" : "dropdown"
 }
 
 // ---- the panel's view
@@ -2037,7 +2047,7 @@ function viewRow(view, stop) {
 
 // The words a value is written as: a decimal integer (a leading minus is
 // fine: it comes after `--`), true or false, or an option value.
-var SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[a-z0-9_]{1,32})$/
+var SETTING_VALUE_RE = /^(-?[0-9]{1,10}|true|false|[a-z0-9_@/]{1,32})$/
 
 // A value of `row` as its argv word, or null: an int put on the row's grid
 // and written by String() (a device integer has no exponent), a strict
@@ -2627,6 +2637,8 @@ var CONFIG_GROUP_CAP = 16
 var CONFIG_GROUP_ROW_CAP = 48
 var CONFIG_ROW_CAP = 128
 var CONFIG_OPTION_CAP = 16
+// A config option label is bounded like any config label (docs/cli-json.md).
+var CONFIG_OPTION_LABEL_CAP = 48
 var CONFIG_FILES_CAP = 16
 var CONFIG_LIST_CAP = 16
 // Lines of one read ever looked at: the longest is a module list.
@@ -2652,11 +2664,12 @@ var STAGE_ID_RE = /^[a-z][a-z0-9-]{0,31}$/
 // Any number of parts (bounded by CONFIG_KEY_CAP): a module id has as many
 // as the daemon's valid_module_id allows within its 64 bytes.
 var CONFIG_KEY_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_-]+)+$/
-// An option value of a config enum: a word, a module id, or "" (Automatic).
-var CONFIG_OPTION_RE = /^([a-z0-9][a-z0-9_.-]{0,63})?$/
+// An option value of a config enum: a word, a module id, an output mode
+// (output.mode: 1920x1080@60), or "" (Automatic).
+var CONFIG_OPTION_RE = /^([a-z0-9][a-z0-9_.@/-]{0,63})?$/
 // The words a config value is written as: a decimal number, true or false,
 // an option value ("" included). Each is one argv element after `--`.
-var CONFIG_WORD_RE = /^(-?[0-9]{1,16}(\.[0-9]{1,6})?|true|false|[a-z0-9][a-z0-9_.-]{0,63}|)$/
+var CONFIG_WORD_RE = /^(-?[0-9]{1,16}(\.[0-9]{1,6})?|true|false|[a-z0-9][a-z0-9_.@/-]{0,63}|)$/
 var CONFIG_TYPES = ["bool", "int", "float", "enum", "string", "path", "list"]
 var CONFIG_APPLY = ["live", "reload", "restart"]
 var MODULE_STATUSES = ["available", "unavailable", "disabled"]
@@ -2932,7 +2945,7 @@ function configOptions(value) {
     if (!isPlainObject(o) || typeof o.value !== "string" || !CONFIG_OPTION_RE.test(o.value) || reservedKey(o.value)) continue
     if (seen["=" + o.value] === true) continue
     seen["=" + o.value] = true
-    var label = settingText(o.label, OPTION_LABEL_CAP)
+    var label = settingText(o.label, CONFIG_OPTION_LABEL_CAP)
     out.push({ value: o.value, label: label !== "" ? label : (o.value !== "" ? o.value : UNKNOWN) })
   }
   return { options: out, total: out.length + (src.length - n) }
@@ -3379,6 +3392,10 @@ function orderSectionView(setup, record) {
   return out
 }
 
+// A Diagnostics value longer than this (the daemon's warning or error) is
+// drawn under its label, wrapped, instead of on its line, elided.
+var INFO_WRAP_CHARS = 48
+
 // A config value as the dialog writes it.
 function configValueText(row, value) {
   if (!isPlainObject(row)) return ""
@@ -3401,13 +3418,15 @@ function configValueText(row, value) {
 }
 
 // The widget a config row gets: "switch" (bool), "choices" (enum: a row of
-// buttons), "stepper" (a bounded number: - and +), or "text" (the value,
+// buttons, while fitsSegmented; "dropdown" for an enum of many or long
+// choices, such as output.mode), "stepper" (a bounded number: - and +), or
+// "text" (the value,
 // read-only): every row the daemon does not take a write for now
 // (configWord's rule), and every string, path or list.
 function configWidget(row) {
   if (!isPlainObject(row) || !row.editable || !row.enabled || row.overriddenBy !== "") return "text"
   if (row.type === "bool") return "switch"
-  if (row.type === "enum") return "choices"
+  if (row.type === "enum") return fitsSegmented(row.options) ? "choices" : "dropdown"
   if ((row.type === "int" || row.type === "float") && row.bounded) return "stepper"
   return "text"
 }
