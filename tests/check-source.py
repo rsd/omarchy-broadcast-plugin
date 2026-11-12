@@ -76,7 +76,21 @@ widget would hide.
     from Daemon.setMicHost, a microphone setting is written as a global one
     after `--` with its own word grammar (Model.settingArgvMic), and the
     bar's microphone glyph follows Model.micIndicator, a pure function of
-    the watch's record (no timer, no other process).
+    the watch's record (no timer, no other process);
+  - the background gallery (interface revision 15): the Gallery... and
+    Add... flows run on one more Process of the Daemon (mediaProc), each step
+    an argv of Model.mediaStepArgv only, stdout in line mode (the list's
+    lines LINE_CAP each and counted, a picker's first line only, capped),
+    stderr chunked, every step bounded by a watchdog Timer; the two tools
+    are looked up with a fixed script (Model.toolsArgv) whose tool names are
+    positional arguments, never script text; a picked path is used only when
+    it is exactly the path of an item of the gallery just read
+    (Model.galleryChoice), and goes on as an intent of the command queue
+    (`effect replace --image PATH`, `media import background PATH --select`);
+    the dialog's Remove is a setup intent for a user item of the read gallery
+    only (Daemon.removeMedia, Model.mediaUserItem); the thumbnail is the
+    plugin's second Image, its source only Model.mediaImageSource of the
+    checked path.
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -229,11 +243,18 @@ for path, src in everything.items():
     check(f"{name}: no StdioCollector", "StdioCollector" not in src)
     check(f"{name}: no string command", re.search(r"command\s*:\s*[\"']", src) is None)
 
-# The only `sh -c` is the resolver: a fixed script that looks on PATH only.
+# The only `sh -c` are the resolver and the gallery tools' lookup: fixed
+# scripts that look on PATH only.
 sh_uses = [p.name for p, s in everything.items() if '"sh", "-c"' in s]
-check("sh -c only in Model.resolverArgv", sh_uses == ["Model.js"], str(sh_uses))
+check("sh -c only in Model.resolverArgv and Model.toolsArgv", sh_uses == ["Model.js"], str(sh_uses))
 model = js_sources[PLUGIN / "Model.js"]
 check("resolver argv is the fixed script", 'return ["sh", "-c", RESOLVER_SCRIPT, "omarchy-broadcast-resolve"]' in model)
+check("the tools lookup is a fixed script, its tool names positional arguments, and the only other sh -c",
+      'return ["sh", "-c", TOOLS_SCRIPT, "omarchy-broadcast-tools", GALLERY_TOOL, CHOOSER_TOOL]' in model
+      and model.count('"sh", "-c"') == 2
+      and re.search(r'var TOOLS_SCRIPT = ""\n(\s*\+ "[^"\n]*(\\"[^"\n]*)*"\n)+', model) is not None
+      and "GALLERY_TOOL" not in model[model.find("var TOOLS_SCRIPT"):model.find("function toolsArgv")]
+      and '"for t do "' in model)
 check("no development-build fallback", "target/release" not in model and "development" not in everything[PLUGIN / "Daemon.qml"])
 
 
@@ -360,8 +381,12 @@ check("flushSettings walks only the drafts, bounded by Model.withSetting",
 check("a move is made a value of its enabled row before it is kept",
       "var v = row && row.enabled ? Model.rowValue(row, value) : null" in block(daemon, "function moveSetting"))
 timers = re.findall(r"property Timer (\w+): Timer \{", daemon)
-check("the Daemon's timers are the backoff, the settings debounce and the microphone switch's bounded wait",
-      sorted(timers) == ["backoffTimer", "micWaitTimer", "settingsTimer"], str(timers))
+check("the Daemon's timers are the backoff, the settings debounce, the microphone switch's bounded wait and the gallery step's watchdog",
+      sorted(timers) == ["backoffTimer", "mediaWatchdog", "micWaitTimer", "settingsTimer"], str(timers))
+media_timer = block(daemon, "property Timer mediaWatchdog")
+check("the gallery watchdog is a one-shot, (re)started only by startMediaStep and stopped when a step ends",
+      "repeat: false" in media_timer and "onTriggered: root.mediaTimeout()" in media_timer
+      and re.findall(r"mediaWatchdog\.(\w+)\(", daemon) == ["restart", "stop"])
 mic_timer = block(daemon, "property Timer micWaitTimer")
 check("the microphone switch's wait is a one-shot of Model.MIC_SWITCH_WAIT_MS, started only when a mic on/off command ended",
       re.search(r"^\s*repeat:\s*false\s*$", mic_timer, re.M) is not None
@@ -492,8 +517,17 @@ image_block = block(panel[panel.rfind("Image {", 0, image_at):], "Image {") if i
 check("the preview Image is never cached and reads Preview.frameSource",
       re.search(r"^\s*cache:\s*false\s*$", image_block, re.M) is not None
       and "Preview.frameSource" in image_block and "retainWhileLoading: true" in image_block, image_block[:200])
-check("only one Image in the plugin", sum(len(re.findall(r"(?<![\w.])Image\s*\{", s)) for p, s in sources.items()
-                                          if p.parent == PLUGIN) == 1)
+check("two Images in the plugin: the preview and the background thumbnail",
+      sum(len(re.findall(r"(?<![\w.])Image\s*\{", s)) for p, s in sources.items() if p.parent == PLUGIN) == 2)
+_panel = sources[PLUGIN / "BroadcastPanel.qml"]
+_at = _panel.find("id: backgroundImage")
+thumb_block = _panel[_at:_panel.find("}", _at)] if _at >= 0 else ""
+check("the background thumbnail reads only the checked path's URL, async, decoded at twice its size",
+      "source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : \"\"" in thumb_block
+      and "asynchronous: true" in thumb_block and "sourceSize.width: backgroundThumb.width * 2" in thumb_block
+      and "out.source = mediaImageSource(record.backgroundImagePath)" in block(model, "function backgroundRowView")
+      and 'return "file://" + p.split("/").map(function(seg) { return encodeURIComponent(seg) }).join("/")' in block(model, "function mediaImageSource"),
+      thumb_block[:200])
 for path, src in everything.items():
     raw = path.read_text(encoding="utf-8")
     check(f"{path.name}: no video device", "/dev/video" not in raw)
@@ -598,14 +632,18 @@ check("the setup reads: fixed argv, stdout in line mode and bounded, stderr chun
       read_block != "" and re.search(r"stdout:\s*SplitParser\s*\{\s*onRead", read_block) is not None
       and re.search(r'stderr:\s*SplitParser\s*\{\s*splitMarker:\s*""', read_block) is not None
       and "var argv = Model.setupReadArgv(cliPath, kind)" in block(daemon, "function nextRead")
-      and "readLines.length >= Model.READ_LINES_CAP" in block(daemon, "function readLine")
       and "line.length > Model.LINE_CAP" in block(daemon, "function readLine")
+      and "readLines.length >= Model.readLinesCap(readKind)" in block(daemon, "function readLine")
+      and 'return kind === "media" ? MEDIA_ITEM_CAP + 2 : READ_LINES_CAP' in block(model, "function readLinesCap")
       and all(w in block(model, "function setupReadArgv") for w in (
           'return [cli, "modules", "list", "--json"]', 'return [cli, "order", "show", "--json"]',
-          'return [cli, "config", "show", "--json"]', 'return [cli, "config", "files", "--json"]')))
+          'return [cli, "config", "show", "--json"]', 'return [cli, "config", "files", "--json"]',
+          'if (kind === "media") return mediaListArgv(cli)'))
+      and 'return cliUsable(cli) ? [cli, "media", "list", MEDIA_KIND, "--json"] : null' in block(model, "function mediaListArgv"))
 setup_requests = re.findall(r'request\(\{ verb: "setup", op: "([a-z-]+)"', daemon)
-check("setup writes are intents of the queue, from the four Daemon functions only",
-      setup_requests == ["module", "order", "order-reset", "config"]
+check("setup writes are intents of the queue, from the five Daemon functions only",
+      setup_requests == ["module", "order", "order-reset", "config", "media-remove"]
+      and "var item = setupBusy ? null : Model.mediaUserItem(setup.media, path)" in block(daemon, "function removeMedia")
       and 'request({ verb: "setup", op: "module", id: m.id, on: on })' in block(daemon, "function setModuleEnabled")
       and "Model.orderAfterMove(setup.order, index, direction)" in block(daemon, "function moveStage")
       and "var word = row ? Model.configWord(row, value) : null" in block(daemon, "function setConfig")
@@ -615,9 +653,29 @@ check("a config value goes after `--`, key and word checked; a stage order is id
                 r'return \[cli, "config", "set", "--", key, word\]', model) is not None
       and "if (stageIdOf(order[i]) === \"\" || seen[order[i]] === true) return null" in block(model, "function orderSetArgv")
       and "if (direction === -1 ? !st.up : !st.down) return null" in block(model, "function orderAfterMove"))
-dialog_writes = re.findall(r"Daemon\.(setModuleEnabled|moveStage|resetOrder|setConfig|commitSetting|moveSetting)\(([^,)]*)", dialog)
-check("the dialog writes only by ids of rows it was given",
-      dialog_writes != [] and all(a in ("row.id", "configRow.row.id", "index", "") for _, a in dialog_writes), str(dialog_writes))
+dialog_writes = re.findall(r"Daemon\.(setModuleEnabled|moveStage|resetOrder|setConfig|commitSetting|moveSetting|removeMedia)\(([^,)]*)", dialog)
+check("the dialog writes only by ids (or gallery paths) of rows it was given",
+      dialog_writes != [] and all(a in ("row.id", "configRow.row.id", "index", "", "row.path") for _, a in dialog_writes), str(dialog_writes))
+media_block = block(daemon, "property Process mediaProc")
+check("the gallery flows: one Process, argv of Model.mediaStepArgv only, stdout lines capped and counted, stderr chunked, a watchdog",
+      media_block != "" and re.search(r"stdout:\s*SplitParser\s*\{\s*onRead", media_block) is not None
+      and re.search(r'stderr:\s*SplitParser\s*\{\s*splitMarker:\s*""', media_block) is not None
+      and re.findall(r"mediaProc\.command\s*=\s*([^\n]*)", daemon) == ["argv"]
+      and "var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, record.backgroundImagePath)" in block(daemon, "function startMediaStep")
+      and "if (!list && mediaLines > 1) return" in block(daemon, "function mediaLine")
+      and "var cap = list ? Model.LINE_CAP : Model.PATH_CAP" in block(daemon, "function mediaLine")
+      and 'mediaLines > Model.readLinesCap("media")' in block(daemon, "function mediaLine")
+      and "mediaWatchdog.restart()" in block(daemon, "function startMediaStep")
+      and "mediaWatchdog.stop()" in block(daemon, "function mediaEnded")
+      and "var MEDIA_WATCHDOG_MS = 610000" in model
+      and re.findall(r"toolsProc\.command\s*=\s*([^\n]*)", daemon) == ["Model.toolsArgv()"])
+check("a picked path is used only when it is an item of the gallery just read, then queued as an intent",
+      "var chosen = r.rejected === true ? \"\" : galleryChoice(first, lines, flow.media)" in block(model, "function mediaStepEnd")
+      and "if (media.items[i].path === p) return p" in block(model, "function galleryChoice")
+      and 'p.indexOf(d + "/") !== 0' in block(model, "function mediaInDir")
+      and "if (end.intent !== null && !request(end.intent))" in block(daemon, "function mediaEnded")
+      and 'return cliUsable(cli) && p !== "" ? [cli, "effect", BACKGROUND_REPLACE, "--image", p] : null' in block(model, "function backgroundArgv")
+      and 'return cliUsable(cli) && p !== "" ? [cli, "media", "import", MEDIA_KIND, p, "--select"] : null' in block(model, "function mediaImportArgv"))
 check("the dialog names no command: every argv is the Model's",
       all(w not in dialog for w in ('"set"', '"--"', '"enable"', '"disable"', '"reset"', '"show"', '"list"', '"--json"')))
 

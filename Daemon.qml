@@ -32,6 +32,22 @@ import "Model.js" as Model
 // or the modules, a new snapshot, or one of its writes has run. Its writes
 // go through the same command queue as the panel's. It also forwards the
 // panel hotkey here (openPanel), which opens one bar widget's panel.
+//
+// The background gallery (interface revision Model.MEDIA_REVISION): the
+// panel's Gallery... and Add... run one flow at a time on one more child
+// (mediaProc), one step after another (Model.mediaStepArgv, mediaStepEnd):
+// the gallery's list, then the shell's image picker (omarchy-menu-images);
+// or the file chooser (omarchy-file-select). Each step's stdout is read in
+// line mode: the list's lines as a setup read's (LINE_CAP each, at most
+// Model.readLinesCap("media")), a picker's first line only (PATH_CAP). A
+// step still running after Model.MEDIA_WATCHDOG_MS is stopped (mediaWatchdog),
+// so a picker that never answers frees the two buttons. What a flow ends with
+// (selecting the picked image, importing the chosen file) is an intent of
+// the command queue, so its failure lands on the panel's failure line; the
+// panel the flow was started from (mediaOpener) is opened again at the end,
+// whatever the end (a cancel too), so the user is back where they were. The
+// two tools are looked up on PATH (toolsProc, a fixed script as the
+// resolver's) when a widget attaches and whenever a panel opens.
 Singleton {
   id: root
 
@@ -168,6 +184,35 @@ Singleton {
   // Diagnostics, read by the test harness.
   property int setupReadRuns: 0
 
+  // ---- background gallery ------------------------------------------------------
+  // The two tools on PATH (Model.toolsFromLines; Model.emptyTools until the
+  // first lookup has run).
+  property var mediaTools: Model.emptyTools()
+  property bool toolsArmed: false
+  property bool toolsAgain: false
+  property var toolsLines: []
+  // The flow running (Model.mediaStepEnd's `flow`), or null; one at a time.
+  property var mediaFlow: null
+  readonly property bool mediaBusy: mediaFlow !== null
+  property bool mediaArmed: false
+  property bool mediaStarted: false
+  property bool mediaRejected: false
+  property bool mediaTimedOut: false
+  property int mediaExitCode: 0
+  property string mediaFirst: ""
+  property int mediaLines: 0
+  // A list step's lines (Model.readMedia reads them at its end).
+  property var mediaList: []
+  // The bar widget whose panel started the flow (null: none was open), for
+  // reopenMediaPanel.
+  property var mediaOpener: null
+  // Model.MEDIA_WATCHDOG_MS; the harness shortens it.
+  property int mediaWatchdogMs: Model.MEDIA_WATCHDOG_MS
+  property var mediaStderr: Model.firstLineStart()
+  // Diagnostics, read by the test harness.
+  property int mediaSteps: 0
+  property int toolsRuns: 0
+
   onWatchWantedChanged: Qt.callLater(root.syncWatch)
 
   // ---- registration (by identity) ------------------------------------------
@@ -181,6 +226,7 @@ Singleton {
     // A searched path is looked up again on every attach (a reload, a new
     // monitor): the binary found last time may have gone or been installed.
     if (!configured || cliSource !== "setting") scheduleResolve()
+    Qt.callLater(root.probeTools)
   }
 
   function detach(owner) {
@@ -189,6 +235,7 @@ Singleton {
     var next = owners.slice()
     next.splice(index, 1)
     owners = next
+    if (mediaOpener === owner) mediaOpener = null
     notePanels()
     if (next.length === 0) syncWatch()
   }
@@ -209,7 +256,10 @@ Singleton {
     var widgets = panelOwners()
     var open = false
     for (var i = 0; i < widgets.length; i++) if (widgets[i].opened === true) open = true
-    if (open !== panelOpen) panelOpen = open
+    if (open === panelOpen) return
+    panelOpen = open
+    // A tool installed or removed since the last look shows on the next opening.
+    if (open) Qt.callLater(root.probeTools)
   }
 
   // Opens one widget's panel, chosen as the shell chooses for its own
@@ -294,7 +344,7 @@ Singleton {
 
   function readLine(line) {
     if (readRejected) return
-    if (typeof line !== "string" || line.length > Model.LINE_CAP || readLines.length >= Model.READ_LINES_CAP) {
+    if (typeof line !== "string" || line.length > Model.LINE_CAP || readLines.length >= Model.readLinesCap(readKind)) {
       readRejected = true
       readProc.running = false
       return
@@ -648,6 +698,8 @@ Singleton {
     // again, unless a change line since it started has done so already.
     if (Model.isSetupIntent(intent) && (!ok || !setupChangeSeen)) Qt.callLater(root.refreshSetup)
     if (intent && intent.verb === "setting") settingEnded(intent, ok)
+    // An import adds to the gallery a dialog may be showing.
+    if (intent && intent.verb === "media-import") Qt.callLater(root.refreshSetup)
     // A microphone on/off that went through is awaited on the watch's `mic`
     // line (bounded), so the switch does not flip back to the old word first.
     if (Model.isMicIntent(intent)) {
@@ -826,6 +878,159 @@ Singleton {
     return word !== null && request({ verb: "setup", op: "config", id: row.id, word: word })
   }
 
+  // ---- the background gallery: the panel's Gallery... and Add... ---------------
+
+  // The two tools, looked up again (after the one running, when one is).
+  function probeTools() {
+    if (toolsProc.running || toolsArmed) { toolsAgain = true; return }
+    toolsLines = []
+    toolsArmed = true
+    toolsRuns++
+    toolsProc.command = Model.toolsArgv()
+    toolsProc.running = true
+  }
+
+  function toolsLine(line) {
+    if (toolsLines.length < 4) toolsLines = toolsLines.concat([String(line).slice(0, Model.PATH_CAP + 64)])
+  }
+
+  function toolsEnded() {
+    toolsArmed = false
+    var next = Model.toolsFromLines(toolsLines)
+    toolsLines = []
+    if (JSON.stringify(next) !== JSON.stringify(mediaTools)) mediaTools = next
+    if (toolsAgain) {
+      toolsAgain = false
+      Qt.callLater(root.probeTools)
+    }
+  }
+
+  // Gallery...: the panels close (the picker is a fullscreen overlay), the
+  // gallery is listed, then the picker runs over its two directories.
+  function openGallery() {
+    var view = Model.backgroundRowView(record, mediaTools, mediaBusy)
+    if (!view.visible || !view.buttons[0].enabled) return false
+    return beginMediaFlow({ kind: "gallery", step: "list" })
+  }
+
+  // Add...: the panels close, then the file chooser runs.
+  function addBackground() {
+    var view = Model.backgroundRowView(record, mediaTools, mediaBusy)
+    if (!view.visible || !view.buttons[1].enabled) return false
+    return beginMediaFlow({ kind: "add", step: "pick" })
+  }
+
+  // The open panel is remembered (the first open one: a flow is started from
+  // a panel), then every panel closes and the flow's first step runs.
+  function beginMediaFlow(flow) {
+    var widgets = panelOwners()
+    var opener = null
+    for (var i = 0; i < widgets.length && opener === null; i++) if (widgets[i].opened === true) opener = widgets[i]
+    closePanels()
+    mediaOpener = opener
+    if (startMediaStep(flow)) return true
+    Qt.callLater(root.reopenMediaPanel)
+    return false
+  }
+
+  // A flow ended (picked, imported, refused, failed or cancelled): the panel
+  // it was started from opens again, on its widget, so its failure line is
+  // seen; not when that widget has gone or another panel is open meanwhile.
+  function reopenMediaPanel() {
+    var opener = mediaOpener
+    mediaOpener = null
+    if (opener === null || owners.indexOf(opener) === -1) return
+    var widgets = panelOwners()
+    for (var i = 0; i < widgets.length; i++) if (widgets[i] !== opener && widgets[i].opened === true) return
+    opener.open()
+  }
+
+  function startMediaStep(flow) {
+    var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, record.backgroundImagePath)
+    if (!argv || mediaProc.running || mediaArmed) {
+      mediaFlow = null
+      return false
+    }
+    mediaFlow = flow
+    mediaFirst = ""
+    mediaLines = 0
+    mediaList = []
+    mediaStarted = false
+    mediaRejected = false
+    mediaTimedOut = false
+    mediaExitCode = 0
+    mediaStderr = Model.firstLineStart()
+    mediaArmed = true
+    mediaSteps++
+    mediaProc.command = argv
+    mediaProc.running = true
+    mediaWatchdog.interval = mediaWatchdogMs
+    mediaWatchdog.restart()
+    return true
+  }
+
+  // A list step keeps its lines, each up to Model.LINE_CAP and at most
+  // Model.readLinesCap("media") of them; a picker step only its first line,
+  // up to Model.PATH_CAP. Past a cap the step is stopped.
+  function mediaLine(line) {
+    if (mediaRejected) return
+    mediaLines++
+    var list = mediaFlow !== null && mediaFlow.step === "list"
+    if (!list && mediaLines > 1) return
+    var cap = list ? Model.LINE_CAP : Model.PATH_CAP
+    if (typeof line !== "string" || line.length > cap || (list && mediaLines > Model.readLinesCap("media"))) {
+      mediaRejected = true
+      mediaProc.running = false
+      return
+    }
+    if (list) mediaList = mediaList.concat([line])
+    else mediaFirst = line
+  }
+
+  // The watchdog: a step that outlived Model.MEDIA_WATCHDOG_MS is stopped
+  // and the flow ends with Model.MEDIA_TIMEOUT_TEXT.
+  function mediaTimeout() {
+    if (!mediaArmed || !mediaProc.running) return
+    mediaTimedOut = true
+    mediaProc.running = false
+  }
+
+  function mediaEnded() {
+    var flow = mediaFlow
+    mediaArmed = false
+    mediaWatchdog.stop()
+    var end = Model.mediaStepEnd(flow, { started: mediaStarted, code: mediaExitCode, first: mediaFirst, lines: mediaLines,
+                                         list: mediaList, rejected: mediaRejected, timedOut: mediaTimedOut,
+                                         stderr: mediaStderr.text })
+    mediaFirst = ""
+    mediaList = []
+    if (end.error !== "") commandError = end.error
+    if (end.flow !== null) {
+      // The next step on the next turn, never a same-turn re-arm.
+      mediaFlow = end.flow
+      Qt.callLater(root.nextMediaStep)
+      return
+    }
+    mediaFlow = null
+    if (end.intent !== null && !request(end.intent)) commandError = Model.commandFailureText(-1, "", cliPath)
+    Qt.callLater(root.reopenMediaPanel)
+  }
+
+  function nextMediaStep() {
+    if (mediaFlow === null || mediaArmed) return
+    if (!startMediaStep(mediaFlow)) {
+      // The next step could not start (a tool gone meanwhile): the flow ends.
+      commandError = Model.GALLERY_FAILED_TEXT
+      Qt.callLater(root.reopenMediaPanel)
+    }
+  }
+
+  // A Remove of the setup dialog: only a user item of the read gallery.
+  function removeMedia(path) {
+    var item = setupBusy ? null : Model.mediaUserItem(setup.media, path)
+    return item !== null && request({ verb: "setup", op: "media-remove", path: item.path })
+  }
+
   // ---- children ------------------------------------------------------------
 
   // One-shot: started (restarted) only by moveSetting, a user's move.
@@ -899,6 +1104,37 @@ Singleton {
     onStarted: root.readStarted = true
     onExited: function(exitCode, exitStatus) { root.readExitCode = exitStatus === 0 ? exitCode : 128 + exitCode }
     onRunningChanged: if (!running && root.readArmed) root.readEnded()
+  }
+
+  // Bounds one gallery step (mediaTimeout); started by startMediaStep.
+  property Timer mediaWatchdog: Timer {
+    repeat: false
+    onTriggered: root.mediaTimeout()
+  }
+
+  // The tool lookup: a fixed script, stdout in line mode, at most four
+  // lines kept (Model.toolsFromLines reads two).
+  property Process toolsProc: Process {
+    stdout: SplitParser {
+      onRead: function(data) { root.toolsLine(data) }
+    }
+    onRunningChanged: if (!running && root.toolsArmed) root.toolsEnded()
+  }
+
+  // A gallery flow's steps, one at a time (startMediaStep): stdout in line
+  // mode (a path must not be garbled), its first line only, bounded by
+  // mediaLine; stderr in chunks, as a command's.
+  property Process mediaProc: Process {
+    stdout: SplitParser {
+      onRead: function(data) { root.mediaLine(data) }
+    }
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { root.mediaStderr = Model.firstLineFeed(root.mediaStderr, String(data)) }
+    }
+    onStarted: root.mediaStarted = true
+    onExited: function(exitCode, exitStatus) { root.mediaExitCode = exitStatus === 0 ? exitCode : 128 + exitCode }
+    onRunningChanged: if (!running && root.mediaArmed) root.mediaEnded()
   }
 
   property Process commandProc: Process {

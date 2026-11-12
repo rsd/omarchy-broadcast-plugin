@@ -1,0 +1,30 @@
+#!/bin/sh
+# A stand-in for Omarchy's omarchy-file-select (the desktop file chooser),
+# for tests/harness/shell.qml. run-harness.sh copies it into the harness's
+# bin/, ahead of the system tools on PATH, so no portal dialog ever opens in
+# a test run.
+#
+# Every invocation appends one line to $FAKE_OB_DIR/log, as the fake CLI does:
+#   <pid> [omarchy-file-select] [arg1] [arg2] ...
+#
+# Then exits with the status in $FAKE_OB_DIR/file-exit (default 0), as the
+# real one: 1 = nothing picked, 2 = the chooser failed (a message on
+# stderr). With status 0 it prints the first line of $FAKE_OB_DIR/file-pick,
+# the chosen path, and a newline.
+set -u
+
+dir=${FAKE_OB_DIR:?FAKE_OB_DIR is not set}
+
+{
+  printf '%s [omarchy-file-select]' "$$"
+  for arg in "$@"; do printf ' [%s]' "$arg"; done
+  printf '\n'
+} >> "$dir/log"
+
+status=0
+[ -f "$dir/file-exit" ] && status=$(cat -- "$dir/file-exit")
+case $status in
+  0) [ -f "$dir/file-pick" ] && head -n 1 -- "$dir/file-pick" ;;
+  2) echo "omarchy-file-select: the file chooser portal is not available" >&2 ;;
+esac
+exit "$status"

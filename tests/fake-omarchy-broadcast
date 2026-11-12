@@ -107,6 +107,16 @@
 # no consumer), as the daemon's MicState change would reach a watch; the
 # others change nothing (the plugin writes the settings with `settings set`).
 #
+# The background gallery (interface revision 15): `media list background
+# --json` prints $FAKE_OB_DIR/media-list (the `media` header line and its
+# `media_item` lines, as the harness writes them; missing: a daemon that
+# predates it, as the setup reads above); `media import background PATH --select` and
+# `media remove PATH` (a usage check first, exit 2 for any other shape) then
+# delay, stderr and exit as the commands below. When a remove's status is 0
+# and $FAKE_OB_DIR/media-list-removed exists, it replaces media-list (the
+# gallery without the item). `effect replace --image PATH` is one of the
+# other commands.
+#
 # Any other command (`on`, `off`, `camera -- <id>`, `camera next`): sleeps $FAKE_OB_DIR/delay
 # seconds if that file exists, prints $FAKE_OB_DIR/stderr to stderr if it
 # exists, and exits with the status in $FAKE_OB_DIR/exit (default 0). It
@@ -366,6 +376,24 @@ case "${1:-} ${2:-} ${3:-}" in
   "config show --json") [ $# -eq 3 ] && setup_read config-show ;;
   "config files --json") [ $# -eq 3 ] && setup_read config-files ;;
 esac
+
+if [ "${1:-}" = "media" ]; then
+  case "${2:-} ${3:-}" in
+    "list background") [ $# -eq 4 ] && [ "$4" = "--json" ] && setup_read media-list ;;
+    "import background") [ $# -eq 5 ] && [ "$5" = "--select" ] ;;
+    "remove "?*) [ $# -eq 3 ] ;;
+    *) false ;;
+  esac || { echo "fake: usage: media list background --json | import background PATH --select | remove PATH" >&2; exit 2; }
+  [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
+  [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
+  status=0
+  [ -f "$dir/exit" ] && status=$(cat "$dir/exit")
+  [ "$status" -eq 0 ] || exit "$status"
+  if [ "$2" = remove ] && [ -f "$dir/media-list-removed" ]; then
+    mv -f -- "$dir/media-list-removed" "$dir/media-list"
+  fi
+  exit 0
+fi
 
 # A setup write's reaction: the next serial, on a line of `type`.
 setup_changed() {

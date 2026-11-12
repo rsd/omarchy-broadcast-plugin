@@ -12,7 +12,11 @@
 #              place of the layer-shell popup and overlay (no compositor
 #              offscreen)
 #   bin/       omarchy-broadcast = a copy of tests/fake-omarchy-broadcast; its path is
-#              the unique marker the harness counts watch processes by
+#              the unique marker the harness counts watch processes by.
+#              omarchy-menu-images and omarchy-file-select = copies of
+#              tests/fake-omarchy-menu-images and tests/fake-omarchy-file-select:
+#              ahead of sysbin/ on PATH, so the real image picker and file
+#              chooser never open (mock: the run refuses to start otherwise)
 #   fake/      the fake's snapshot, feed, log and exit/stderr/delay files, and
 #              frames/0..3.jpg: four real 480x270 JPEGs (gst-launch-1.0
 #              videotestsrc ! jpegenc, else ImageMagick) the fake's `preview`
@@ -189,6 +193,10 @@ cp "$here/harness/KeyboardPanel.qml" "$work/qs/Ui/KeyboardPanel.qml"
 cp "$here/harness/OverlayWindow.qml" "$work/qs/Ui/OverlayWindow.qml"
 cp "$here/fake-omarchy-broadcast" "$work/bin/omarchy-broadcast"
 chmod +x "$work/bin/omarchy-broadcast"
+for tool in omarchy-menu-images omarchy-file-select; do
+  cp "$here/fake-$tool" "$work/bin/$tool"
+  chmod +x "$work/bin/$tool"
+done
 # The plugin as the harness loads it (plugin/), and again at another URL for
 # a reload that yields a new singleton (reload/): copies of the checkout's
 # files, with one line taken out of SetupDialog.qml, its overlay's
@@ -254,6 +262,13 @@ if [ "$mode" = mock ]; then
     echo "harness: the mock PATH resolves omarchy-broadcast to '$found', not the fake $work/bin/omarchy-broadcast" >&2
     exit 1
   }
+  for tool in omarchy-menu-images omarchy-file-select; do
+    found=$(PATH="$run_path" command -v "$tool" || true)
+    [ "$found" = "$work/bin/$tool" ] || {
+      echo "harness: the mock PATH resolves $tool to '$found', not the fake $work/bin/$tool" >&2
+      exit 1
+    }
+  done
   [ -x "$work/sysbin/sh" ] || { echo "harness: no sh among the system tools" >&2; exit 1; }
   echo "harness: mock PATH resolves omarchy-broadcast to the fake ($found)"
 fi
