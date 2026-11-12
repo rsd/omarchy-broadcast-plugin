@@ -11,7 +11,9 @@ import "Model.js" as Model
 // 16:9 area with its switch and rate on one row under it, then four tabs:
 //   Effect  the background effect's choices as the daemon's settings schema
 //           offers them (the options of its mode setting; none named here),
-//           the background image it holds, then the daemon's other global
+//           the background image it holds (from interface revision 15 the
+//           Background row: a thumbnail, the image's name, Gallery... and
+//           Add...; before it a read-only row), then the daemon's other global
 //           settings (strength, noise removal, ...) drawn generically, or
 //           the hint that replaces them (a daemon below revision 9);
 //   Camera  the camera list and Next camera, then the camera's settings as
@@ -53,7 +55,8 @@ import "Model.js" as Model
 // then walk the switch, the Preview switch, the preview-rate row, the tab row
 // and the stops of the tab shown (Model.cursorStops); Left/Right (or h/l)
 // change the tab on the tab row, walk the preview-rate, effect and a
-// setting's choices (nothing is written until Enter or Space), move a
+// setting's choices and the Background row's two buttons (nothing is
+// written or run until Enter or Space), move a
 // slider, and open (Right) or close (Left) a settings group; 1 to 4 show
 // the Effect, Camera, Mic and Status tab from anywhere; Enter or Space activates
 // (a group header opens or closes, a choice is made, a dropdown opens its
@@ -104,6 +107,9 @@ Item {
   // The background effect's choice row, from the settings schema.
   readonly property var effectMode: Model.effectModeView(record, Daemon.settingDrafts)
   readonly property var effectRows: Model.effectRows(record)
+  // The Background row (interface revision 15): the image in force and the
+  // gallery's two actions, faded while their tool is not on PATH.
+  readonly property var backgroundRow: Model.backgroundRowView(record, Daemon.mediaTools, Daemon.mediaBusy)
   readonly property var preview: Preview.placeholder
   readonly property bool previewControls: Model.previewControlsShown(record, Preview.pathReason)
   readonly property var fpsOptions: Model.fpsOptions(Preview.fps)
@@ -140,6 +146,8 @@ Item {
     ? stops[Model.clampCursor(cursorIndex, stops.length)] : null
   // The effect choice under the cursor while the effect row holds it.
   property int effectCursor: 0
+  // The Background row's button under the cursor: 0 Gallery..., 1 Add....
+  property int backgroundCursor: 0
   // The frame-rate choice under the cursor while the frame-rate row holds it.
   property int fpsCursor: 0
   // The tab under the cursor while the tab row holds it.
@@ -195,6 +203,12 @@ Item {
     setCursor("effect", -1)
   }
 
+  // The Background row takes the cursor on the button under the mouse.
+  function setBackgroundCursor(index) {
+    backgroundCursor = Model.clampCursor(index, root.backgroundRow.buttons.length)
+    setCursor("background", -1)
+  }
+
   function setFpsCursor(index) {
     fpsCursor = Model.clampCursor(index, Model.PREVIEW_FPS_CHOICES.length)
     setCursor("fps", -1)
@@ -235,6 +249,8 @@ Item {
       setGroupOpen(currentStop.index, dx > 0)
     else if (currentStop.kind === "effect")
       effectCursor = Model.clampCursor(effectCursor + (dx > 0 ? 1 : -1), root.effectMode.options.length)
+    else if (currentStop.kind === "background")
+      backgroundCursor = Model.clampCursor(backgroundCursor + (dx > 0 ? 1 : -1), root.backgroundRow.buttons.length)
     else if (currentStop.kind === "fps")
       fpsCursor = Model.clampCursor(fpsCursor + (dx > 0 ? 1 : -1), Model.PREVIEW_FPS_CHOICES.length)
     else if (currentStop.kind === "tabs")
@@ -295,6 +311,16 @@ Item {
     var option = row.options[index]
     if (!option || option.selected || !row.enabled || !root.available) return false
     return Daemon.commitSetting(row.id, option.value)
+  }
+
+  // A button of the Background row: Gallery... (0) or Add... (1). Each
+  // closes the panel and hands the screen to a tool of the shell (the image
+  // picker, the file chooser); the Daemon runs the rest. Nothing while its
+  // tool is not on PATH or a flow already runs.
+  function activateBackground(index) {
+    var button = root.backgroundRow.buttons[index]
+    if (!root.backgroundRow.visible || !button || !button.enabled || !root.available) return false
+    return index === 0 ? Daemon.openGallery() : Daemon.addBackground()
   }
 
   // Left/Right on a setting: a row of buttons walks its chip cursor (no
@@ -385,6 +411,7 @@ Item {
     else if (stop.kind === "fps") chooseFps(fpsCursor)
     else if (stop.kind === "tabs") chooseTab(tabCursor)
     else if (stop.kind === "effect") chooseEffect(effectCursor)
+    else if (stop.kind === "background") activateBackground(backgroundCursor)
     else if (stop.kind === "reset") resetSettings()
     else if (stop.kind === "group") setGroupOpen(stop.index, !(root.settingsView.groups[stop.index] || {}).expanded)
     else if (stop.kind === "setting") activateSetting(stop.index)
@@ -428,6 +455,7 @@ Item {
     else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index), true)
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
+    else if (stop.kind === "background") scrollItemIntoView(backgroundLine)
     else if (stop.kind === "mic-host") scrollItemIntoView(micHostLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
@@ -986,6 +1014,136 @@ Item {
                   onClicked: root.chooseEffect(effectChip.index)
                 }
               }
+            }
+
+            // ---- the Background row: the image in force (a 16:9
+            // thumbnail, decoded at twice its drawn size; a faint image
+            // glyph when there is none or it does not load) and its name,
+            // then Gallery... and Add...
+            Item {
+              id: backgroundLine
+              objectName: "backgroundLine"
+              width: parent.width
+              visible: root.backgroundRow.visible
+              implicitHeight: visible ? Math.max(backgroundThumb.height, backgroundButtons.implicitHeight, backgroundText.implicitHeight) : 0
+              height: implicitHeight
+
+              Rectangle {
+                id: backgroundThumb
+                objectName: "backgroundThumb"
+                width: Style.space(64)
+                height: Math.round(width * 9 / 16)
+                anchors.verticalCenter: parent.verticalCenter
+                color: root.hoverFill
+                border.width: 1
+                border.color: root.faint
+                clip: true
+                Accessible.role: Accessible.Graphic
+                Accessible.name: "Background image: " + root.backgroundRow.label
+
+                // Only the checked path's URL (Model.mediaImageSource); off
+                // the UI thread, and only while the panel is open.
+                Image {
+                  id: backgroundImage
+                  objectName: "backgroundImage"
+                  anchors.fill: parent
+                  anchors.margins: 1
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  sourceSize.width: backgroundThumb.width * 2
+                  sourceSize.height: backgroundThumb.height * 2
+                  visible: status === Image.Ready
+                  source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : ""
+                }
+                // No image, or one that did not load (or not yet).
+                Text {
+                  objectName: "backgroundPlaceholder"
+                  anchors.centerIn: parent
+                  visible: backgroundImage.status !== Image.Ready
+                  textFormat: Text.PlainText
+                  text: Model.GLYPH_IMAGE
+                  color: root.faint
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.display
+                }
+              }
+
+              Column {
+                id: backgroundText
+                anchors.left: backgroundThumb.right
+                anchors.leftMargin: Style.space(10)
+                anchors.right: backgroundButtons.left
+                anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(2)
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: Model.BACKGROUND_ROW_LABEL
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  objectName: "backgroundLabel"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  elide: Text.ElideMiddle
+                  text: root.backgroundRow.label
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+              }
+
+              Row {
+                id: backgroundButtons
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.spacing.md
+
+                Repeater {
+                  model: root.backgroundRow.buttons.length
+                  delegate: Button {
+                    id: backgroundButton
+                    required property int index
+                    readonly property var button: root.backgroundRow.buttons[index]
+                    objectName: "backgroundButton-" + index
+                    text: button ? button.label : ""
+                    tooltipText: button ? button.tooltip : ""
+                    hasCursor: root.hasCursor("background", -1) && root.backgroundCursor === index
+                    bordered: true
+                    // Faded and inert while its tool is not on PATH or a
+                    // flow runs (the tooltip and the hint below say why);
+                    // kept enabled so the tooltip still shows.
+                    opacity: button && button.enabled ? 1.0 : 0.45
+                    foreground: root.foreground
+                    background: Commons.Color.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.name: button ? button.label : ""
+                    Accessible.description: button ? button.tooltip : ""
+                    onHovered: function(on) { if (on) root.setBackgroundCursor(backgroundButton.index) }
+                    onClicked: root.activateBackground(backgroundButton.index)
+                  }
+                }
+              }
+            }
+
+            // What a running flow waits for (the buttons are faded
+            // meanwhile), else which of the gallery's tools is not on PATH.
+            Text {
+              objectName: "backgroundHint"
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.Wrap
+              visible: text !== ""
+              text: Model.backgroundHint(root.backgroundRow, Daemon.mediaFlow)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
 
             Repeater {

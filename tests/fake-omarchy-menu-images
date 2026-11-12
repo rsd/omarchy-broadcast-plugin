@@ -1,0 +1,33 @@
+#!/bin/sh
+# A stand-in for Omarchy's omarchy-menu-images (the shell's fullscreen image
+# picker), for tests/harness/shell.qml. run-harness.sh copies it into the
+# harness's bin/, ahead of the system tools on PATH, so the real picker never
+# opens in a test run.
+#
+# Every invocation appends one line to $FAKE_OB_DIR/log, as the fake CLI does:
+#   <pid> [omarchy-menu-images] [arg1] [arg2] ...
+#
+# Then sleeps $FAKE_OB_DIR/gallery-delay seconds if that file exists (a
+# picker the user leaves open), and, as the real one: prints
+# $FAKE_OB_DIR/gallery-stderr to stderr if it exists, and exits with the status in $FAKE_OB_DIR/gallery-exit (default 0).
+# With status 0 it prints the first line of $FAKE_OB_DIR/gallery-pick, the
+# chosen path, without a trailing newline (the real one cats its selection
+# file); no such file is a cancel: nothing printed.
+set -u
+
+dir=${FAKE_OB_DIR:?FAKE_OB_DIR is not set}
+
+{
+  printf '%s [omarchy-menu-images]' "$$"
+  for arg in "$@"; do printf ' [%s]' "$arg"; done
+  printf '\n'
+} >> "$dir/log"
+
+[ -f "$dir/gallery-delay" ] && sleep "$(cat -- "$dir/gallery-delay")"
+[ -f "$dir/gallery-stderr" ] && cat -- "$dir/gallery-stderr" >&2
+status=0
+[ -f "$dir/gallery-exit" ] && status=$(cat -- "$dir/gallery-exit")
+if [ "$status" -eq 0 ] && [ -f "$dir/gallery-pick" ]; then
+  printf '%s' "$(head -n 1 -- "$dir/gallery-pick")"
+fi
+exit "$status"

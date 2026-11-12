@@ -1563,6 +1563,7 @@ ShellRoot {
     previewScenario()
     settingsScenario()
     setupScenario()
+    mediaScenario()
 
     // the resolver itself: omarchy-broadcast on PATH, nothing else
     var resolverCase = function(label, argv, path, wantOut, wantExit) {
@@ -3883,6 +3884,375 @@ ShellRoot {
       B().destroy()
       h.widgetB = null
     }, function() { return S().attachedCount === 1 })
+  }
+
+  // ---- the background gallery (mock, interface revision 15) ---------------------
+  //
+  // The fake CLI's `media` commands, and bin/omarchy-menu-images and
+  // bin/omarchy-file-select (tests/fake-*): fakes that print the path the
+  // harness puts in gallery-pick / file-pick, or exit with gallery-exit /
+  // file-exit, and log their argv to the same log as the CLI.
+  readonly property string mediaBundled: "/usr/share/omarchy-broadcast/media/backgrounds"
+  readonly property string mediaUser: "/home/u/.local/share/omarchy-broadcast/media/backgrounds"
+  // `media list background --json`: the header, then one line per item.
+  function mediaListLines(withUser) {
+    var items = [
+      { path: mediaBundled + "/aurora.webp", label: "Aurora", bundled: true, media_type: "image", width: 3840, height: 2160, duration_ms: 0, poster: "" },
+      { path: mediaBundled + "/dunes.webp", label: "Dunes", bundled: true, media_type: "image", width: 3840, height: 2160, duration_ms: 0, poster: "" }
+    ]
+    if (withUser) items.push({ path: mediaUser + "/office.png", label: "office <b>\u202e", bundled: false, media_type: "image",
+                               width: 1920, height: 1080, duration_ms: 0, poster: "" })
+    var out = [JSON.stringify({ v: 1, type: "media", kind: "background", serial: 1, bundled_dir: mediaBundled, user_dir: mediaUser,
+                                items: items.length, items_truncated: false })]
+    for (var i = 0; i < items.length; i++) {
+      var it = { v: 1, type: "media_item", kind: "background" }
+      for (var k in items[i]) it[k] = items[i][k]
+      out.push(JSON.stringify(it))
+    }
+    return out
+  }
+
+  function mediaScenario() {
+    var A = function() { return h.widgetA }
+    var S = function() { return h.widgetA.service }
+    var C = function() { return h.content(A()) }
+    var D = function() { return h.notes.mediaDialog }
+    var dfind = function(name) { return h.findByName(D(), name) }
+    var binDir = shellRoot.cli.slice(0, shellRoot.cli.lastIndexOf("/"))
+    // the thumbnail: a real JPEG (one of the preview's frames)
+    var current = shellRoot.fakeDir + "/frames/0.jpg"
+    var rev = function(n) {
+      return { interface_revision: n, settings_schema: 1, settings_revision: 5, loopback_consumers: 0, pipewire_consumers: 0,
+               preview_consumers: 0, pipewire_output: "ready", config_serial: 1, modules_serial: 1, background_image: current }
+    }
+    var rows = function() {
+      var g = function(id, type, label, v, d, o) {
+        var x = { scope: "global" }
+        for (var k in o) x[k] = o[k]
+        return stateRow("background", "Background effect", id, type, label, v, d, x)
+      }
+      return [g("effect.background.mode", "enum", "Effect", "replace", "none", { options: "none:Off,blur:Blur,replace:Replace" })]
+    }
+    var args = function() { return h.newLogArgs().map(function(a) { return a.join(" ") }) }
+    var has = function(text) { return args().indexOf(text) >= 0 }
+    var kinds = function() { return C().stops.map(function(st) { return st.kind }).join(",") }
+    var idle = function() { return !S().mediaBusy && !S().commandBusy }
+
+    h.step("media: a revision-15 daemon offering the replacement background", function() {
+      h.writeFile("settings-state", brioState().concat(rows()))
+      h.writeFile("settings-camera", [brioId])
+      h.writeFile("settings-rev", ["5"])
+      h.writeFile("settings-serial", ["2"])
+      h.writeFile("settings-mode", ["list"])
+      h.writeFile("media-list", mediaListLines(true))
+      h.removeFile("delay")
+      h.removeFile("stderr")
+      h.writeFile("exit", ["0"])
+      h.removeFile("gallery-pick")
+      h.removeFile("gallery-exit")
+      h.removeFile("file-pick")
+      h.removeFile("file-exit")
+      h.feed([snapshotLine(rev(15))])
+    }, function() {
+      return S().record.interfaceRevision === 15 && !!S().record.settings && h.model.backgroundRowShown(S().record) && h.writerIdle()
+    })
+    h.step("media: open the panel's Effect tab", function() {
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened && S().mediaTools.known && S().mediaTools.gallery !== "" })
+    h.wait(400)
+    h.step("media: the Background row: thumbnail, name, Gallery… and Add…", function() {
+      h.eq("the tools are the harness's fakes", S().mediaTools.gallery + " " + S().mediaTools.chooser,
+           binDir + "/omarchy-menu-images " + binDir + "/omarchy-file-select")
+      h.eq("the row is shown", h.find(A(), "backgroundLine").visible, true)
+      h.eq("the image's name", h.find(A(), "backgroundLabel").text, "0")
+      h.eq("the thumbnail's source is the file's URL", String(h.find(A(), "backgroundImage").source), "file://" + current)
+      h.eq("Gallery…", h.find(A(), "backgroundButton-0").text, "Gallery…")
+      h.eq("Add…", h.find(A(), "backgroundButton-1").text, "Add…")
+      h.eq("both offered", h.find(A(), "backgroundButton-0").opacity === 1 && h.find(A(), "backgroundButton-1").opacity === 1, true)
+      h.eq("no hint", h.find(A(), "backgroundHint").visible, false)
+      h.eq("the image loaded: no placeholder glyph", h.find(A(), "backgroundPlaceholder").visible, false)
+      h.eq("no read-only image row", C().effectRows.length, 0)
+      h.check("a stop after the effect row", kinds().indexOf("effect,background") >= 0, kinds())
+    }, function() { return h.find(A(), "backgroundImage").status === Image.Ready }, 4000)
+    h.grabStep(function() { return A().popup }, "m1-effect-background-row.png")
+
+    h.step("media: Gallery… picks a bundled image (the picker open a second)", function() {
+      h.writeFile("gallery-pick", [mediaBundled + "/aurora.webp"])
+      h.writeFile("gallery-delay", ["1"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Enter on Gallery…", function() {
+      h.markLog()
+      C().setCursor("background", -1)
+      h.eq("the row has the cursor on Gallery…", h.find(A(), "backgroundButton-0").hasCursor, true)
+      h.key(Qt.Key_Return)
+    }, function() { return S().mediaBusy && S().mediaFlow.step === "pick" && args().some(function(a) { return a.indexOf("omarchy-menu-images") === 0 }) }, 6000)
+    h.step("media: the panel is closed while the picker runs", function() {
+      h.eq("closed", A().opened, false)
+      h.check("the flow remembers the widget it came from", S().mediaOpener === A())
+    })
+    h.step("media: the picker answers", function() {}, function() {
+      return has("effect replace --image " + mediaBundled + "/aurora.webp") && idle() && A().opened
+    }, 6000)
+    h.step("media: listed, picked, selected, and the panel back", function() {
+      h.eq("the panel opened again on its widget", A().opened, true)
+      h.eq("the opener forgotten", S().mediaOpener, null)
+      h.eq("the three commands, in order", JSON.stringify(args()), JSON.stringify([
+        "media list background --json",
+        "omarchy-menu-images --show-labels --selected " + current + " " + mediaBundled + " " + mediaUser,
+        "effect replace --image " + mediaBundled + "/aurora.webp"]))
+      h.eq("no error", S().commandError, "")
+      h.removeFile("gallery-delay")
+    }, function() { return h.writerIdle() })
+
+    // a file the picker lists but the daemon skipped (a GIF in the user's
+    // folder): refused, said on the panel's failure line once it is back
+    h.step("media: the picker returns a file the gallery did not list", function() {
+      h.writeFile("gallery-pick", [mediaUser + "/clip.gif"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery… from the open panel", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      h.check("started", C().activateBackground(0))
+    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() && A().opened }, 6000)
+    h.wait(300)
+    h.step("media: refused, and the panel shows why", function() {
+      h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
+      h.eq("the failure line", S().commandError, h.model.GALLERY_REFUSED_TEXT)
+      h.eq("seen in the reopened panel", h.find(A(), "commandError").text, "That file is not in the gallery; nothing was changed")
+      h.eq("shown", h.find(A(), "commandErrorBlock").visible, true)
+    })
+    h.grabStep(function() { return A().popup }, "m1b-effect-gallery-refused.png")
+    h.step("media: a cancel from the open panel", function() {
+      h.removeFile("gallery-pick")
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery…, then closed without a choice", function() {
+      h.notes.steps = S().mediaSteps
+      h.check("started", C().activateBackground(0))
+    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() && A().opened }, 6000)
+    h.step("media: the panel is back after a cancel too", function() {
+      h.eq("open", A().opened, true)
+      A().close()
+    }, function() { return !A().opened })
+
+    // the watchdog: a picker that never answers is stopped, and the buttons
+    // say why they are faded meanwhile
+    h.step("media: a picker that does not answer", function() {
+      h.writeFile("gallery-pick", [mediaBundled + "/dunes.webp"])
+      h.writeFile("gallery-delay", ["8"])
+      S().mediaWatchdogMs = 1500
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery…, and the panel opened meanwhile", function() {
+      h.markLog()
+      h.check("started", S().openGallery())
+    }, function() { return S().mediaBusy && S().mediaFlow.step === "pick" }, 6000)
+    h.step("media: the panel opened by hand while it waits", function() {
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened })
+    h.wait(200)
+    h.step("media: faded, and the hint says why", function() {
+      h.eq("the hint", h.find(A(), "backgroundHint").text, h.model.GALLERY_WAITING_TEXT)
+      h.eq("Gallery… faded", h.find(A(), "backgroundButton-0").opacity < 1, true)
+      h.eq("Add… faded", h.find(A(), "backgroundButton-1").opacity < 1, true)
+      h.check("a press does nothing", !C().activateBackground(1))
+    })
+    h.grabStep(function() { return A().popup }, "m1c-effect-waiting.png")
+    h.step("media: the watchdog stops the picker", function() {}, function() { return !S().mediaBusy && idle() }, 6000)
+    h.step("media: nothing selected, said on the failure line", function() {
+      h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
+      h.eq("the failure line", S().commandError, h.model.MEDIA_TIMEOUT_TEXT)
+      h.eq("the hint is gone", h.find(A(), "backgroundHint").visible, false)
+      h.eq("the buttons are back", h.find(A(), "backgroundButton-0").opacity, 1)
+      S().mediaWatchdogMs = h.model.MEDIA_WATCHDOG_MS
+      h.removeFile("gallery-delay")
+      h.removeFile("gallery-pick")
+      A().close()
+    }, function() { return h.writerIdle() && !A().opened })
+
+    // no image to show: the placeholder glyph
+    h.step("media: an image that does not load", function() {
+      var r = rev(15)
+      r.background_image = shellRoot.fakeDir + "/frames/missing.jpg"
+      h.feed([snapshotLine(r)])
+    }, function() { return S().record.backgroundImagePath.indexOf("missing.jpg") > 0 })
+    h.step("media: open the panel", function() {
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened && h.find(A(), "backgroundImage").status === Image.Error }, 4000)
+    h.step("media: a faint image glyph in its place", function() {
+      h.eq("the placeholder", h.find(A(), "backgroundPlaceholder").visible, true)
+      h.eq("the shell's image glyph", h.find(A(), "backgroundPlaceholder").text, h.model.GLYPH_IMAGE)
+      h.eq("still named", h.find(A(), "backgroundLabel").text, "missing")
+      A().close()
+      h.feed([snapshotLine(rev(15))])
+    }, function() { return !A().opened && S().record.backgroundImagePath === current })
+
+    h.step("media: the picker closed without a choice", function() {
+      h.removeFile("gallery-pick")
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery… again", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      h.check("started", S().openGallery())
+    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() }, 6000)
+    h.wait(300)
+    h.step("media: a cancel runs nothing more", function() {
+      h.eq("listed and picked only", args().length, 2)
+      h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
+      h.eq("no error", S().commandError, "")
+    })
+
+    h.step("media: the picker returns a file outside the gallery", function() {
+      h.writeFile("gallery-pick", [mediaUser + "/../../../../.ssh/id_rsa"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery… once more", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      S().openGallery()
+    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() }, 6000)
+    h.wait(300)
+    h.step("media: refused, said on the failure line", function() {
+      h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
+      h.eq("the failure line", S().commandError, h.model.GALLERY_REFUSED_TEXT)
+      h.removeFile("gallery-pick")
+    })
+
+    h.step("media: Add… picks a file", function() {
+      h.writeFile("file-pick", ["/home/u/Pictures/beach day.jpg"])
+      h.writeFile("file-exit", ["0"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Add…", function() {
+      h.markLog()
+      h.check("started", S().addBackground())
+    }, function() { return has("media import background /home/u/Pictures/beach day.jpg --select") && idle() }, 6000)
+    h.step("media: chosen, then imported and selected", function() {
+      h.eq("the two commands", JSON.stringify(args()), JSON.stringify([
+        "omarchy-file-select --title Add a background --extensions png jpg jpeg webp",
+        "media import background /home/u/Pictures/beach day.jpg --select"]))
+      h.eq("no error", S().commandError, "")
+      h.writeFile("file-exit", ["1"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Add…, nothing picked", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      S().addBackground()
+    }, function() { return S().mediaSteps === h.notes.steps + 1 && idle() }, 6000)
+    h.wait(300)
+    h.step("media: exit 1 is no error and imports nothing", function() {
+      h.eq("the chooser only", args().length, 1)
+      h.eq("no error", S().commandError, "")
+      h.writeFile("file-exit", ["2"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Add…, the chooser fails", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      S().addBackground()
+    }, function() { return S().mediaSteps === h.notes.steps + 1 && idle() }, 6000)
+    h.wait(300)
+    h.step("media: exit 2 is said on the failure line", function() {
+      h.eq("the chooser only", args().length, 1)
+      h.eq("the failure line", S().commandError, "The file chooser could not open")
+      h.removeFile("file-pick")
+      h.removeFile("file-exit")
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened && h.writerIdle() })
+    h.wait(300)
+    h.grabStep(function() { return A().popup }, "m2-effect-chooser-failed.png")
+
+    // the setup dialog's Backgrounds section
+    h.step("media: the setup dialog", function() {
+      A().close()
+      h.writeFile("media-list-removed", mediaListLines(false))
+      var comp = Qt.createComponent("file://" + shellRoot.pluginPath + "/SetupDialog.qml")
+      h.notes.mediaDialog = comp.createObject(window.contentItem, { width: 900, height: 760 })
+      D().shell = fakeShell
+      D().manifest = { id: shellRoot.moduleName }
+      h.check("the widgets' singleton", D().daemonService === S())
+      h.markLog()
+      D().open(h.model.setupPayloadJson(shellRoot.cli))
+    }, function() { return D().shown && S().setup.media !== null && !S().readArmed && S().readQueue.length === 0 && h.writerIdle() }, 8000)
+    h.step("media: Backgrounds, the fifth of six sections", function() {
+      h.eq("the sections", D().sectionWords.join(","), "modules,order,backends,daemon,backgrounds,diagnostics")
+      h.check("the gallery was read", has("media list background --json"), JSON.stringify(args()))
+      h.key("5")
+      h.eq("shown", D().section, "backgrounds")
+      h.eq("the section", dfind("backgroundsSection").visible, true)
+      h.eq("the bundled count", dfind("backgroundsBundled").text, "2 bundled backgrounds")
+      h.eq("one of the user's own", D().mediaView.rows.length, 1)
+      h.eq("its name, sanitised", dfind("mediaLabel-0").text, "office b")
+      h.eq("Remove", dfind("mediaRemove-0").text, "Remove")
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "m3-setup-backgrounds.png")
+    h.step("media: Remove pressed once, then the mouse moves off it", function() {
+      D().setCursor("media-remove", 0)
+      h.key(Qt.Key_Return)
+      h.eq("asks for the second press", dfind("mediaRemove-0").text, "Confirm remove")
+      // what hovering a section entry does
+      D().setCursor("section", 0)
+      h.eq("forgotten on hover", D().confirmRemove, "")
+      h.eq("the button says Remove again", dfind("mediaRemove-0").text, "Remove")
+      D().setCursor("media-remove", 0)
+      h.key(Qt.Key_Return)
+      h.eq("asks again", dfind("mediaRemove-0").text, "Confirm remove")
+      h.key(Qt.Key_Left)
+      h.eq("Left back to the list forgets it", D().confirmRemove, "")
+      h.eq("on the list", D().currentStop.kind, "section")
+      h.eq("Remove again", dfind("mediaRemove-0").text, "Remove")
+    })
+    h.step("media: Remove, pressed once, asks again", function() {
+      h.markLog()
+      D().setCursor("media-remove", 0)
+      h.key(Qt.Key_Return)
+      h.eq("asks for the second press", dfind("mediaRemove-0").text, "Confirm remove")
+      h.eq("nothing removed yet", args().filter(function(a) { return a.indexOf("media remove") === 0 }).length, 0)
+      h.key(Qt.Key_Return)
+    }, function() { return args().some(function(a) { return a.indexOf("media remove") === 0 }) }, 6000)
+    h.step("media: removed, and the section read again", function() {
+      h.eq("the remove", JSON.stringify(args().filter(function(a) { return a.indexOf("media remove") === 0 })),
+           JSON.stringify(["media remove " + mediaUser + "/office.png"]))
+    }, function() { return !S().setupBusy && !S().readArmed && D().mediaView.rows.length === 0 }, 6000)
+    h.step("media: none of the user's own left", function() {
+      h.eq("no hint block", dfind("setupHintBlock").visible, false)
+      h.eq("still the bundled count", dfind("backgroundsBundled").text, "2 bundled backgrounds")
+      h.eq("the empty note", dfind("backgroundsEmpty").text, h.model.MEDIA_EMPTY_TEXT)
+      h.check("under the bundled count", dfind("backgroundsEmpty").y > dfind("backgroundsBundled").y)
+      h.eq("no dialog error", S().setupError, "")
+    })
+
+    // a revision-14 daemon: no Background row, no section, the old row back
+    h.step("media: revision 14", function() {
+      h.feed([snapshotLine(rev(14))])
+    }, function() { return S().record.interfaceRevision === 14 && !!S().record.settings })
+    h.wait(300)
+    h.step("media: the dialog hides Backgrounds", function() {
+      h.eq("the sections", D().sectionWords.join(","), "modules,order,backends,daemon,diagnostics")
+      h.eq("back to the first", D().section, "modules")
+      h.eq("the gallery read dropped", S().setup.media, null)
+      D().close()
+      D().destroy()
+      h.notes.mediaDialog = null
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened })
+    h.wait(400)
+    h.step("media: the panel shows the read-only image row instead", function() {
+      h.eq("no Background row", h.find(A(), "backgroundLine").visible, false)
+      h.eq("the read-only row", JSON.stringify(C().effectRows.map(function(r) { return r.label })), JSON.stringify(["Background image"]))
+      h.check("no background stop", kinds().indexOf("background") < 0, kinds())
+      h.check("Gallery… refused", !S().openGallery())
+      h.check("Add… refused", !S().addBackground())
+    })
+    h.step("media: clean up", function() {
+      A().close()
+      h.removeFile("settings-mode")
+      h.removeFile("settings-state")
+      h.removeFile("media-list")
+      h.removeFile("media-list-removed")
+      h.removeFile("gallery-delay")
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.link === "ok" && S().record.interfaceRevision === 4 && h.writerIdle() })
   }
 
   // ---- live scenario (real daemon, real CLI) --------------------------------------

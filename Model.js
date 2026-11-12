@@ -77,6 +77,11 @@ var DAEMON_NO_EFFECTS = "The daemon needs updating for effects (omarchy-broadcas
 // Said in the Effect tab when the daemon offers no background effect (no
 // enabled module provides the stage).
 var NO_BACKGROUND_TEXT = "No effect module provides a background effect. Right click the bar icon to set up modules."
+// The interface revision of the background gallery (obc-ipc INTERFACE_REVISION
+// 15: `media list|import|remove` and `effect replace --image`): the Effect
+// tab's Background row and the setup dialog's Backgrounds section. Below it
+// the tab keeps the read-only image row.
+var MEDIA_REVISION = 15
 // The largest interface revision the producer can print (a u32).
 var REVISION_MAX = 4294967295
 
@@ -221,6 +226,10 @@ function emptyRecord(link, linkText) {
     effect: "",
     backgroundImage: "",
     backgroundImageSet: false,
+    // The raw background image path, kept only when it is a usable absolute
+    // path (mediaPath): the thumbnail's source and the gallery's --selected
+    // argument, never shown. "" otherwise (a clipped path among them).
+    backgroundImagePath: "",
     interfaceRevision: -1,
     // The daemon's ConfigSerial and ModulesSerial as the snapshot reports
     // them (`config_serial`, `modules_serial`; 0 from a CLI or daemon that
@@ -304,6 +313,7 @@ function applyScalars(r, m) {
   // Whether the daemon holds an image, from the raw field: the display copy
   // above may sanitise to "" and must not decide what can be chosen.
   r.backgroundImageSet = typeof m.background_image === "string" && m.background_image !== ""
+  r.backgroundImagePath = mediaPath(m.background_image)
   // The running daemon's interface revision, on the same lines: a new CLI may
   // still be talking to a daemon started before the upgrade.
   r.interfaceRevision = interfaceRevision(m.interface_revision)
@@ -787,9 +797,10 @@ function imagePathText(record) {
 
 // Read-only rows under the choices: the background image the daemon holds,
 // whatever the effect. Empty when unavailable, below MODULES_REVISION or
-// with no image.
+// with no image, and while the Background row (backgroundRowShown) shows
+// the image instead.
 function effectRows(record) {
-  if (!moduleEffects(record) || !hasBackgroundImage(record)) return []
+  if (!moduleEffects(record) || !hasBackgroundImage(record) || backgroundRowShown(record)) return []
   return [{ label: "Background image", value: imagePathText(record) }]
 }
 
@@ -902,6 +913,8 @@ function intentArgv(intent, cli, record) {
   case "setting": return settingIntentArgv(cli, record, intent)
   case "mic-host": return micSupported(record) ? micHostArgv(cli, intent.on === true) : null
   case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null
+  case "background": return backgroundRowShown(record) ? backgroundArgv(cli, intent.path) : null
+  case "media-import": return backgroundRowShown(record) ? mediaImportArgv(cli, intent.path) : null
   default: return null
   }
 }
@@ -2727,7 +2740,8 @@ function micBlocked(running, queue) {
 // shown (`tab`, read through panelTabValue):
 //   effect  the background effect's choices (one stop for the row;
 //           Left/Right walk its choices, as in the shell's button groups),
-//           then the rows of `effectSettings` (effectSettingsView: the
+//           the Background row while backgroundRowShown (one stop;
+//           Left/Right walk Gallery... and Add...), then the rows of `effectSettings` (effectSettingsView: the
 //           daemon's other global settings, drawn generically, no group
 //           header is a stop);
 //   camera  one per rendered camera row (`cameraCount` is the count the
@@ -2754,6 +2768,7 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
   var shown = panelTabValue(tab)
   if (shown === "effect") {
     if (effectModeShown(record)) stops.push({ kind: "effect", index: -1 })
+    if (backgroundRowShown(record)) stops.push({ kind: "background", index: -1 })
     if (effectSettingsShown(effectSettings)) {
       // The generic rows' stops number from 0 in this tab's view, as the
       // camera's do in theirs (the two are never shown together).
@@ -2897,20 +2912,22 @@ function settingValue(settings, key) {
 // schema version of the config rows this plugin reads.
 var CONFIG_REVISION = 10
 var CONFIG_SCHEMA = 1
-// The sections, in the order of the list on the left (keys 1 to 5).
-var SETUP_SECTIONS = ["modules", "order", "backends", "daemon", "diagnostics"]
+// The sections, in the order of the list on the left (keys 1 to 6). The
+// Backgrounds one is listed only from MEDIA_REVISION (setupSections).
+var SETUP_SECTIONS = ["modules", "order", "backends", "daemon", "backgrounds", "diagnostics"]
 var SETUP_SECTION_LABELS = {
-  modules: "Modules", order: "Order", backends: "Backends", daemon: "Daemon", diagnostics: "Diagnostics"
+  modules: "Modules", order: "Order", backends: "Backends", daemon: "Daemon", backgrounds: "Backgrounds", diagnostics: "Diagnostics"
 }
 var SETUP_SECTION_DESCRIPTIONS = {
   modules: "The effect modules and whether each one is enabled",
   order: "The order the effect stages run in",
   backends: "The backend profile and the module that provides each stage",
   daemon: "The daemon's configuration",
+  backgrounds: "The background images of the gallery: the bundled ones and your own",
   diagnostics: "Interface revision, errors, configuration files and module problems"
 }
 // The reads behind the sections, in the order they run.
-var SETUP_READS = ["modules", "order", "config", "files"]
+var SETUP_READS = ["modules", "order", "config", "files", "media"]
 var SETUP_TITLE = "Omarchy Broadcast setup"
 var SETUP_OLD_DAEMON = "The daemon needs updating for the setup dialog (omarchy-broadcastd 0.24 or newer)."
 var SETUP_OLD_CONFIG = "The daemon needs updating to show its configuration here (omarchy-broadcastd 0.25 or newer)."
@@ -3449,6 +3466,7 @@ function readConfigFiles(lines, code, stderrText) {
 // One read's result by kind (SETUP_READS), from its stdout lines, exit
 // status and first stderr line.
 function setupRead(kind, lines, code, stderrText) {
+  if (kind === "media") return readMedia(lines, code, stderrText)
   if (kind === "modules") return readModules(lines, code, stderrText)
   if (kind === "order") return readOrder(lines, code, stderrText)
   if (kind === "config") return readConfig(lines, code, stderrText)
@@ -3458,12 +3476,21 @@ function setupRead(kind, lines, code, stderrText) {
 
 // The reads the daemon supports now, in order: the modules and the order
 // from MODULES_REVISION, the configuration and its files from
-// CONFIG_REVISION; none while it is unavailable.
+// CONFIG_REVISION, the background gallery from MEDIA_REVISION; none while
+// it is unavailable.
 function setupReads(record) {
   if (!available(record) || record.interfaceRevision < MODULES_REVISION) return []
   var out = ["modules", "order"]
   if (record.interfaceRevision >= CONFIG_REVISION) out.push("config", "files")
+  if (mediaSupported(record)) out.push("media")
   return out
+}
+
+// How many stdout lines a read takes: the gallery's header, its items (at
+// most MEDIA_ITEM_CAP) and an error line; READ_LINES_CAP for every other.
+// Every line is watch-sized (LINE_CAP).
+function readLinesCap(kind) {
+  return kind === "media" ? MEDIA_ITEM_CAP + 2 : READ_LINES_CAP
 }
 
 // The argv of read `kind` (fixed words only), or null.
@@ -3473,12 +3500,13 @@ function setupReadArgv(cli, kind) {
   if (kind === "order") return [cli, "order", "show", "--json"]
   if (kind === "config") return [cli, "config", "show", "--json"]
   if (kind === "files") return [cli, "config", "files", "--json"]
+  if (kind === "media") return mediaListArgv(cli)
   return null
 }
 
 // Every read, not yet loaded (null): what the dialog shows as loading.
 function emptySetup() {
-  return { modules: null, order: null, config: null, files: null }
+  return { modules: null, order: null, config: null, files: null, media: null }
 }
 
 // `setup` with only the reads of `reads` kept (a new object): what a daemon
@@ -3578,6 +3606,7 @@ function setupIntentArgv(cli, record, intent) {
   case "order": return orderSetArgv(cli, intent.order)
   case "order-reset": return orderResetArgv(cli)
   case "config": return record.interfaceRevision >= CONFIG_REVISION ? configSetArgv(cli, intent.id, intent.word) : null
+  case "media-remove": return mediaSupported(record) ? mediaRemoveArgv(cli, intent.path) : null
   default: return null
   }
 }
@@ -3597,17 +3626,35 @@ function setupWriteBusy(running, queue) {
 
 // ---- the dialog's views
 
-// The section shown: a word of SETUP_SECTIONS, else the first.
-function setupSectionValue(value) {
-  return typeof value === "string" && SETUP_SECTIONS.indexOf(value) >= 0 ? value : SETUP_SECTIONS[0]
+// The sections the dialog lists for `record`, in order: every word of
+// SETUP_SECTIONS, Backgrounds only from MEDIA_REVISION (an unknown or
+// unavailable daemon lists the other five).
+function setupSections(record) {
+  var media = mediaSupported(record)
+  return SETUP_SECTIONS.filter(function(v) { return v !== "backgrounds" || media })
+}
+
+// `sections` as given when it is a list of section words, else the
+// sections of an unknown daemon (setupSections(null)).
+function sectionList(sections) {
+  if (!Array.isArray(sections) || sections.length === 0) return setupSections(null)
+  for (var i = 0; i < sections.length; i++) if (SETUP_SECTIONS.indexOf(sections[i]) < 0) return setupSections(null)
+  return sections
+}
+
+// The section shown: a word of `sections` (setupSections), else the first.
+function setupSectionValue(value, sections) {
+  var list = sectionList(sections)
+  return typeof value === "string" && list.indexOf(value) >= 0 ? value : list[0]
 }
 
 // The section list: { value, label, description, number, selected }.
-function setupSectionOptions(section) {
-  var current = setupSectionValue(section)
+function setupSectionOptions(section, sections) {
+  var list = sectionList(sections)
+  var current = setupSectionValue(section, list)
   var out = []
-  for (var i = 0; i < SETUP_SECTIONS.length; i++) {
-    var v = SETUP_SECTIONS[i]
+  for (var i = 0; i < list.length; i++) {
+    var v = list[i]
     out.push({ value: v, label: SETUP_SECTION_LABELS[v], description: SETUP_SECTION_DESCRIPTIONS[v],
                number: String(i + 1), selected: v === current })
   }
@@ -3915,19 +3962,22 @@ function scrollTarget(contentY, contentHeight, viewHeight, delta) {
   return Math.max(0, Math.min(Math.max(0, h - v), y + d))
 }
 
-// The dialog's keyboard stops, top to bottom: the five section entries,
-// then the shown section's controls:
+// The dialog's keyboard stops, top to bottom: the section entries of
+// `sections` (setupSections; omitted, the five of an unknown daemon), then
+// the shown section's controls:
 //   modules   each module whose switch can be flipped
 //   order     each stage that can move (Left/Right pick Move up or Move
 //             down, Enter moves; Ctrl+Up/Down moves at once), then Reset
 //             order when offered
 //   backends, daemon  each interactive config row (index: its `stop`)
+//   backgrounds  each of the user's own backgrounds (its Remove button)
 //   diagnostics  nothing (it only shows)
 // `view` is the shown section's view, as drawn.
-function setupStops(section, view) {
+function setupStops(section, view, sections) {
+  var list = sectionList(sections)
   var stops = []
-  for (var i = 0; i < SETUP_SECTIONS.length; i++) stops.push({ kind: "section", index: i })
-  var shown = setupSectionValue(section)
+  for (var i = 0; i < list.length; i++) stops.push({ kind: "section", index: i })
+  var shown = setupSectionValue(section, list)
   if (!isPlainObject(view) || view.hint !== "") return stops
   if (shown === "modules") {
     for (var m = 0; m < view.rows.length; m++) if (view.rows[m].switchable) stops.push({ kind: "module", index: m })
@@ -3936,6 +3986,9 @@ function setupStops(section, view) {
     if (view.reset) stops.push({ kind: "order-reset", index: -1 })
   } else if (shown === "backends" || shown === "daemon") {
     for (var s = 0; s < view.stops; s++) stops.push({ kind: "config", index: s })
+  } else if (shown === "backgrounds") {
+    var mrows = Array.isArray(view.rows) ? view.rows : []
+    for (var b = 0; b < mrows.length && b < MEDIA_ITEM_CAP; b++) stops.push({ kind: "media-remove", index: b })
   }
   return stops
 }
@@ -3949,4 +4002,468 @@ function stageButtonAfter(row, current, direction) {
   if (want === 0 || want === 1) { if (offered[want]) return want }
   if (offered[current === 1 ? 1 : 0]) return current === 1 ? 1 : 0
   return offered[0] ? 0 : (offered[1] ? 1 : -1)
+}
+
+// ---------------------------------------------------------------- background gallery
+//
+// Interface revision MEDIA_REVISION. `media list background --json` prints
+// a `media` header line (the bundled and the user gallery directories, the
+// number of items that follow) and then one `media_item` line per item, each
+// path whole, each label at most 96 bytes, every line at most 4096 bytes
+// (the watch's LINE_CAP bounds them here). A directory too long for its line
+// is "", and its items are left out. The Effect tab's Background row shows the image in force and
+// offers Gallery... (the shell's image picker, `omarchy-menu-images`, over
+// the two directories) and Add... (the desktop file chooser,
+// `omarchy-file-select`, then `media import background PATH --select`); the
+// setup dialog's Backgrounds section lists the user's own items with Remove
+// (`media remove PATH`). Raw paths are kept only to be passed as argv
+// elements; everything shown is a sanitised display copy.
+
+var MEDIA_KIND = "background"
+// The effect option the gallery's image is for: the row is offered only
+// while the daemon's background mode setting has this option.
+var BACKGROUND_REPLACE = "replace"
+// The producer lists at most this many items.
+var MEDIA_ITEM_CAP = 500
+var MEDIA_LABEL_CAP = 96
+var MEDIA_DIMENSION_MAX = 65535
+// The formats `media import` takes (PNG, JPEG, still WebP).
+var MEDIA_EXTENSIONS = "png jpg jpeg webp"
+var MEDIA_ADD_TITLE = "Add a background"
+var GALLERY_TOOL = "omarchy-menu-images"
+var CHOOSER_TOOL = "omarchy-file-select"
+var BACKGROUND_ROW_LABEL = "Background"
+var BACKGROUND_NONE_TEXT = "No background image"
+var GALLERY_LABEL = "Gallery…"
+var ADD_LABEL = "Add…"
+var GALLERY_TOOLTIP = "Choose a background image from the gallery"
+var ADD_TOOLTIP = "Add an image to your gallery and use it as the background"
+var GALLERY_MISSING_TEXT = GALLERY_TOOL + " is not on PATH: update Omarchy to choose from the gallery."
+var CHOOSER_MISSING_TEXT = CHOOSER_TOOL + " is not on PATH: update Omarchy to add a background."
+var GALLERY_FAILED_TEXT = "The gallery could not open"
+var CHOOSER_FAILED_TEXT = "The file chooser could not open"
+var GALLERY_REFUSED_TEXT = "That file is not in the gallery; nothing was changed"
+var GALLERY_NO_FOLDER_TEXT = "The gallery has no folder this plugin can use"
+var MEDIA_INCOMPLETE_TEXT = "omarchy-broadcast printed an incomplete background gallery"
+var CHOOSER_PATH_TEXT = "The file chooser returned a path this plugin cannot use"
+var MEDIA_OVERLONG_TEXT = "omarchy-broadcast printed more than this plugin reads"
+// A step still running after MEDIA_WATCHDOG_MS is stopped: just over
+// omarchy-file-select's own 600-second answer timeout, so a picker or chooser
+// that never answers cannot keep Gallery... and Add... faded for good.
+var MEDIA_WATCHDOG_MS = 610000
+var MEDIA_TIMEOUT_TEXT = "The picker did not answer in ten minutes; nothing was changed"
+// The hint while a flow runs (the two buttons are faded meanwhile).
+var GALLERY_WAITING_TEXT = "Waiting for the gallery…"
+var CHOOSER_WAITING_TEXT = "Waiting for the file chooser…"
+var MEDIA_OLD_DAEMON = "The daemon needs updating for the background gallery (D-Bus interface revision 15)."
+var MEDIA_EMPTY_TEXT = "You have not added any backgrounds yet. Add one with Add… in the panel's Effect tab."
+// mdi-image, the glyph the shell's own panels draw for an image file: the
+// thumbnail's placeholder.
+var GLYPH_IMAGE = String.fromCodePoint(0xF02E9)
+var MEDIA_REMOVE_LABEL = "Remove"
+var MEDIA_CONFIRM_LABEL = "Confirm remove"
+
+// The daemon has the background gallery: available, at MEDIA_REVISION or
+// later. An unknown revision counts as no.
+function mediaSupported(record) {
+  return available(record) && record.interfaceRevision >= MEDIA_REVISION
+}
+
+// A path as an argv element and an Image source: an absolute path of at
+// most PATH_CAP characters, without control characters (C0, C1, U+2028,
+// U+2029), without an empty, "." or ".." segment and not ending in "/";
+// else "". A path the producer clipped (it starts with an ellipsis) is no
+// path at all.
+function mediaPath(value) {
+  if (typeof value !== "string" || value.length < 2 || value.length > PATH_CAP || value.charAt(0) !== "/") return ""
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)) return ""
+  var parts = value.slice(1).split("/")
+  for (var i = 0; i < parts.length; i++) if (parts[i] === "" || parts[i] === "." || parts[i] === "..") return ""
+  return value
+}
+
+// A gallery directory: a mediaPath, trailing slashes dropped first; "" else
+// (the root directory among them).
+function mediaDir(value) {
+  if (typeof value !== "string") return ""
+  return mediaPath(value.replace(/\/+$/, ""))
+}
+
+// Whether `path` is a file directly in directory `dir` (both checked; the
+// picker lists a directory's files, never a subdirectory's).
+function mediaInDir(path, dir) {
+  var p = mediaPath(path)
+  var d = mediaDir(dir)
+  if (p === "" || d === "" || p.indexOf(d + "/") !== 0) return false
+  return p.slice(d.length + 1).indexOf("/") < 0
+}
+
+// A file's name without its directory and last extension, as a display
+// copy (sanitize, MEDIA_LABEL_CAP); "" for no name.
+function mediaStem(path) {
+  if (typeof path !== "string" || path === "") return ""
+  var name = path.slice(path.lastIndexOf("/") + 1)
+  var dot = name.lastIndexOf(".")
+  if (dot > 0) name = name.slice(0, dot)
+  return sanitize(name, MEDIA_LABEL_CAP)
+}
+
+// The Image source of a checked path: file:// and the path, each segment
+// percent-encoded (a "#", "?" or "%" in a file name is part of the name, not
+// of the URL); "" for anything else.
+function mediaImageSource(path) {
+  var p = mediaPath(path)
+  if (p === "") return ""
+  return "file://" + p.split("/").map(function(seg) { return encodeURIComponent(seg) }).join("/")
+}
+
+// A width or height: an integer in 1..MEDIA_DIMENSION_MAX, else 0 (unknown).
+function mediaDimension(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= 1 && value <= MEDIA_DIMENSION_MAX ? value : 0
+}
+
+// An item of a `media` line -> { path, label, bundled, width, height,
+// sizeText }, or null: a mediaPath directly in its own directory (the
+// bundled one for a bundled item, else the user's). `label` is the
+// daemon's, sanitised, else the file's stem.
+function mediaItem(o, bundledDir, userDir) {
+  if (!isPlainObject(o)) return null
+  var path = mediaPath(o.path)
+  var bundled = o.bundled === true
+  if (path === "" || !mediaInDir(path, bundled ? bundledDir : userDir)) return null
+  var label = sanitize(o.label, MEDIA_LABEL_CAP)
+  if (label === "") label = mediaStem(path)
+  var w = mediaDimension(o.width)
+  var hgt = mediaDimension(o.height)
+  return { path: path, label: label, bundled: bundled, width: w, height: hgt,
+           sizeText: w > 0 && hgt > 0 ? w + "\u00d7" + hgt : "" }
+}
+
+// One stdout line of `media list background --json` -> { kind, ... }:
+//   media        { header: { bundledDir, userDir, count, truncated } }: the
+//                header; a directory is "" when the producer left it out
+//                (too long) or it is unusable, and `count` is the number of
+//                item lines that follow (0..MEDIA_ITEM_CAP)
+//   item         { item }: a `media_item` line's object, checked against the
+//                header's directories by readMedia (mediaItem)
+//   error        { error }: an `error` line, for the screen
+//   unsupported  { error }: a newer schema
+//   invalid      anything else (not JSON, another v, type or kind, a count
+//                that is no integer or over MEDIA_ITEM_CAP, a line over
+//                LINE_CAP)
+function parseMediaLine(text) {
+  if (typeof text !== "string" || text.length > LINE_CAP || text.trim() === "") return { kind: "invalid" }
+  var m
+  try { m = JSON.parse(text) } catch (e) { return { kind: "invalid" } }
+  if (!isPlainObject(m)) return { kind: "invalid" }
+  if (m.v !== SCHEMA_VERSION) {
+    if (typeof m.v === "number" && isFinite(m.v) && Math.floor(m.v) === m.v && m.v > SCHEMA_VERSION)
+      return { kind: "unsupported", error: "omarchy-broadcast prints output schema v" + m.v + "; this plugin reads v" + SCHEMA_VERSION + ". Update the plugin." }
+    return { kind: "invalid" }
+  }
+  if (m.type === "error") return { kind: "error", error: setupErrorText(m) }
+  if (m.kind !== MEDIA_KIND) return { kind: "invalid" }
+  if (m.type === "media_item") return { kind: "item", item: m }
+  if (m.type !== "media") return { kind: "invalid" }
+  var n = m.items
+  if (typeof n !== "number" || !isFinite(n) || Math.floor(n) !== n || n < 0 || n > MEDIA_ITEM_CAP) return { kind: "invalid" }
+  if (typeof m.bundled_dir !== "string" || typeof m.user_dir !== "string") return { kind: "invalid" }
+  return { kind: "media", header: { bundledDir: mediaDir(m.bundled_dir), userDir: mediaDir(m.user_dir), count: n,
+                                    truncated: m.items_truncated === true } }
+}
+
+// The gallery read (SETUP_READS "media", and the Gallery... flow's first
+// step): { ok: true, bundledDir, userDir, items, bundledCount, truncated },
+// or readFailed with the error line, the exit status or a fallback. The
+// header comes first and exactly as many item lines as it counts follow it,
+// nothing else: an item line before it, a second header, a line of another
+// kind after it, or fewer or more items than counted, and the read is
+// incomplete (MEDIA_INCOMPLETE_TEXT). An item outside its own directory
+// (mediaItem; every item of a directory that is "") is dropped, and counts
+// as truncation.
+function readMedia(lines, code, stderrText) {
+  var src = Array.isArray(lines) ? lines : []
+  var error = ""
+  var header = null
+  var raw = []
+  for (var i = 0; i < src.length && i < MEDIA_ITEM_CAP + 2; i++) {
+    var p = parseMediaLine(src[i])
+    if (p.kind === "unsupported") return readFailed(p.error)
+    if (header === null) {
+      if (p.kind === "error") error = p.error
+      else if (p.kind === "media") header = p.header
+      else if (p.kind === "item") return readFailed(MEDIA_INCOMPLETE_TEXT)
+      continue
+    }
+    if (p.kind === "error") return readFailed(p.error)
+    if (p.kind !== "item" || raw.length >= header.count) return readFailed(MEDIA_INCOMPLETE_TEXT)
+    raw.push(p.item)
+  }
+  if (header === null) return readFailure({ error: error }, code, stderrText, "omarchy-broadcast printed no background gallery")
+  if (src.length > MEDIA_ITEM_CAP + 2 || raw.length !== header.count) return readFailed(MEDIA_INCOMPLETE_TEXT)
+  var out = { ok: true, bundledDir: header.bundledDir, userDir: header.userDir, items: [], bundledCount: 0, truncated: header.truncated }
+  for (var k = 0; k < raw.length; k++) {
+    var it = mediaItem(raw[k], header.bundledDir, header.userDir)
+    if (it === null) { out.truncated = true; continue }
+    if (it.bundled) out.bundledCount++
+    out.items.push(it)
+  }
+  return out
+}
+
+// ---- argv (fixed words; each path checked again with mediaPath)
+
+function mediaListArgv(cli) {
+  return cliUsable(cli) ? [cli, "media", "list", MEDIA_KIND, "--json"] : null
+}
+
+// Selects `path` as the replacement background (and the effect with it).
+function backgroundArgv(cli, path) {
+  var p = mediaPath(path)
+  return cliUsable(cli) && p !== "" ? [cli, "effect", BACKGROUND_REPLACE, "--image", p] : null
+}
+
+// Copies `path` into the user's gallery, checks it and selects it.
+function mediaImportArgv(cli, path) {
+  var p = mediaPath(path)
+  return cliUsable(cli) && p !== "" ? [cli, "media", "import", MEDIA_KIND, p, "--select"] : null
+}
+
+function mediaRemoveArgv(cli, path) {
+  var p = mediaPath(path)
+  return cliUsable(cli) && p !== "" ? [cli, "media", "remove", p] : null
+}
+
+// The shell's image picker over the gallery's directories (the two, or the
+// one the producer did not leave out), the image in force preselected when
+// there is one.
+function galleryArgv(tool, media, current) {
+  if (!cliUsable(tool) || !isPlainObject(media) || media.ok !== true) return null
+  // A directory the producer left out ("") is not offered; with neither,
+  // there is nothing to pick from.
+  var dirs = [mediaDir(media.bundledDir), mediaDir(media.userDir)].filter(function(d) { return d !== "" })
+  if (dirs.length === 0) return null
+  var argv = [tool, "--show-labels"]
+  var sel = mediaPath(current)
+  if (sel !== "") argv.push("--selected", sel)
+  return argv.concat(dirs)
+}
+
+function fileSelectArgv(tool) {
+  return cliUsable(tool) ? [tool, "--title", MEDIA_ADD_TITLE, "--extensions", MEDIA_EXTENSIONS] : null
+}
+
+// ---- the two tools, looked up on PATH (as the resolver looks up the CLI)
+
+// Prints "<name> <path>" for each tool found; a path holding a newline is
+// never printed. The names are its positional arguments (toolsArgv): nothing
+// is spliced into the script's text.
+var TOOLS_SCRIPT = ""
+  + "nl='\n'; "
+  + "for t do "
+  + "p=$(command -v \"$t\" 2>/dev/null) && case $p in *\"$nl\"*) ;; /*) printf '%s %s\\n' \"$t\" \"$p\";; esac; "
+  + "done; exit 0"
+
+// Always an argv: the script, its $0, then the two names as $1 and $2.
+function toolsArgv() {
+  return ["sh", "-c", TOOLS_SCRIPT, "omarchy-broadcast-tools", GALLERY_TOOL, CHOOSER_TOOL]
+}
+
+// Not looked up yet: neither offered.
+function emptyTools() {
+  return { known: false, gallery: "", chooser: "" }
+}
+
+// The probe's stdout lines -> { known: true, gallery, chooser }: each an
+// absolute path, else "" (not found).
+function toolsFromLines(lines) {
+  var out = { known: true, gallery: "", chooser: "" }
+  var src = Array.isArray(lines) ? lines : []
+  for (var i = 0; i < src.length && i < 4; i++) {
+    var line = typeof src[i] === "string" ? src[i] : ""
+    var sp = line.indexOf(" ")
+    if (sp < 0) continue
+    var name = line.slice(0, sp)
+    var path = parseResolverLine(line.slice(sp + 1))
+    if (name === GALLERY_TOOL && out.gallery === "") out.gallery = path
+    else if (name === CHOOSER_TOOL && out.chooser === "") out.chooser = path
+  }
+  return out
+}
+
+// ---- the Gallery... and Add... flows, one step at a time
+//
+// A flow is { kind: "gallery" | "add", step, media }: "gallery" first lists
+// the gallery (step "list", the CLI), then runs the picker over its two
+// directories (step "pick"); "add" runs the file chooser (step "pick"). A
+// step's end gives { flow, intent, error }: the next step, else the command
+// intent to queue (a background selection or an import), else the error
+// line for the panel ("" for none: a cancel).
+
+// The argv of a flow's current step, or null.
+function mediaStepArgv(flow, cli, tools, current) {
+  if (!isPlainObject(flow)) return null
+  var t = isPlainObject(tools) ? tools : emptyTools()
+  if (flow.kind === "gallery" && flow.step === "list") return t.gallery !== "" ? mediaListArgv(cli) : null
+  if (flow.kind === "gallery" && flow.step === "pick") return galleryArgv(t.gallery, flow.media, current)
+  if (flow.kind === "add" && flow.step === "pick") return fileSelectArgv(t.chooser)
+  return null
+}
+
+// The picker's answer -> the path, only when it is one line and exactly the
+// path of an item of the gallery just read; else "". The picker lists files
+// the daemon skipped (other formats, videos, links), and none of them is
+// ever selected.
+function galleryChoice(firstLine, lineCount, media) {
+  if (lineCount !== 1 || !isPlainObject(media) || media.ok !== true || !Array.isArray(media.items)) return ""
+  var p = mediaPath(firstLine)
+  if (p === "") return ""
+  for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) if (media.items[i].path === p) return p
+  return ""
+}
+
+// A step's end. `result`: { started, code, first, lines, list, rejected,
+// timedOut, stderr } (whether the process ran, its exit status, its first
+// stdout line, how many lines it printed, every line of a list step,
+// whether a line was over the cap, whether the watchdog stopped it, its
+// first stderr line).
+function mediaStepEnd(flow, result) {
+  var out = { flow: null, intent: null, error: "" }
+  if (!isPlainObject(flow) || !isPlainObject(result)) return out
+  var r = result
+  var lines = typeof r.lines === "number" ? r.lines : 0
+  var first = typeof r.first === "string" ? r.first : ""
+  var detail = sanitize(typeof r.stderr === "string" ? r.stderr.slice(0, STDERR_CAP) : "", DETAIL_CAP)
+  if (r.timedOut === true) { out.error = MEDIA_TIMEOUT_TEXT; return out }
+  if (flow.kind === "gallery" && flow.step === "list") {
+    if (r.started !== true) { out.error = CLI_MISSING_TEXT; return out }
+    if (r.rejected === true) { out.error = MEDIA_OVERLONG_TEXT; return out }
+    var media = readMedia(Array.isArray(r.list) ? r.list : [], r.code, r.stderr)
+    if (media.ok !== true) { out.error = media.error; return out }
+    if (mediaDir(media.bundledDir) === "" && mediaDir(media.userDir) === "") { out.error = GALLERY_NO_FOLDER_TEXT; return out }
+    out.flow = { kind: "gallery", step: "pick", media: media }
+    return out
+  }
+  if (flow.kind === "gallery" && flow.step === "pick") {
+    if (r.started !== true || r.code !== 0) {
+      out.error = GALLERY_FAILED_TEXT + (r.started === true && detail !== "" ? ": " + detail : "")
+      return out
+    }
+    // Nothing printed: the picker was closed without a choice.
+    if (r.rejected !== true && (lines === 0 || (lines === 1 && first === ""))) return out
+    var chosen = r.rejected === true ? "" : galleryChoice(first, lines, flow.media)
+    if (chosen === "") { out.error = GALLERY_REFUSED_TEXT; return out }
+    out.intent = { verb: "background", path: chosen }
+    return out
+  }
+  if (flow.kind === "add" && flow.step === "pick") {
+    // 1: nothing picked (a decision, not an error); 2 or anything else: the
+    // chooser did not run.
+    if (r.started === true && r.code === 1) return out
+    if (r.started !== true || r.code !== 0) { out.error = CHOOSER_FAILED_TEXT; return out }
+    var picked = lines === 1 && r.rejected !== true ? mediaPath(first) : ""
+    if (picked === "") { out.error = lines === 0 ? "" : CHOOSER_PATH_TEXT; return out }
+    out.intent = { verb: "media-import", path: picked }
+    return out
+  }
+  return out
+}
+
+// ---- the Effect tab's Background row
+
+// The daemon's background mode setting offers the replacement background.
+function backgroundOffered(record) {
+  var row = effectModeRow(record)
+  return !!row && optionIndex(row.options, BACKGROUND_REPLACE) >= 0
+}
+
+// Whether the Effect tab draws the Background row (a keyboard stop): the
+// daemon has the gallery and offers the replacement background.
+function backgroundRowShown(record) {
+  return mediaSupported(record) && backgroundOffered(record)
+}
+
+// The Background row, exactly as drawn:
+//   { visible, label, source, buttons: [{ label, enabled, tooltip }] }
+// `source` is the thumbnail's (mediaImageSource of the raw path, "" for the
+// placeholder); `label` the image's file stem (or the display copy's, when
+// the raw path is not usable), else BACKGROUND_NONE_TEXT. Gallery... is
+// button 0, Add... button 1; each is disabled, its tooltip saying why, while
+// its tool is not on PATH (`tools`, the Daemon's probe), and both while a
+// flow runs (`busy`).
+function backgroundRowView(record, tools, busy) {
+  var out = { visible: false, label: "", source: "", buttons: [] }
+  if (!backgroundRowShown(record)) return out
+  var t = isPlainObject(tools) ? tools : emptyTools()
+  out.visible = true
+  out.source = mediaImageSource(record.backgroundImagePath)
+  var label = record.backgroundImagePath !== "" ? mediaStem(record.backgroundImagePath) : mediaStem(record.backgroundImage)
+  out.label = label !== "" ? label : BACKGROUND_NONE_TEXT
+  var gallery = t.gallery !== ""
+  var chooser = t.chooser !== ""
+  out.buttons.push({ label: GALLERY_LABEL, enabled: gallery && busy !== true,
+                     tooltip: gallery || !t.known ? GALLERY_TOOLTIP : GALLERY_MISSING_TEXT, missing: t.known && !gallery })
+  out.buttons.push({ label: ADD_LABEL, enabled: chooser && busy !== true,
+                     tooltip: chooser || !t.known ? ADD_TOOLTIP : CHOOSER_MISSING_TEXT, missing: t.known && !chooser })
+  return out
+}
+
+// The hint under the Background row: while a flow runs (`flow`, the
+// Daemon's mediaFlow) what it waits for, else which tool is missing, else "".
+function backgroundHint(view, flow) {
+  if (!isPlainObject(view) || !view.visible) return ""
+  if (isPlainObject(flow)) return flow.kind === "add" ? CHOOSER_WAITING_TEXT : GALLERY_WAITING_TEXT
+  var out = []
+  for (var i = 0; i < view.buttons.length; i++) if (view.buttons[i].missing) out.push(view.buttons[i].tooltip)
+  return out.join(" ")
+}
+
+// ---- the setup dialog's Backgrounds section
+
+// { hint, bundledText, rows, emptyText, truncation }; a row (one of the
+// user's own items): { path, label, sizeText, confirming, index }.
+// `emptyText` is said under the bundled count when the user has none. `confirming` is the
+// path whose Remove was pressed once (the second press removes it).
+function mediaSectionView(setup, record, confirming) {
+  var out = { hint: "", bundledText: "", rows: [], emptyText: "", truncation: "" }
+  var gate = setupGate(record)
+  if (!gate.modules) { out.hint = gate.text; return out }
+  if (!mediaSupported(record)) { out.hint = MEDIA_OLD_DAEMON; return out }
+  var media = isPlainObject(setup) ? setup.media : null
+  out.hint = readHint(media)
+  if (out.hint !== "") return out
+  var n = media.bundledCount
+  out.bundledText = n === 1 ? "1 bundled background" : n + " bundled backgrounds"
+  for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) {
+    var it = media.items[i]
+    if (it.bundled || !mediaInDir(it.path, media.userDir)) continue
+    out.rows.push({ path: it.path, label: it.label, sizeText: it.sizeText,
+                    confirming: typeof confirming === "string" && confirming !== "" && confirming === it.path,
+                    index: out.rows.length })
+  }
+  if (out.rows.length === 0) out.emptyText = MEDIA_EMPTY_TEXT
+  if (media.truncated) out.truncation = "The daemon lists more backgrounds than are shown."
+  return out
+}
+
+// A press of Remove on the row of `path`, given the path pressed before
+// (`confirming`): { confirming, remove }. The first press asks for
+// confirmation; the second on the same row removes it.
+function mediaRemovePress(confirming, path) {
+  var p = mediaPath(path)
+  if (p === "") return { confirming: "", remove: false }
+  if (confirming === p) return { confirming: "", remove: true }
+  return { confirming: p, remove: false }
+}
+
+// A user item of the read gallery by its path (what a Remove press may
+// name), else null.
+function mediaUserItem(media, path) {
+  if (!isPlainObject(media) || media.ok !== true || !Array.isArray(media.items)) return null
+  for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) {
+    var it = media.items[i]
+    if (it.path === path && !it.bundled && mediaInDir(it.path, media.userDir)) return it
+  }
+  return null
 }

@@ -3927,4 +3927,380 @@ TestCase {
     compare(rows[5].stageNotes, "", "a disabled module: its own reason says why")
     compare(rows[6].stageNotes, "", "an unavailable module too")
   }
+
+
+  // ---- the background gallery (interface revision 15)
+
+  readonly property string bundledDir: "/usr/share/omarchy-broadcast/media/backgrounds"
+  readonly property string userDir: "/home/u/.local/share/omarchy-broadcast/media/backgrounds"
+
+  function mediaObject(o) {
+    return merged({ v: 1, type: "media", kind: "background", serial: 3, bundled_dir: bundledDir, user_dir: userDir,
+                    items: [
+                      { path: bundledDir + "/aurora.webp", label: "Aurora", bundled: true, media_type: "image", width: 3840, height: 2160, duration_ms: 0, poster: "" },
+                      { path: bundledDir + "/dunes.webp", label: "Dunes", bundled: true, media_type: "image", width: 3840, height: 2160, duration_ms: 0, poster: "" },
+                      { path: userDir + "/office.png", label: "office", bundled: false, media_type: "image", width: 1920, height: 1080, duration_ms: 0, poster: "" }
+                    ], items_truncated: false }, o || {})
+  }
+  function rev15(o) { return withGlobals(merged({ interface_revision: 15, cameras: [cameraObjects()[0]] }, o || {})) }
+  // `media list background --json` as the producer prints it: the header
+  // (`items` the count, unless `o.items_count` says otherwise), then one
+  // `media_item` line per item (a non-object item is printed as it is).
+  function mediaLines(o) {
+    var m = mediaObject(o)
+    var items = m.items
+    var header = merged({}, m)
+    header.items = o && o.items_count !== undefined ? o.items_count : (Array.isArray(items) ? items.length : items)
+    delete header.items_count
+    var out = [line(header)]
+    if (Array.isArray(items)) for (var i = 0; i < items.length; i++) {
+      var it = items[i]
+      if (it !== null && typeof it === "object") out.push(line(merged({ v: 1, type: "media_item", kind: "background" }, it)))
+      else out.push(line(it))
+    }
+    return out
+  }
+  function readOk(o) { return Model.readMedia(mediaLines(o), 0, "") }
+
+  function test_media_revision_gate() {
+    compare(Model.MEDIA_REVISION, 15)
+    verify(Model.mediaSupported(rev15()))
+    verify(!Model.mediaSupported(rev15({ interface_revision: 14 })), "revision 14: no gallery")
+    verify(!Model.mediaSupported(snap({ interface_revision: 15, state: "nonsense" })), "an unknown state is unavailable")
+    verify(!Model.mediaSupported(Model.emptyRecord("not-running")))
+    verify(Model.backgroundRowShown(rev15()))
+    verify(!Model.backgroundRowShown(rev15({ interface_revision: 14 })))
+    // the old read-only row stays for an older daemon, and goes with the new row
+    compare(Model.effectRows(rev15({ interface_revision: 14, background_image: image })).length, 1)
+    compare(Model.effectRows(rev15({ background_image: image })).length, 0)
+    // no replacement option offered: no row (and the read-only row is back)
+    var noReplace = rev15({ background_image: image })
+    var mode = Model.findSetting(noReplace, modeId)
+    mode.options = mode.options.filter(function(o) { return o.value !== "replace" })
+    verify(!Model.backgroundRowShown(noReplace))
+    compare(Model.effectRows(noReplace).length, 1)
+    // the setup dialog: the read and the section only from 15
+    compare(JSON.stringify(Model.setupReads(rev15())), JSON.stringify(["modules", "order", "config", "files", "media"]))
+    compare(JSON.stringify(Model.setupReads(rev15({ interface_revision: 14 }))), JSON.stringify(["modules", "order", "config", "files"]))
+    compare(JSON.stringify(Model.setupSections(rev15())), JSON.stringify(["modules", "order", "backends", "daemon", "backgrounds", "diagnostics"]))
+    compare(JSON.stringify(Model.setupSections(rev15({ interface_revision: 14 }))), JSON.stringify(["modules", "order", "backends", "daemon", "diagnostics"]))
+    compare(JSON.stringify(Model.setupSections(null)), JSON.stringify(["modules", "order", "backends", "daemon", "diagnostics"]))
+    compare(Model.setupSectionValue("backgrounds", Model.setupSections(rev15({ interface_revision: 14 }))), "modules", "hidden: not shown")
+    compare(Model.setupSectionValue("backgrounds", Model.setupSections(rev15())), "backgrounds")
+    compare(Model.setupSectionOptions("diagnostics", Model.setupSections(rev15()))[5].number, "6")
+    compare(Model.setupSectionOptions("diagnostics")[4].number, "5", "no list: the five of an unknown daemon")
+    compare(Model.MEDIA_ITEM_CAP, 500)
+    compare(Model.readLinesCap("media"), Model.MEDIA_ITEM_CAP + 2, "the header, every item and an error line")
+    compare(Model.readLinesCap("modules"), Model.READ_LINES_CAP)
+    compare(JSON.stringify(Model.setupReadArgv(cli, "media")), JSON.stringify([cli, "media", "list", "background", "--json"]))
+    compare(Model.emptySetup().media, null)
+  }
+
+  function test_media_paths() {
+    compare(Model.mediaPath("/a/b.png"), "/a/b.png")
+    var bad = ["", "/", "a/b.png", "./b.png", "/a//b.png", "/a/../b.png", "/a/./b.png", "/a/", "/a/b\n.png", "/a/\u0085b", "/a/ b",
+               "…/b.png", 42, null, ["/a"]]
+    for (var i = 0; i < bad.length; i++) compare(Model.mediaPath(bad[i]), "", JSON.stringify(bad[i]))
+    var long = "/"
+    for (var k = 0; k < Model.PATH_CAP; k++) long += "a"
+    compare(Model.mediaPath(long), "", "over the path cap")
+    compare(Model.mediaDir(userDir + "//"), userDir, "trailing slashes dropped")
+    compare(Model.mediaDir("/"), "")
+    verify(Model.mediaInDir(userDir + "/a.png", userDir))
+    verify(Model.mediaInDir(userDir + "/a.png", userDir + "/"))
+    verify(!Model.mediaInDir(userDir + "/sub/a.png", userDir), "not in a subdirectory")
+    verify(!Model.mediaInDir(userDir + "x/a.png", userDir), "a sibling with the same prefix")
+    verify(!Model.mediaInDir(userDir + "/../../.ssh/id", userDir))
+    verify(!Model.mediaInDir(userDir, userDir))
+    compare(Model.mediaImageSource("/a/b c#1?.png"), "file:///a/b%20c%231%3F.png", "every segment percent-encoded")
+    compare(Model.mediaImageSource("/a/日.png"), "file:///a/%E6%97%A5.png")
+    compare(Model.mediaImageSource("a.png"), "")
+    compare(Model.mediaStem("/a/My photo.final.jpg"), "My photo.final")
+    compare(Model.mediaStem("/a/.hidden"), ".hidden")
+    compare(Model.mediaStem("/a/<b>‮evil&.png"), "bevil")
+    // the snapshot keeps a raw path only when it is usable
+    compare(rev15({ background_image: image }).backgroundImagePath, image)
+    compare(rev15({ background_image: "…/clipped/end.png" }).backgroundImagePath, "", "a clipped path is no path")
+    compare(rev15({ background_image: 42 }).backgroundImagePath, "")
+  }
+
+  function test_media_line_parsing() {
+    var r = readOk()
+    verify(r.ok)
+    compare(r.bundledDir, bundledDir)
+    compare(r.userDir, userDir)
+    compare(r.items.length, 3)
+    compare(r.bundledCount, 2)
+    compare(r.truncated, false)
+    compare(r.items[2].sizeText, "1920×1080")
+    compare(r.items[0].bundled, true)
+    var header = mediaLines()[0]
+    compare(Model.parseMediaLine(header).kind, "media")
+    compare(Model.parseMediaLine(header).header.count, 3)
+    compare(Model.parseMediaLine(mediaLines()[1]).kind, "item")
+    // malformed header lines
+    var bad = ["", "not json", "[]", "42", line(mediaObject({ v: 2 })).replace('"v":2', '"v":"1"'), mediaLines({ type: "medias" })[0],
+               mediaLines({ kind: "away" })[0], mediaLines({ user_dir: 7 })[0], mediaLines({ items_count: "3" })[0],
+               mediaLines({ items_count: -1 })[0], mediaLines({ items_count: 1.5 })[0], mediaLines({ items_count: Model.MEDIA_ITEM_CAP + 1 })[0],
+               line({ v: 1, type: "media_item", kind: "away", path: userDir + "/a.png" })]
+    for (var i = 0; i < bad.length; i++) compare(Model.parseMediaLine(bad[i]).kind, "invalid", bad[i])
+    compare(Model.parseMediaLine(line(mediaObject({ v: 2 }))).kind, "unsupported")
+    verify(!Model.readMedia([line(mediaObject({ v: 2 }))], 0, "").ok)
+    var err = Model.readMedia(['{"v":1,"type":"error","code":"daemon-not-running","error":"x"}'], 3, "")
+    compare(err.ok, false)
+    compare(err.error, "omarchy-broadcastd is not running")
+    compare(Model.readMedia([], 1, "omarchy-broadcast: no such command").error, "The daemon refused the request: no such command")
+    compare(Model.readMedia([], 0, "").error, "omarchy-broadcast printed no background gallery")
+    // the count must match: fewer or more item lines, an item before the
+    // header, a second header, another line among the items
+    var lines = mediaLines()
+    compare(Model.readMedia(lines.slice(0, 3), 0, "").error, Model.MEDIA_INCOMPLETE_TEXT, "one item short")
+    compare(Model.readMedia(lines.concat([lines[1]]), 0, "").error, Model.MEDIA_INCOMPLETE_TEXT, "one item more")
+    compare(Model.readMedia([lines[1]].concat(lines), 0, "").error, Model.MEDIA_INCOMPLETE_TEXT, "an item before the header")
+    compare(Model.readMedia(lines.concat([lines[0]]), 0, "").error, Model.MEDIA_INCOMPLETE_TEXT, "two headers")
+    compare(Model.readMedia([lines[0], lines[1], "not json", lines[2], lines[3]], 0, "").error, Model.MEDIA_INCOMPLETE_TEXT, "a broken line")
+    compare(Model.readMedia(lines.concat(['{"v":1,"type":"error","error":"lost the daemon"}']), 0, "").error, "lost the daemon",
+            "an error after the header fails the read")
+    compare(readOk({ items: [] }).items.length, 0, "an empty gallery is a gallery")
+    verify(Model.readMedia(['{"v":1,"type":"note"}'].concat(lines), 0, "").ok, "an unknown line before the header is skipped")
+    // a directory the producer left out (too long): "", its items omitted
+    var noUser = readOk({ user_dir: "", items: [{ path: bundledDir + "/a.webp", label: "A", bundled: true }] })
+    verify(noUser.ok)
+    compare(noUser.userDir, "")
+    compare(noUser.items.length, 1)
+    compare(readOk({ bundled_dir: "relative" }).bundledDir, "", "an unusable directory reads as left out")
+    compare(readOk({ bundled_dir: "relative" }).bundledCount, 0, "and its items are dropped")
+    // items: unusable ones dropped (and counted as truncation)
+    var odd = readOk({ items: [
+      { path: 42, label: "n", bundled: false },
+      { path: "relative.png", label: "r", bundled: false },
+      { path: "/etc/passwd", label: "outside", bundled: false },
+      { path: userDir + "/sub/a.png", label: "nested", bundled: false },
+      { path: bundledDir + "/x.webp", label: "claims user", bundled: false },
+      { path: userDir + "/ok.png", label: "‮evil<b>&\nname⁦", bundled: false, width: -1, height: 1.5 }
+    ] })
+    compare(odd.items.length, 1)
+    compare(odd.items[0].label, "evilb name", "bidi, markup and controls removed from the display copy")
+    compare(odd.items[0].path, userDir + "/ok.png", "the raw path is kept for argv")
+    compare(odd.items[0].sizeText, "", "an unusable size is not shown")
+    compare(odd.truncated, true)
+    compare(Model.readMedia(mediaLines({ items: ["string"] }), 0, "").error, Model.MEDIA_INCOMPLETE_TEXT, "an item that is no object")
+    var longLabel = ""
+    for (var k = 0; k < 300; k++) longLabel += "x"
+    compare(readOk({ items: [{ path: userDir + "/l.png", label: longLabel, bundled: false }] }).items[0].label.length, Model.MEDIA_LABEL_CAP)
+    compare(readOk({ items: [{ path: userDir + "/My Trip.jpeg", label: "", bundled: false }] }).items[0].label, "My Trip", "no label: the stem")
+    compare(readOk({ items_truncated: true }).truncated, true)
+    // up to the producer's 500 items, all read
+    var many = []
+    for (var m = 0; m < Model.MEDIA_ITEM_CAP; m++) many.push({ path: userDir + "/i" + m + ".png", label: "i", bundled: false })
+    var full = readOk({ items: many })
+    verify(full.ok)
+    compare(full.items.length, Model.MEDIA_ITEM_CAP)
+    compare(full.truncated, false)
+    var over = mediaLines({ items: many.concat([{ path: userDir + "/x.png", label: "x", bundled: false }]), items_count: Model.MEDIA_ITEM_CAP })
+    compare(Model.readMedia(over, 0, "").ok, false, "past the cap: incomplete")
+    var huge = "x"
+    while (huge.length <= Model.LINE_CAP) huge += huge
+    compare(Model.parseMediaLine(huge).kind, "invalid", "over the line cap")
+  }
+
+  function test_media_argv() {
+    var p = userDir + "/a b.png"
+    compare(JSON.stringify(Model.backgroundArgv(cli, p)), JSON.stringify([cli, "effect", "replace", "--image", p]))
+    compare(JSON.stringify(Model.mediaImportArgv(cli, "/tmp/x.png")), JSON.stringify([cli, "media", "import", "background", "/tmp/x.png", "--select"]))
+    compare(JSON.stringify(Model.mediaRemoveArgv(cli, p)), JSON.stringify([cli, "media", "remove", p]))
+    compare(Model.backgroundArgv(cli, "-x"), null, "never an option")
+    compare(Model.mediaImportArgv(cli, "relative.png"), null)
+    compare(Model.mediaRemoveArgv("relative-cli", p), null)
+    var media = readOk()
+    compare(JSON.stringify(Model.galleryArgv("/usr/bin/omarchy-menu-images", media, image)),
+            JSON.stringify(["/usr/bin/omarchy-menu-images", "--show-labels", "--selected", image, bundledDir, userDir]))
+    compare(JSON.stringify(Model.galleryArgv("/usr/bin/omarchy-menu-images", media, "")),
+            JSON.stringify(["/usr/bin/omarchy-menu-images", "--show-labels", bundledDir, userDir]), "nothing in force: no --selected")
+    compare(Model.galleryArgv("omarchy-menu-images", media, ""), null, "only an absolute tool path")
+    compare(Model.galleryArgv("/t", { ok: false }, ""), null)
+    compare(JSON.stringify(Model.galleryArgv("/t", readOk({ user_dir: "", items: [] }), "")), JSON.stringify(["/t", "--show-labels", bundledDir]),
+            "a directory left out is not offered")
+    compare(Model.galleryArgv("/t", readOk({ user_dir: "", bundled_dir: "", items: [] }), ""), null, "neither: nothing to pick from")
+    compare(JSON.stringify(Model.fileSelectArgv("/usr/bin/omarchy-file-select")),
+            JSON.stringify(["/usr/bin/omarchy-file-select", "--title", "Add a background", "--extensions", "png jpg jpeg webp"]))
+    // the intents, re-checked when they run
+    var r = rev15()
+    compare(JSON.stringify(Model.intentArgv({ verb: "background", path: p }, cli, r)), JSON.stringify(Model.backgroundArgv(cli, p)))
+    compare(JSON.stringify(Model.intentArgv({ verb: "media-import", path: "/tmp/x.png" }, cli, r)), JSON.stringify(Model.mediaImportArgv(cli, "/tmp/x.png")))
+    compare(Model.intentArgv({ verb: "background", path: p }, cli, rev15({ interface_revision: 14 })), null, "revision 14 runs nothing")
+    compare(Model.intentArgv({ verb: "media-import", path: p }, cli, Model.emptyRecord("not-running")), null)
+    compare(JSON.stringify(Model.intentArgv({ verb: "setup", op: "media-remove", path: p }, cli, r)), JSON.stringify(Model.mediaRemoveArgv(cli, p)))
+    compare(Model.intentArgv({ verb: "setup", op: "media-remove", path: p }, cli, rev15({ interface_revision: 14 })), null)
+    verify(Model.isSetupIntent({ verb: "setup", op: "media-remove", path: p }), "a remove is the dialog's write")
+    verify(!Model.isSetupIntent({ verb: "background", path: p }), "a selection is the panel's")
+  }
+
+  function test_media_tools() {
+    compare(JSON.stringify(Model.toolsArgv()),
+            JSON.stringify(["sh", "-c", Model.TOOLS_SCRIPT, "omarchy-broadcast-tools", "omarchy-menu-images", "omarchy-file-select"]))
+    verify(Model.TOOLS_SCRIPT.indexOf("omarchy-") < 0, "the names are arguments, never spliced into the script")
+    verify(Model.TOOLS_SCRIPT.indexOf("for t do ") >= 0)
+    compare(Model.emptyTools().known, false)
+    var t = Model.toolsFromLines(["omarchy-menu-images /usr/bin/omarchy-menu-images", "omarchy-file-select /usr/bin/omarchy-file-select"])
+    compare(JSON.stringify(t), JSON.stringify({ known: true, gallery: "/usr/bin/omarchy-menu-images", chooser: "/usr/bin/omarchy-file-select" }))
+    compare(JSON.stringify(Model.toolsFromLines([])), JSON.stringify({ known: true, gallery: "", chooser: "" }))
+    compare(Model.toolsFromLines(["omarchy-menu-images relative"]).gallery, "")
+    compare(Model.toolsFromLines(["other /usr/bin/other"]).gallery, "")
+    compare(Model.toolsFromLines(["omarchy-menu-images /a", "omarchy-menu-images /b"]).gallery, "/a", "the first one found")
+  }
+
+  function test_gallery_flow() {
+    var tools = { known: true, gallery: "/t/omarchy-menu-images", chooser: "/t/omarchy-file-select" }
+    var list = { kind: "gallery", step: "list" }
+    compare(JSON.stringify(Model.mediaStepArgv(list, cli, tools, "")), JSON.stringify([cli, "media", "list", "background", "--json"]))
+    compare(Model.mediaStepArgv(list, cli, { known: true, gallery: "", chooser: "" }, ""), null, "no picker: nothing runs")
+    // list -> pick
+    var end = Model.mediaStepEnd(list, { started: true, code: 0, first: mediaLines()[0], lines: 4, list: mediaLines(), rejected: false, stderr: "" })
+    compare(end.error, "")
+    compare(end.intent, null)
+    compare(end.flow.step, "pick")
+    var pick = end.flow
+    compare(JSON.stringify(Model.mediaStepArgv(pick, cli, tools, image)),
+            JSON.stringify(["/t/omarchy-menu-images", "--show-labels", "--selected", image, bundledDir, userDir]))
+    // a failed list
+    compare(Model.mediaStepEnd(list, { started: false }).error, Model.CLI_MISSING_TEXT)
+    compare(Model.mediaStepEnd(list, { started: true, code: 0, first: "", lines: 0 }).error, "omarchy-broadcast printed no background gallery")
+    compare(Model.mediaStepEnd(list, { started: true, code: 0, lines: 3, list: mediaLines().slice(0, 3) }).error, Model.MEDIA_INCOMPLETE_TEXT)
+    compare(Model.mediaStepEnd(list, { started: true, code: 0, lines: 1, list: mediaLines({ user_dir: "", bundled_dir: "", items: [] }) }).error,
+            Model.GALLERY_NO_FOLDER_TEXT)
+    compare(Model.mediaStepEnd(list, { started: true, code: 143, timedOut: true }).error, Model.MEDIA_TIMEOUT_TEXT, "the watchdog")
+    compare(Model.mediaStepEnd(list, { started: true, code: 0, rejected: true, lines: 1 }).error, Model.MEDIA_OVERLONG_TEXT)
+    compare(Model.mediaStepEnd(list, { started: true, code: 1, first: "", lines: 0, stderr: "omarchy-broadcast: nope" }).error,
+            "The daemon refused the request: nope")
+    // the picker's answers
+    var res = function(first, lines, code) { return { started: true, code: code === undefined ? 0 : code, first: first, lines: lines, rejected: false, stderr: "" } }
+    var chose = Model.mediaStepEnd(pick, res(bundledDir + "/aurora.webp", 1))
+    compare(JSON.stringify(chose.intent), JSON.stringify({ verb: "background", path: bundledDir + "/aurora.webp" }))
+    compare(chose.flow, null)
+    compare(JSON.stringify(Model.mediaStepEnd(pick, res(userDir + "/office.png", 1)).intent), JSON.stringify({ verb: "background", path: userDir + "/office.png" }))
+    var cancel = Model.mediaStepEnd(pick, res("", 0))
+    verify(cancel.intent === null && cancel.flow === null && cancel.error === "", "a cancel does nothing")
+    // only the exact path of an item just listed: a file in a gallery folder
+    // the daemon skipped (a GIF, a video, a link) is refused like any other
+    var outside = ["/etc/passwd", userDir + "/../../../.ssh/id_rsa", userDir + "/sub/x.png", userDir + "x/y.png", "relative.png", userDir,
+                   userDir + "/clip.gif", bundledDir + "/loop.mp4", userDir + "/office.png/", userDir + "//office.png", userDir + "/Office.png"]
+    for (var i = 0; i < outside.length; i++) {
+      var o = Model.mediaStepEnd(pick, res(outside[i], 1))
+      compare(o.intent, null, outside[i])
+      compare(o.error, Model.GALLERY_REFUSED_TEXT, outside[i])
+    }
+    compare(Model.mediaStepEnd(pick, res(userDir + "/office.png", 2)).error, Model.GALLERY_REFUSED_TEXT, "two lines are no answer")
+    compare(Model.mediaStepEnd(pick, { started: true, code: 0, first: "", lines: 1, rejected: true }).error, Model.GALLERY_REFUSED_TEXT)
+    compare(Model.mediaStepEnd(pick, { started: false }).error, Model.GALLERY_FAILED_TEXT)
+    compare(Model.mediaStepEnd(pick, { started: true, code: 143, timedOut: true, first: bundledDir + "/aurora.webp", lines: 1 }).intent, null,
+            "stopped by the watchdog: nothing selected")
+    compare(Model.mediaStepEnd(pick, { started: true, code: 143, timedOut: true }).error, Model.MEDIA_TIMEOUT_TEXT)
+    compare(Model.galleryChoice(userDir + "/office.png", 1, readOk()), userDir + "/office.png")
+    compare(Model.galleryChoice(userDir + "/clip.gif", 1, readOk()), "", "in the folder but not listed")
+    compare(Model.galleryChoice(userDir + "/office.png", 1, { ok: true }), "", "no items: nothing")
+    compare(Model.mediaStepEnd(pick, { started: true, code: 1, first: "", lines: 0, stderr: "Image selector failed to accept request" }).error,
+            "The gallery could not open: Image selector failed to accept request")
+    compare(Model.mediaStepEnd(null, res("", 0)).intent, null)
+  }
+
+  function test_add_flow() {
+    var tools = { known: true, gallery: "/t/omarchy-menu-images", chooser: "/t/omarchy-file-select" }
+    var add = { kind: "add", step: "pick" }
+    compare(JSON.stringify(Model.mediaStepArgv(add, cli, tools, "")),
+            JSON.stringify(["/t/omarchy-file-select", "--title", "Add a background", "--extensions", "png jpg jpeg webp"]))
+    compare(Model.mediaStepArgv(add, cli, { known: true, gallery: "/g", chooser: "" }, ""), null)
+    var res = function(first, lines, code) { return { started: true, code: code, first: first, lines: lines, rejected: false, stderr: "" } }
+    var ok = Model.mediaStepEnd(add, res("/home/u/Pictures/beach photo.jpg", 1, 0))
+    compare(JSON.stringify(ok.intent), JSON.stringify({ verb: "media-import", path: "/home/u/Pictures/beach photo.jpg" }))
+    var none = Model.mediaStepEnd(add, res("", 0, 1))
+    verify(none.intent === null && none.error === "", "exit 1: nothing picked, not an error")
+    compare(Model.mediaStepEnd(add, res("", 0, 2)).error, "The file chooser could not open")
+    compare(Model.mediaStepEnd(add, res("", 0, 7)).error, "The file chooser could not open")
+    compare(Model.mediaStepEnd(add, { started: false }).error, "The file chooser could not open")
+    compare(Model.mediaStepEnd(add, res("relative.png", 1, 0)).error, Model.CHOOSER_PATH_TEXT)
+    compare(Model.mediaStepEnd(add, res("/a.png", 2, 0)).error, Model.CHOOSER_PATH_TEXT, "two files are not one")
+    compare(Model.mediaStepEnd(add, res("", 0, 0)).error, "", "nothing printed, status 0: nothing")
+    compare(Model.mediaStepEnd(add, { started: true, code: 143, timedOut: true }).error, Model.MEDIA_TIMEOUT_TEXT, "the watchdog")
+    verify(Model.MEDIA_WATCHDOG_MS > 600000, "past omarchy-file-select's own 600-second timeout")
+  }
+
+  function test_background_row_view() {
+    var tools = { known: true, gallery: "/t/g", chooser: "/t/c" }
+    var r = rev15({ background_image: userDir + "/My office.png" })
+    var v = Model.backgroundRowView(r, tools, false)
+    compare(v.visible, true)
+    compare(v.label, "My office")
+    compare(v.source, "file://" + userDir + "/My%20office.png")
+    compare(v.buttons.length, 2)
+    compare(v.buttons[0].label, "Gallery…")
+    compare(v.buttons[1].label, "Add…")
+    verify(v.buttons[0].enabled && v.buttons[1].enabled)
+    compare(Model.backgroundHint(v), "")
+    var busy = Model.backgroundRowView(r, tools, true)
+    verify(!busy.buttons[0].enabled && !busy.buttons[1].enabled, "a flow runs: neither")
+    compare(Model.backgroundHint(busy, { kind: "gallery", step: "list" }), Model.GALLERY_WAITING_TEXT, "the hint says why")
+    compare(Model.backgroundHint(busy, { kind: "gallery", step: "pick" }), Model.GALLERY_WAITING_TEXT)
+    compare(Model.backgroundHint(busy, { kind: "add", step: "pick" }), Model.CHOOSER_WAITING_TEXT)
+    compare(Model.backgroundHint(busy, null), "")
+    var missing = Model.backgroundRowView(r, { known: true, gallery: "", chooser: "/t/c" }, false)
+    compare(missing.buttons[0].enabled, false)
+    compare(missing.buttons[0].tooltip, Model.GALLERY_MISSING_TEXT)
+    compare(missing.buttons[1].enabled, true)
+    compare(Model.backgroundHint(missing), Model.GALLERY_MISSING_TEXT)
+    var unknown = Model.backgroundRowView(r, Model.emptyTools(), false)
+    verify(!unknown.buttons[0].enabled && unknown.buttons[0].tooltip === Model.GALLERY_TOOLTIP, "not looked up yet: inert, no hint")
+    compare(Model.backgroundHint(unknown), "")
+    var none = Model.backgroundRowView(rev15(), tools, false)
+    compare(none.source, "", "no image: the placeholder")
+    compare(none.label, Model.BACKGROUND_NONE_TEXT)
+    var hostile = Model.backgroundRowView(rev15({ background_image: "/tmp/‮<b>gpj.exe&.png" }), tools, false)
+    compare(hostile.label, "bgpj.exe")
+    var clipped = Model.backgroundRowView(rev15({ background_image: "…/long/end name.png" }), tools, false)
+    compare(clipped.source, "", "a clipped path is never loaded")
+    compare(clipped.label, "end name", "named from the display copy")
+    compare(Model.backgroundRowView(rev15({ interface_revision: 14 }), tools, false).visible, false)
+    // a keyboard stop of its own, after the effect row
+    compare(kindsOf(Model.cursorStops(rev15(), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "tabs", "effect", "background"]))
+    compare(kindsOf(Model.cursorStops(rev15({ interface_revision: 14 }), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "tabs", "effect"]))
+    compare(kindsOf(Model.cursorStops(rev15(), 1, false, "camera", null, null, null)).indexOf("background"), -1)
+  }
+
+  function test_backgrounds_section() {
+    var r = rev15()
+    var setup = Model.withSetupRead(Model.emptySetup(), "media", readOk())
+    var v = Model.mediaSectionView(setup, r, "")
+    compare(v.hint, "")
+    compare(v.bundledText, "2 bundled backgrounds")
+    compare(v.rows.length, 1, "only the user's own")
+    compare(v.rows[0].label, "office")
+    compare(v.rows[0].sizeText, "1920×1080")
+    compare(v.rows[0].confirming, false)
+    compare(Model.mediaSectionView(setup, r, userDir + "/office.png").rows[0].confirming, true)
+    compare(Model.mediaSectionView(Model.emptySetup(), r, "").hint, Model.SETUP_LOADING)
+    compare(Model.mediaSectionView(setup, rev15({ interface_revision: 14 }), "").hint, Model.MEDIA_OLD_DAEMON)
+    var empty = Model.withSetupRead(Model.emptySetup(), "media", readOk({ items: [{ path: bundledDir + "/a.webp", label: "A", bundled: true }] }))
+    var ev = Model.mediaSectionView(empty, r, "")
+    compare(ev.hint, "", "none of the user's own is no hint: the section shows")
+    compare(ev.emptyText, Model.MEDIA_EMPTY_TEXT, "said under the bundled count")
+    compare(ev.bundledText, "1 bundled background")
+    compare(v.emptyText, "")
+    var secs = Model.setupSections(r)
+    compare(kindsOf(Model.setupStops("backgrounds", v, secs)),
+            JSON.stringify(["section", "section", "section", "section", "section", "section", "media-remove"]))
+    compare(kindsOf(Model.setupStops("backgrounds", ev, secs)), JSON.stringify(["section", "section", "section", "section", "section", "section"]))
+    // Remove: twice on the same row
+    var p = userDir + "/office.png"
+    var first = Model.mediaRemovePress("", p)
+    compare(JSON.stringify(first), JSON.stringify({ confirming: p, remove: false }))
+    compare(JSON.stringify(Model.mediaRemovePress(first.confirming, p)), JSON.stringify({ confirming: "", remove: true }))
+    compare(JSON.stringify(Model.mediaRemovePress(userDir + "/other.png", p)), JSON.stringify({ confirming: p, remove: false }), "another row's press starts over")
+    compare(Model.mediaRemovePress("", "relative").remove, false)
+    // only a user item of the read gallery may be named
+    var media = readOk()
+    verify(Model.mediaUserItem(media, p) !== null)
+    compare(Model.mediaUserItem(media, bundledDir + "/aurora.webp"), null, "a bundled one cannot be removed")
+    compare(Model.mediaUserItem(media, "/etc/passwd"), null)
+    compare(Model.mediaUserItem(null, p), null)
+  }
 }

@@ -15,8 +15,10 @@ import "Model.js" as Model
 // its status and an enable switch), Order (the stages in the order they run,
 // moved one place at a time where the daemon says the move is valid, and
 // Reset order), Backends (the backend profile and each stage's pin), Daemon
-// (the daemon's configuration, drawn from its schema by row type) and
-// Diagnostics (read-only). One section is shown at a time.
+// (the daemon's configuration, drawn from its schema by row type),
+// Backgrounds (from interface revision 15: how many backgrounds come
+// bundled, then the user's own, each with Remove, pressed twice to confirm)
+// and Diagnostics (read-only). One section is shown at a time.
 //
 // The shell routes the plugin's summon and toggle here, the panel hotkey's
 // included, so open() looks at its payload: only the bar widget's right click
@@ -36,7 +38,7 @@ import "Model.js" as Model
 // counts them).
 //
 // Keyboard, as in the panel (PanelKeyCatcher, CursorSurface: one cursor, the
-// mouse moves it too): 1 to 5 show a section; Tab and Shift+Tab the next and
+// mouse moves it too): 1 to 5 (6 with Backgrounds) show a section; Tab and Shift+Tab the next and
 // previous one; the first arrow key shows the cursor; Up/Down (or k/j) walk
 // the section list and then the shown section's controls (Model.setupStops);
 // Right from the list goes into the section, Left back to it; on a row of
@@ -65,7 +67,7 @@ Item {
   property bool shown: false
   // What the shell reads to tell whether the plugin is open.
   readonly property bool opened: shown || Daemon.panelOpen
-  // The section shown: a word of Model.SETUP_SECTIONS (showSection).
+  // The section shown: a word of sectionWords (showSection).
   property string section: Model.SETUP_SECTIONS[0]
   // Attached to the Daemon itself (only when no bar widget was: an instance
   // of the singleton of its own).
@@ -77,7 +79,11 @@ Item {
   readonly property QtObject daemonService: Daemon
   readonly property var record: Daemon.record
   readonly property var gate: Model.setupGate(record)
-  readonly property var sections: Model.setupSectionOptions(section)
+  // The sections listed for this daemon (Model.setupSections: Backgrounds
+  // only from interface revision 15).
+  readonly property var sectionWords: Model.setupSections(record)
+  readonly property var sections: Model.setupSectionOptions(section, sectionWords)
+  onSectionWordsChanged: if (sectionWords.indexOf(section) < 0) showSection(sectionWords[0])
   readonly property var modulesView: Model.modulesSectionView(Daemon.setup, record)
   readonly property var orderView: Model.orderSectionView(Daemon.setup, record)
   // The configuration views are only replaced when what they draw changes:
@@ -96,10 +102,16 @@ Item {
     if (JSON.stringify(daemonFresh) !== JSON.stringify(daemonView)) daemonView = daemonFresh
   }
   readonly property var diagnostics: Model.diagnosticsView(Daemon.setup, record)
+  // The path whose Remove was pressed once (Model.mediaRemovePress): its
+  // button asks for the second press. Forgotten when the cursor or the
+  // section moves.
+  property string confirmRemove: ""
+  readonly property var mediaView: Model.mediaSectionView(Daemon.setup, record, confirmRemove)
   readonly property var activeView: section === "modules" ? modulesView
     : (section === "order" ? orderView
       : (section === "backends" ? backendsView
-        : (section === "daemon" ? daemonView : diagnostics)))
+        : (section === "daemon" ? daemonView
+          : (section === "backgrounds" ? mediaView : diagnostics))))
   readonly property var configView: section === "backends" ? backendsView : daemonView
   readonly property string statusText: Daemon.setupBusy ? Model.SETUP_SAVING : Daemon.setupError
   // The last command copied from Diagnostics, for its "Copied" line; how
@@ -108,7 +120,7 @@ Item {
   property int copies: 0
 
   // ---- the keyboard cursor (Model.setupStops) ----------------------------------
-  readonly property var stops: Model.setupStops(section, activeView)
+  readonly property var stops: Model.setupStops(section, activeView, sectionWords)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
@@ -147,7 +159,8 @@ Item {
     }
     root.shown = true
     root.cursorActive = false
-    root.cursorIndex = Model.SETUP_SECTIONS.indexOf(root.section)
+    root.cursorIndex = root.sectionWords.indexOf(root.section)
+    root.confirmRemove = ""
     root.copiedText = ""
     contentFlick.contentY = 0
     Qt.callLater(function() { if (root.shown) catcher.forceActiveFocus() })
@@ -181,16 +194,17 @@ Item {
   // ---- sections and cursor -------------------------------------------------------
 
   function showSection(value) {
-    var next = Model.setupSectionValue(value)
+    var next = Model.setupSectionValue(value, root.sectionWords)
     root.section = next
     root.choiceCursor = -1
+    root.confirmRemove = ""
     root.copiedText = ""
     contentFlick.contentY = 0
-    if (root.cursorActive) root.cursorIndex = Model.SETUP_SECTIONS.indexOf(next)
+    if (root.cursorActive) root.cursorIndex = root.sectionWords.indexOf(next)
   }
 
   function chooseSection(index) {
-    var value = Model.SETUP_SECTIONS[index]
+    var value = root.sectionWords[index]
     if (value !== undefined) showSection(value)
   }
 
@@ -204,6 +218,9 @@ Item {
         var moved = !cursorActive || Model.clampCursor(cursorIndex, stops.length) !== i
         cursorActive = true
         cursorIndex = i
+        // Off the Remove pressed once (hovering another stop): no second
+        // press is waited for, as with the keys (moveCursor).
+        if (moved) root.confirmRemove = ""
         if (moved) landOn()
         return
       }
@@ -221,6 +238,7 @@ Item {
 
   function moveCursor(dy) {
     if (stops.length === 0) return
+    root.confirmRemove = ""
     cursorActive = true
     cursorIndex = Model.clampCursor(Model.clampCursor(cursorIndex, stops.length) + (dy > 0 ? 1 : -1), stops.length)
     landOn()
@@ -232,8 +250,8 @@ Item {
     if (!stop) return
     if (stop.kind === "section") {
       // Into the section's first control, when it has one.
-      if (dx > 0 && stops.length > Model.SETUP_SECTIONS.length) {
-        cursorIndex = Model.SETUP_SECTIONS.length
+      if (dx > 0 && stops.length > root.sectionWords.length) {
+        cursorIndex = root.sectionWords.length
         landOn()
         scrollCursorIntoView()
       }
@@ -251,8 +269,11 @@ Item {
       }
       if (row && row.widget === "stepper") { stepConfig(row, dx > 0 ? 1 : -1); return }
     }
-    // Back to the section list.
-    if (dx < 0) setCursor("section", Model.SETUP_SECTIONS.indexOf(root.section))
+    // Back to the section list (a Remove pressed once is forgotten).
+    if (dx < 0) {
+      root.confirmRemove = ""
+      setCursor("section", root.sectionWords.indexOf(root.section))
+    }
   }
 
   function activateCursor() {
@@ -262,6 +283,7 @@ Item {
     else if (stop.kind === "module") toggleModule(stop.index)
     else if (stop.kind === "stage") moveStage(stop.index, root.stageButton === 1 ? 1 : -1)
     else if (stop.kind === "order-reset") Daemon.resetOrder()
+    else if (stop.kind === "media-remove") pressRemove(stop.index)
     else if (stop.kind === "config") {
       var row = Model.configViewRow(root.configView, stop.index)
       if (!row) return
@@ -309,6 +331,17 @@ Item {
     return false
   }
 
+  // Remove on a background of the user's: the first press asks for
+  // confirmation (the button says so), the second removes it
+  // (Daemon.removeMedia checks the path against the read gallery).
+  function pressRemove(index) {
+    var row = root.mediaView.rows[index]
+    if (!row || Daemon.setupBusy) return false
+    var press = Model.mediaRemovePress(root.confirmRemove, row.path)
+    root.confirmRemove = press.confirming
+    return press.remove ? Daemon.removeMedia(row.path) : true
+  }
+
   function stepConfig(row, direction) {
     var value = Model.configNudge(Model.findConfigRow(Daemon.setup.config, row.id), direction)
     return value !== null && Daemon.setConfig(row.id, value)
@@ -319,7 +352,7 @@ Item {
   // A section with no stops of its own (Diagnostics, a hint) whose content
   // does not fit: Up/Down scroll it.
   function scrollsByKey() {
-    return root.stops.length <= Model.SETUP_SECTIONS.length && contentFlick.contentHeight > contentFlick.height + 0.5
+    return root.stops.length <= root.sectionWords.length && contentFlick.contentHeight > contentFlick.height + 0.5
   }
 
   function scrollBy(delta) {
@@ -349,6 +382,7 @@ Item {
     else if (stop.kind === "stage") item = stageRepeater.itemAt(stop.index)
     else if (stop.kind === "order-reset") item = resetOrderButton
     else if (stop.kind === "config") item = findConfigItem(stop.index)
+    else if (stop.kind === "media-remove") item = mediaRepeater.itemAt(stop.index)
     if (!item) return
     Qt.callLater(function() {
       if (!item) return
@@ -479,7 +513,7 @@ Item {
           // The first key only shows the cursor, as in the shell's panels.
           if (!root.cursorActive) {
             root.cursorActive = true
-            root.cursorIndex = Model.SETUP_SECTIONS.indexOf(root.section)
+            root.cursorIndex = root.sectionWords.indexOf(root.section)
             return
           }
           if (dy !== 0) root.moveCursor(dy)
@@ -491,11 +525,11 @@ Item {
         onActivateRequested: if (root.cursorActive) root.activateCursor()
         onCloseRequested: root.dismiss()
         onTabRequested: function(direction) {
-          var n = Model.SETUP_SECTIONS.length
-          root.chooseSection((Model.SETUP_SECTIONS.indexOf(root.section) + direction + n) % n)
+          var n = root.sectionWords.length
+          root.chooseSection((root.sectionWords.indexOf(root.section) + direction + n) % n)
         }
         onTextKey: function(t) {
-          var n = Model.SETUP_SECTIONS.length
+          var n = root.sectionWords.length
           if (t.length === 1 && t >= "1" && t <= String(n)) root.chooseSection(Number(t) - 1)
         }
         // PanelKeyCatcher passes these through: the section scrolls by a page.
@@ -653,7 +687,7 @@ Item {
             spacing: Style.space(12)
 
             PanelSectionHeader {
-              text: (root.sections[Model.SETUP_SECTIONS.indexOf(root.section)] || { label: "" }).label
+              text: (root.sections[root.sectionWords.indexOf(root.section)] || { label: "" }).label
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -1179,6 +1213,82 @@ Item {
                   }
                 }
               }
+            }
+
+            // ---- Backgrounds: how many come bundled, then the user's own
+            // (name, size), each with Remove
+            Column {
+              objectName: "backgroundsSection"
+              width: parent.width
+              spacing: Style.space(6)
+              visible: root.section === "backgrounds" && root.mediaView.bundledText !== ""
+
+              Note { objectName: "backgroundsBundled"; text: root.mediaView.bundledText }
+
+              Repeater {
+                id: mediaRepeater
+                model: root.mediaView.rows
+                delegate: CursorSurface {
+                  id: mediaRow
+                  required property var modelData
+                  required property int index
+                  objectName: "mediaRow-" + index
+                  width: parent ? parent.width : 0
+                  implicitHeight: Math.max(mediaText.implicitHeight, mediaRemove.implicitHeight) + Style.spacing.controlPaddingY * 2
+                  // The cursor is drawn on the button, not the row.
+                  hasCursor: false
+                  foreground: root.foreground
+                  accent: root.accent
+                  Accessible.role: Accessible.ListItem
+                  Accessible.name: modelData.label
+                  Accessible.description: modelData.sizeText
+
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onEntered: root.setCursor("media-remove", mediaRow.index)
+                  }
+                  Column {
+                    id: mediaText
+                    x: Style.spacing.controlPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - x * 2 - mediaRemove.width - Style.space(12)
+                    spacing: Style.space(2)
+                    Text {
+                      objectName: "mediaLabel-" + mediaRow.index
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      elide: Text.ElideMiddle
+                      text: mediaRow.modelData.label
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                    Note { text: mediaRow.modelData.sizeText; font.pixelSize: Style.font.caption }
+                  }
+                  Button {
+                    id: mediaRemove
+                    objectName: "mediaRemove-" + mediaRow.index
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.spacing.controlPaddingX
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: mediaRow.modelData.confirming ? Model.MEDIA_CONFIRM_LABEL : Model.MEDIA_REMOVE_LABEL
+                    bordered: true
+                    opacity: Daemon.setupBusy ? root.greyedOpacity : 1.0
+                    hasCursor: root.hasCursor("media-remove", mediaRow.index)
+                    foreground: mediaRow.modelData.confirming ? Commons.Color.urgent : root.foreground
+                    background: Commons.Color.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.name: (mediaRow.modelData.confirming ? Model.MEDIA_CONFIRM_LABEL : Model.MEDIA_REMOVE_LABEL) + " " + mediaRow.modelData.label
+                    onHovered: function(on) { if (on) root.setCursor("media-remove", mediaRow.index) }
+                    onClicked: root.pressRemove(mediaRow.index)
+                  }
+                }
+              }
+              // None of the user's own: said under the bundled count.
+              Note { objectName: "backgroundsEmpty"; text: root.mediaView.emptyText }
+              Note { text: root.mediaView.truncation }
             }
 
             // ---- Diagnostics (read-only)
