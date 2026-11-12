@@ -3888,4 +3888,43 @@ TestCase {
     compare(JSON.stringify(back.groups[0].rows.map(function(x) { return x.id })),
             JSON.stringify(["modules.profile", "modules.pin.background", "modules.pin.mic-denoise"]))
   }
+
+  function test_module_stage_resolution_refusals() {
+    var long = new Array(300).join("x")
+    var list = Model.readModules(moduleLines([moduleObj("a.res", { stages: [
+      { id: "denoise-x", slot: "a", rank: 1, device: "cpu", available: false, reason: "Needs denoise", selected: false },
+      { id: "matte-y", slot: "b", rank: 1, device: "cpu", available: false, reason: "Needs the cut-out of the module that provides it", selected: false },
+      { id: "long", slot: "c", rank: 1, device: "cpu", available: false, reason: long, selected: false }] })]), 0, "")
+    var n = Model.modulesSectionView(Model.withSetupRead(fullSetup(), "modules", list), setupRecord(13)).rows[0].stageNotes.split("\n")
+    compare(n[0], "denoise-x: Needs denoise")
+    compare(n[1], "matte-y: Needs the cut-out of the module that provides it")
+    verify(n[2].length <= 64 + 2 + 96, "a long reason is clipped")
+  }
+
+  function test_module_forced_and_stage_notes() {
+    var refused = { id: "cutout", slot: "matte", rank: 1, device: "cpu", available: false, reason: "Cannot run together with noise removal", selected: false }
+    var list = Model.readModules(moduleLines([
+      moduleObj("a.forced", { forced: true }), moduleObj("a.plain", { forced: false }), moduleObj("a.garbage", { forced: "true" }),
+      moduleObj("a.older", { forced: undefined }),
+      moduleObj("a.refused", { stages: [refused, { id: "bare", slot: "x", rank: 1, device: "cpu", available: false }] }),
+      moduleObj("a.off", { status: "disabled", enabled: false, reason: "Disabled", stages: [refused] }),
+      moduleObj("a.unavail", { status: "unavailable", reason: "Needs the module x.y", stages: [refused] })]), 0, "")
+    compare(JSON.stringify(list.modules.map(function(m) { return m.forced })), JSON.stringify([true, false, false, false, false, false, false]))
+    compare(list.modules[4].stages[0].available, false)
+    compare(list.modules[4].stages[0].reason, "Cannot run together with noise removal")
+    var rows = Model.modulesSectionView(Model.withSetupRead(fullSetup(), "modules", list), setupRecord(13)).rows
+    compare(rows[0].statusLine, "Available")
+    compare(rows[0].forcedText, "Forced: conflicts are not enforced (debug override)")
+    compare(rows[0].forcedText, Model.MODULE_FORCED_TEXT)
+    compare(rows[0].forced, true)
+    compare(rows[1].statusLine, "Available")
+    compare(rows[1].forcedText, "")
+    compare(rows[2].forced, false, "only a strict true")
+    compare(rows[3].statusLine, "Available", "an older daemon")
+    compare(rows[3].forcedText, "")
+    compare(rows[0].stageNotes, "")
+    compare(rows[4].stageNotes, "cutout: Cannot run together with noise removal\nbare: unavailable")
+    compare(rows[5].stageNotes, "", "a disabled module: its own reason says why")
+    compare(rows[6].stageNotes, "", "an unavailable module too")
+  }
 }

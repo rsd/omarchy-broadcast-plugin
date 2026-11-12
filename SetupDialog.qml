@@ -714,6 +714,8 @@ Item {
                   Accessible.role: Accessible.CheckBox
                   Accessible.name: modelData.title
                   Accessible.description: modelData.statusLine
+                    + (modelData.forcedText !== "" ? ", " + modelData.forcedText : "")
+                    + (modelData.stageNotes !== "" ? ". " + modelData.stageNotes.split("\n").join("; ") : "")
                     + (modelData.note !== "" ? ". " + modelData.note : "")
                   Accessible.checkable: true
                   Accessible.checked: modelData.checked
@@ -744,7 +746,10 @@ Item {
                       }
                     }
                     Note { text: moduleRow.modelData.statusLine }
+                    // The debug override is marked by its own urgent line; the "Forced:" lead keeps colour from being the only cue.
+                    Note { text: moduleRow.modelData.forcedText; color: Commons.Color.urgent }
                     Note { text: moduleRow.modelData.stagesText; font.pixelSize: Style.font.caption }
+                    Note { text: moduleRow.modelData.stageNotes; font.pixelSize: Style.font.caption }
                     Note { text: moduleRow.modelData.note }
                   }
                   ToggleSwitch {
