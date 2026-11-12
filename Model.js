@@ -2982,6 +2982,9 @@ var MODULE_STATUSES = ["available", "unavailable", "disabled"]
 // revision 13) as the Modules section names it; another kind is shown as
 // the daemon words it, and a daemon that gives none shows no kind.
 var MODULE_KIND_LABELS = { "video-stage": "Camera effect", "audio-filter": "Microphone effect", "analyser": "Analyser" }
+// The mark on a module whose declared conflicts are not enforced (the config
+// key `modules.forced.<id>`; a debug override), shown in its own urgent line.
+var MODULE_FORCED_TEXT = "Forced: conflicts are not enforced (debug override)"
 var FILE_STATUSES = ["loaded", "absent", "error"]
 
 // ---- payload and the panel it forwards to
@@ -3138,7 +3141,7 @@ function moduleEntry(o) {
   }
   return {
     id: id, name: name !== "" ? name : id, version: settingText(o.version, MODULE_VERSION_CAP),
-    kind: sanitize(o.kind, STAGE_WORD_CAP), enabled: o.enabled === true, status: status,
+    kind: sanitize(o.kind, STAGE_WORD_CAP), enabled: o.enabled === true, status: status, forced: o.forced === true,
     reason: status === "available" ? "" : settingText(o.reason, MODULE_REASON_CAP),
     overriddenBy: fileText(o.overridden_by), stages: stages,
     stagesTruncated: o.stages_truncated === true || src.length > MODULE_STAGE_CAP
@@ -3659,7 +3662,10 @@ function moduleKindText(kind) {
 
 // The Modules section: { hint, rows, truncation }; a row:
 //   { id, title, statusText, reason, statusLine, kindText, stagesText, checked,
-//     switchable, note, index }
+//     switchable, note, forced, forcedText, stageNotes, index }
+// `forced` is the daemon's word that the module's conflicts are not enforced;
+// `forcedText` is the mark for it (else ""); `stageNotes` lists an enabled, usable
+// module's refused stages, one "id: reason" line each, else "".
 // `stagesText` leads with the kind (moduleKindText), when the daemon gives one.
 // `switchable` is false while a later config file sets the module's
 // enabled key (`note` says which file).
@@ -3677,11 +3683,20 @@ function modulesSectionView(setup, record) {
     for (var s = 0; s < m.stages.length && s < MODULE_STAGE_CAP; s++) ids.push(m.stages[s].id)
     var statusText = m.status === "available" ? "Available" : (m.status === "disabled" ? "Disabled" : "Unavailable")
     var kindText = moduleKindText(m.kind)
+    var notes = []
+    if (m.enabled && m.status === "available") {
+      for (var t = 0; t < m.stages.length && t < MODULE_STAGE_CAP; t++) {
+        var sg = m.stages[t]
+        if (!sg.available) notes.push(sg.id + (sg.reason !== "" ? ": " + sg.reason : ": unavailable"))
+      }
+    }
     var stages = ids.length > 0 ? "Stages: " + ids.join(", ") + (m.stagesTruncated ? ", …" : "") : ""
     out.rows.push({
       id: m.id, title: m.name + (m.version !== "" ? " " + m.version : ""),
       statusText: statusText, kindText: kindText,
-      reason: m.reason, statusLine: statusReasonText(statusText, m.reason),
+      reason: m.reason, forced: m.forced,
+      statusLine: statusReasonText(statusText, m.reason), forcedText: m.forced ? MODULE_FORCED_TEXT : "",
+      stageNotes: notes.join("\n"),
       stagesText: [kindText, stages].filter(function(t) { return t !== "" }).join(" \u00b7 "),
       checked: m.enabled, switchable: m.overriddenBy === "", note: overriddenText(m.overriddenBy), index: i
     })
