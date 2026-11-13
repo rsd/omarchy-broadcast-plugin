@@ -3072,7 +3072,7 @@ TestCase {
   }
 
   function test_setup_payload() {
-    compare(JSON.stringify(Model.setupPayload("")), JSON.stringify({ view: "panel", cliSetting: null }), "the panel hotkey")
+    compare(JSON.stringify(Model.setupPayload("")), JSON.stringify({ view: "panel", cliSetting: null, focus: "" }), "the panel hotkey")
     compare(Model.setupPayload("{}").view, "panel", "the shell's togglePanelAt")
     compare(Model.setupPayload(undefined).view, "panel")
     compare(Model.setupPayload("not json").view, "panel")
@@ -3090,6 +3090,16 @@ TestCase {
     compare(Model.setupPayload('{"view":"setup","cliPath":"' + long + '"}').cliSetting, null, "a path over PATH_CAP is no setting")
     for (var j = 0; j < 300; j++) long += "y"
     compare(Model.setupPayload('{"view":"setup","cliPath":"' + long + '"}').view, "panel", "an over-cap payload is not read")
+    // the row to open at (the panel's Away image...): a key of the grammar only
+    compare(p.focus, "", "the right click asks for none")
+    compare(Model.setupPayloadJson("/c", "effect.fallback_image"), '{"view":"setup","cliPath":"/c","focus":"effect.fallback_image"}')
+    compare(Model.setupPayload(Model.setupPayloadJson("/c", "effect.fallback_image")).focus, "effect.fallback_image")
+    compare(Model.setupPayloadJson(null, "Not A Key"), '{"view":"setup"}', "not of the grammar: not sent")
+    compare(Model.setupPayload('{"view":"setup","focus":"--x"}').focus, "", "nor read")
+    compare(Model.setupPayload('{"view":"setup","focus":7}').focus, "")
+    compare(Model.configKeySection("effect.fallback_image"), "daemon")
+    compare(Model.configKeySection("modules.pin.background"), "backends")
+    compare(Model.configKeySection(null), "daemon")
   }
 
   function test_pick_panel_owner() {
@@ -4414,5 +4424,254 @@ TestCase {
     compare(Model.mediaUserItem(media, bundledDir + "/aurora.webp"), null, "a bundled one cannot be removed")
     compare(Model.mediaUserItem(media, "/etc/passwd"), null)
     compare(Model.mediaUserItem(null, p), null)
+  }
+
+
+  // ---- the away image (interface revision 17)
+
+  readonly property string awayBundled: "/usr/share/omarchy-broadcast/media/away"
+  readonly property string awayUser: "/home/u/.local/share/omarchy-broadcast/media/away"
+  function rev17(o) { return rev15(merged({ interface_revision: 17 }, o || {})) }
+  // `media list away --json`: the background gallery's lines, of kind away,
+  // over the away directories.
+  function awayLines(o) {
+    var base = { bundled_dir: awayBundled, user_dir: awayUser, items: [
+      { path: awayBundled + "/be-right-back.png", label: "Be right back", bundled: true, media_type: "image", width: 1920, height: 1080 },
+      { path: awayUser + "/me.jpg", label: "me", bundled: false, media_type: "image", width: 1280, height: 720 }] }
+    return mediaLines(merged(base, o || {})).map(function(l) { return JSON.stringify(merged(JSON.parse(l), { kind: "away" })) })
+  }
+  // The effect and output rows of a revision-17 daemon (`image`: the away
+  // image's raw value; `o`: more fields of its row).
+  function awayGroups(image, o) {
+    return [
+      { id: "output", label: "Output", settings: [
+        cfgRow("output.placeholder", "enum", { label: "When there is no camera picture", value: "black", "default": "black",
+               options: [{ value: "black", label: "Black" }, { value: "image", label: "Away image" }] })] },
+      { id: "effect", label: "Effect", settings: [
+        cfgRow("effect.on_failure", "enum", { label: "When an effect can't run", value: "black", "default": "black",
+               options: [{ value: "black", label: "Hide the camera: black" }, { value: "image", label: "Hide the camera: image" },
+                         { value: "show", label: "Show the camera" }] }),
+        cfgRow("effect.fallback_image", "path", merged({ label: "Away image", value: image }, o || {}))] }
+    ]
+  }
+  function awaySetup(image, o) {
+    return Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(awayGroups(image, o)), 0, ""))
+  }
+  readonly property var awayTools: ({ known: true, gallery: "/t/omarchy-menu-images", chooser: "/t/omarchy-file-select" })
+
+  function test_away_revision_gate() {
+    compare(Model.PLACEHOLDER_REVISION, 17)
+    verify(Model.placeholderSupported(rev17()))
+    verify(!Model.placeholderSupported(rev17({ interface_revision: 16 })), "revision 16: no away image")
+    verify(!Model.placeholderSupported(Model.emptyRecord("not-running")))
+    // the panel's Away image... button: a stop of its own, after the Background row
+    compare(kindsOf(Model.cursorStops(rev17(), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "tabs", "effect", "background", "away"]))
+    compare(kindsOf(Model.cursorStops(rev17({ interface_revision: 16 }), 1, false, "effect", null, null, null)),
+            JSON.stringify(["switch", "tabs", "effect", "background"]), "revision 16: no button")
+    compare(kindsOf(Model.cursorStops(rev17(), 1, false, "camera", null, null, null)).indexOf("away"), -1)
+    // the reads are unchanged: the away gallery is listed by its flow only
+    compare(JSON.stringify(Model.setupReads(rev17())), JSON.stringify(["modules", "order", "config", "files", "media"]))
+  }
+
+  function test_away_config_rows() {
+    var image = awayUser + "/me.jpg"
+    var c = Model.readConfig(configLines(awayGroups(image)), 0, "")
+    var row = Model.findConfigRow(c, "effect.fallback_image")
+    compare(row.rawPath, image, "the raw path kept for argv and the thumbnail")
+    compare(Model.findConfigRow(c, "effect.on_failure").rawPath, "", "only a path row has one")
+    compare(Model.awayImagePath(c), image)
+    compare(Model.findConfigRow(Model.readConfig(configLines(awayGroups("relative.png")), 0, ""), "effect.fallback_image").rawPath, "",
+            "an unusable path is no path")
+    compare(Model.awayImagePath(null), "")
+    // the widget: the picker only from revision 17 and only while writable
+    compare(Model.configWidget(row, true), "away")
+    compare(Model.configWidget(row, false), "text", "below revision 17: read-only text")
+    compare(Model.configWidget(merged(row, { id: "effect.maxine_root" }), true), "text", "no other path row")
+    compare(Model.configWidget(Model.findConfigRow(c, "output.placeholder"), true), "choices", "Black | Away image: the generic chips")
+    var v = Model.daemonSectionView(awaySetup(image), rev17())
+    var rows = v.groups.map(function(g) { return g.rows.map(function(r) { return r.id + ":" + r.widget + ":" + r.stop }).join(",") })
+    compare(JSON.stringify(rows), JSON.stringify(["output.placeholder:choices:0,effect.fallback_image:away:1", "effect.on_failure:dropdown:2"]),
+            "the image's row moved under the placeholder switch, a keyboard stop, numbered top to bottom")
+    compare(v.groups.map(function(g) { return g.id }).join(","), "output,effect")
+    compare(kindsOf(Model.setupStops("daemon", v, Model.setupSections(rev17()))).split("config").length - 1, 3)
+    compare(Model.configViewRow(v, 1).id, "effect.fallback_image")
+    // without the placeholder row (an older daemon): the image's row stays in its group
+    var noSwitch = awayGroups(image)
+    noSwitch[0].settings = []
+    var alone = Model.daemonSectionView(Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(noSwitch), 0, "")), rev17())
+    compare(JSON.stringify(alone.groups.map(function(g) { return g.rows.map(function(r) { return r.id + ":" + r.stop }).join(",") })),
+            JSON.stringify(["effect.on_failure:0,effect.fallback_image:1"]), "no target: in place, the empty group not drawn")
+    // the placeholder row not picked (hidden): the image's row stays too
+    var c2 = Model.readConfig(configLines(awayGroups(image)), 0, "")
+    var hidden = Model.configGroupsView(c2, function(group, row) { return row.id !== "output.placeholder" }, true)
+    compare(JSON.stringify(hidden.groups.map(function(g) { return g.rows.map(function(r) { return r.id }).join(",") })),
+            JSON.stringify(["effect.on_failure,effect.fallback_image"]))
+    compare(hidden.stops, 2)
+    // the image's row not picked: nothing moves, nothing is duplicated
+    var without = Model.configGroupsView(c2, function(group, row) { return row.id !== "effect.fallback_image" }, true)
+    compare(JSON.stringify(without.groups.map(function(g) { return g.rows.map(function(r) { return r.id }).join(",") })),
+            JSON.stringify(["output.placeholder", "effect.on_failure"]))
+    // the image's group first: still drawn after its target, once
+    var swapped = awayGroups(image)
+    swapped.reverse()
+    var sv = Model.daemonSectionView(Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(swapped), 0, "")), rev17())
+    compare(JSON.stringify(sv.groups.map(function(g) { return g.rows.map(function(r) { return r.id + ":" + r.stop }).join(",") })),
+            JSON.stringify(["effect.on_failure:0", "output.placeholder:1,effect.fallback_image:2"]))
+    compare(JSON.stringify(Model.CONFIG_ROW_FOLLOWS), JSON.stringify({ "effect.fallback_image": "output.placeholder" }))
+    // revision 16: the old read-only row stays (not editable there)
+    var old = Model.daemonSectionView(awaySetup(image, { label: "Fallback image", editable: false }), rev17({ interface_revision: 16 }))
+    var fb = old.groups[0].rows[1]
+    compare(fb.id, "effect.fallback_image")
+    compare(fb.widget, "text")
+    compare(fb.valueText, image)
+    compare(fb.stop, -1)
+    compare(old.stops, 2, "no stop of its own")
+    // an overridden row stays read-only with its reason
+    var over = Model.daemonSectionView(awaySetup(image, { enabled: false, overridden_by: "config.d/90-local.toml",
+                                                         disabled_reason: "Overridden by config.d/90-local.toml" }), rev17())
+    compare(over.groups[0].rows[1].widget, "text")
+    compare(over.groups[0].rows[1].note, "Overridden by config.d/90-local.toml")
+    var greyed = Model.daemonSectionView(awaySetup(image, { enabled: false, disabled_reason: "Set in /etc" }), rev17())
+    compare(greyed.groups[0].rows[1].widget, "text")
+    compare(greyed.groups[0].rows[1].note, "Set in /etc")
+  }
+
+  // The note under the picker: no image while a switch shows it.
+  function test_away_unset_note() {
+    var image = awayUser + "/me.jpg"
+    var withValues = function(img, placeholder, onFailure) {
+      var groups = awayGroups(img)
+      groups[0].settings[0].value = placeholder
+      groups[1].settings[0].value = onFailure
+      return Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(groups), 0, "")).config
+    }
+    compare(Model.awayImageView(withValues("", "black", "black"), rev17(), awayTools, false).note, "", "no switch on the image")
+    compare(Model.awayImageView(withValues("", "image", "black"), rev17(), awayTools, false).note, Model.AWAY_UNSET_TEXT)
+    compare(Model.awayImageView(withValues("", "black", "image"), rev17(), awayTools, false).note, Model.AWAY_UNSET_TEXT)
+    compare(Model.awayImageView(withValues(image, "image", "image"), rev17(), awayTools, false).note, "", "an image set")
+    compare(Model.AWAY_UNSET_TEXT, "No away image chosen: black is shown")
+    compare(Model.awayImageView(null, rev17(), awayTools, false).note, "")
+  }
+
+  // Left/Right over the Away image row's buttons skip the faded ones.
+  function test_away_button_after() {
+    var view = function(a, b, c) { return { buttons: [{ enabled: a }, { enabled: b }, { enabled: c }] } }
+    compare(Model.awayButtonAfter(view(true, true, true), 0, 1), 1)
+    compare(Model.awayButtonAfter(view(true, true, true), 2, 1), -1, "none further right")
+    compare(Model.awayButtonAfter(view(true, true, true), 0, -1), -1, "none further left")
+    compare(Model.awayButtonAfter(view(true, true, false), 1, 1), -1, "Clear faded: skipped")
+    compare(Model.awayButtonAfter(view(true, false, true), 0, 1), 2, "Add... faded: over it")
+    compare(Model.awayButtonAfter(view(true, false, true), 2, -1), 0)
+    compare(Model.awayButtonAfter(view(false, false, true), 2, -1), -1)
+    compare(Model.awayButtonAfter(view(false, true, true), 0, 0), 1, "landing: the first offered")
+    compare(Model.awayButtonAfter(view(true, true, true), 2, 0), 2, "staying while offered")
+    compare(Model.awayButtonAfter(view(true, true, false), 2, 0), 0, "faded under the cursor: the first offered")
+    compare(Model.awayButtonAfter(view(false, false, false), 0, 0), -1, "none offered (busy)")
+    compare(Model.awayButtonAfter(null, 0, 1), -1)
+    compare(Model.awayButtonAfter({ buttons: [null, 7] }, 0, 1), -1)
+  }
+
+  function test_away_image_view() {
+    var image = awayUser + "/My face.jpg"
+    var config = awaySetup(image).config
+    var v = Model.awayImageView(config, rev17(), awayTools, false)
+    compare(v.visible, true)
+    compare(v.set, true)
+    compare(v.label, "My face")
+    compare(v.source, "file://" + awayUser + "/My%20face.jpg")
+    compare(JSON.stringify(v.buttons.map(function(b) { return b.label })), JSON.stringify(["Choose…", "Add…", "Clear"]))
+    verify(v.buttons.every(function(b) { return b.enabled }))
+    compare(Model.awayImageHint(v), "")
+    var busy = Model.awayImageView(config, rev17(), awayTools, true)
+    verify(busy.buttons.every(function(b) { return !b.enabled }), "busy: none")
+    var none = Model.awayImageView(awaySetup("").config, rev17(), awayTools, false)
+    compare(none.set, false)
+    compare(none.label, Model.AWAY_NONE_TEXT)
+    compare(none.source, "")
+    compare(none.buttons[2].enabled, false, "nothing to clear")
+    verify(none.buttons[0].enabled && none.buttons[1].enabled)
+    var missing = Model.awayImageView(config, rev17(), { known: true, gallery: "", chooser: "" }, false)
+    compare(missing.buttons[0].enabled, false)
+    compare(missing.buttons[0].tooltip, Model.GALLERY_MISSING_TEXT)
+    compare(missing.buttons[1].tooltip, Model.AWAY_CHOOSER_MISSING_TEXT)
+    compare(Model.awayImageHint(missing), Model.GALLERY_MISSING_TEXT + " " + Model.AWAY_CHOOSER_MISSING_TEXT)
+    compare(missing.buttons[2].enabled, true, "Clear needs no tool")
+    var unknown = Model.awayImageView(config, rev17(), Model.emptyTools(), false)
+    verify(!unknown.buttons[0].enabled && unknown.buttons[0].tooltip === Model.AWAY_CHOOSE_TOOLTIP, "not looked up yet: inert, no hint")
+    var hostile = Model.awayImageView(awaySetup("/tmp/\u202e<b>gpj.exe&.png").config, rev17(), awayTools, false)
+    compare(hostile.label, "bgpj.exe")
+    compare(Model.awayImageView(config, rev17({ interface_revision: 16 }), awayTools, false).visible, false)
+    compare(Model.awayImageView(awaySetup(image, { editable: false }).config, rev17(), awayTools, false).visible, false)
+    compare(Model.awayImageView(awaySetup(image, { enabled: false, disabled_reason: "x" }).config, rev17(), awayTools, false).visible, false)
+    compare(Model.awayImageView(null, rev17(), awayTools, false).visible, false)
+  }
+
+  function test_away_argv() {
+    var p = awayUser + "/a b.png"
+    compare(JSON.stringify(Model.awayImageArgv(cli, p)), JSON.stringify([cli, "config", "set", "--", "effect.fallback_image", p]))
+    compare(JSON.stringify(Model.awayImageArgv(cli, "")), JSON.stringify([cli, "config", "set", "--", "effect.fallback_image", ""]), "Clear")
+    compare(Model.awayImageArgv(cli, "relative.png"), null)
+    compare(Model.awayImageArgv(cli, "-x"), null, "never an option")
+    compare(Model.awayImageArgv(cli, null), null)
+    compare(Model.awayImageArgv("relative-cli", p), null)
+    compare(JSON.stringify(Model.mediaListArgv(cli, "away")), JSON.stringify([cli, "media", "list", "away", "--json"]))
+    compare(JSON.stringify(Model.mediaListArgv(cli, "nonsense")), JSON.stringify([cli, "media", "list", "background", "--json"]), "only the two kinds")
+    compare(JSON.stringify(Model.mediaImportArgv(cli, "/tmp/x.png", "away")), JSON.stringify([cli, "media", "import", "away", "/tmp/x.png", "--select"]))
+    compare(JSON.stringify(Model.fileSelectArgv("/t/c", "away")),
+            JSON.stringify(["/t/c", "--title", "Add an away image", "--extensions", "png jpg jpeg webp"]))
+    // the dialog's writes, re-checked when they run
+    var set = { verb: "setup", op: "away-image", path: p }
+    var imp = { verb: "setup", op: "away-import", path: "/tmp/x.png" }
+    var clear = { verb: "setup", op: "away-image", path: "" }
+    compare(JSON.stringify(Model.intentArgv(set, cli, rev17())), JSON.stringify(Model.awayImageArgv(cli, p)))
+    compare(JSON.stringify(Model.intentArgv(clear, cli, rev17())), JSON.stringify(Model.awayImageArgv(cli, "")))
+    compare(JSON.stringify(Model.intentArgv(imp, cli, rev17())), JSON.stringify(Model.mediaImportArgv(cli, "/tmp/x.png", "away")))
+    compare(Model.intentArgv(set, cli, rev17({ interface_revision: 16 })), null, "revision 16 runs nothing")
+    compare(Model.intentArgv(imp, cli, rev17({ interface_revision: 16 })), null)
+    compare(Model.intentArgv(clear, cli, Model.emptyRecord("not-running")), null)
+    compare(Model.intentArgv({ verb: "setup", op: "away-image", path: "relative" }, cli, rev17()), null)
+    verify(Model.isSetupIntent(set) && Model.isSetupIntent(imp), "the dialog's writes")
+  }
+
+  function test_away_flows() {
+    var list = { kind: "gallery", step: "list", gallery: "away" }
+    compare(Model.flowGallery(list), "away")
+    compare(Model.flowGallery({ kind: "gallery", step: "list" }), "background", "the panel's flows: the background gallery")
+    compare(JSON.stringify(Model.mediaStepArgv(list, cli, awayTools, "")), JSON.stringify([cli, "media", "list", "away", "--json"]))
+    var lines = awayLines()
+    var end = Model.mediaStepEnd(list, { started: true, code: 0, first: lines[0], lines: lines.length, list: lines, rejected: false, stderr: "" })
+    compare(end.error, "")
+    compare(end.flow.gallery, "away", "the pick stays on the away gallery")
+    var pick = end.flow
+    var current = awayUser + "/me.jpg"
+    compare(Model.mediaCurrent(pick, rev17(), awaySetup(current).config), current, "the away image in force is preselected")
+    compare(Model.mediaCurrent({ kind: "gallery", step: "list" }, rev17({ background_image: image }), awaySetup(current).config), image)
+    compare(JSON.stringify(Model.mediaStepArgv(pick, cli, awayTools, current)),
+            JSON.stringify(["/t/omarchy-menu-images", "--show-labels", "--selected", current, awayBundled, awayUser]))
+    // the background gallery's lines are not the away gallery's
+    var bg = mediaLines()
+    compare(Model.mediaStepEnd(list, { started: true, code: 0, first: bg[0], lines: bg.length, list: bg }).error,
+            "omarchy-broadcast printed no away image gallery")
+    compare(Model.readMedia(awayLines().slice(0, 2), 0, "", "away").error, Model.AWAY_INCOMPLETE_TEXT)
+    compare(Model.readMedia(awayLines(), 0, "").ok, false, "read as the background gallery: refused")
+    // the pick: an item just listed sets the image, as a setup intent
+    var res = function(first, lines, code) { return { started: true, code: code === undefined ? 0 : code, first: first, lines: lines, rejected: false, stderr: "" } }
+    compare(JSON.stringify(Model.mediaStepEnd(pick, res(awayBundled + "/be-right-back.png", 1)).intent),
+            JSON.stringify({ verb: "setup", op: "away-image", path: awayBundled + "/be-right-back.png" }))
+    var outside = [awayUser + "/clip.gif", bundledDir + "/aurora.webp", "/etc/passwd", awayUser + "/../../.ssh/id_rsa", awayUser + "/sub/x.png"]
+    for (var i = 0; i < outside.length; i++) {
+      var o = Model.mediaStepEnd(pick, res(outside[i], 1))
+      compare(o.intent, null, outside[i])
+      compare(o.error, Model.GALLERY_REFUSED_TEXT, outside[i])
+    }
+    compare(Model.mediaStepEnd(pick, res("", 0)).error, "", "a cancel")
+    // Add...: the chooser, then an import into the away gallery
+    var add = { kind: "add", step: "pick", gallery: "away" }
+    compare(JSON.stringify(Model.mediaStepArgv(add, cli, awayTools, "")),
+            JSON.stringify(["/t/omarchy-file-select", "--title", "Add an away image", "--extensions", "png jpg jpeg webp"]))
+    compare(JSON.stringify(Model.mediaStepEnd(add, res("/home/u/Pictures/me.png", 1)).intent),
+            JSON.stringify({ verb: "setup", op: "away-import", path: "/home/u/Pictures/me.png" }))
+    compare(Model.mediaStepEnd(add, res("", 0, 1)).intent, null, "nothing picked")
+    compare(Model.mediaStepEnd(add, res("relative.png", 1)).error, Model.CHOOSER_PATH_TEXT)
   }
 }

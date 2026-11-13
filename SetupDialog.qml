@@ -20,6 +20,14 @@ import "Model.js" as Model
 // bundled, then the user's own, each with Remove, pressed twice to confirm)
 // and Diagnostics (read-only). One section is shown at a time.
 //
+// From interface revision 17 the Daemon section draws the away image's row
+// (Model.awayImageView) as a picker: its thumbnail, its name, Choose... (the
+// shell's image picker over the away gallery), Add... (the file chooser)
+// and Clear; Daemon.chooseAwayImage, addAwayImage and clearAwayImage run
+// them. The overlay hides while a gallery flow runs (the picker and the
+// chooser are windows of their own) and shows again at its end. A payload
+// with a `focus` key (the panel's Away image row) opens at that row.
+//
 // The shell routes the plugin's summon and toggle here, the panel hotkey's
 // included, so open() looks at its payload: only the bar widget's right click
 // passes {"view":"setup"} (Model.setupPayload); anything else, the hotkey's
@@ -129,6 +137,23 @@ Item {
   property int choiceCursor: -1
   // The button under the cursor on a stage row: 0 Move up, 1 Move down.
   property int stageButton: 0
+  // The button under the cursor on the Away image row: 0 Choose..., 1
+  // Add..., 2 Clear.
+  property int awayCursor: 0
+  // The Away image row as drawn (Model.awayImageView).
+  readonly property var awayView: Daemon.awayImageView()
+  // A button that fades under the cursor (Clear once cleared) hands it to
+  // the first one still offered.
+  onAwayViewChanged: {
+    var b = Model.awayButtonAfter(awayView, awayCursor, 0)
+    if (b >= 0) awayCursor = b
+  }
+  // The config key to put the cursor on once its row is drawn (an open()
+  // payload's `focus`), else "".
+  property string pendingFocus: ""
+  // A gallery flow runs: the overlay is hidden meanwhile.
+  readonly property bool suspended: Daemon.mediaBusy
+  onSuspendedChanged: if (!suspended && root.shown) Qt.callLater(function() { if (root.shown) catcher.forceActiveFocus() })
 
   readonly property color foreground: Commons.Color.menu.text
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -163,7 +188,33 @@ Item {
     root.confirmRemove = ""
     root.copiedText = ""
     contentFlick.contentY = 0
+    root.pendingFocus = payload.focus
+    if (payload.focus !== "") {
+      showSection(Model.configKeySection(payload.focus))
+      Qt.callLater(root.applyFocus)
+    }
     Qt.callLater(function() { if (root.shown) catcher.forceActiveFocus() })
+  }
+
+  // The cursor onto the row of pendingFocus, once the section draws it (a
+  // read-only row has no stop: the focus is dropped once the section is
+  // drawn without one).
+  function applyFocus() {
+    var key = root.pendingFocus
+    if (key === "" || !root.shown) return
+    var groups = root.configView.groups
+    for (var g = 0; g < groups.length; g++) {
+      for (var r = 0; r < groups[g].rows.length; r++) {
+        var row = groups[g].rows[r]
+        if (row.id !== key) continue
+        root.pendingFocus = ""
+        if (row.stop < 0) return
+        setCursor("config", row.stop)
+        scrollCursorIntoView()
+        return
+      }
+    }
+    if (root.configView.hint === "" && groups.length > 0) root.pendingFocus = ""
   }
 
   // The shell's hide (and its toggle of an open plugin): the dialog and
@@ -233,6 +284,7 @@ Item {
     var stop = currentStop
     var row = stop && stop.kind === "config" ? Model.configViewRow(root.configView, stop.index) : null
     root.choiceCursor = row && row.widget === "choices" ? Math.max(0, Model.configSelected(row)) : -1
+    if (row && row.widget === "away") root.awayCursor = Math.max(0, Model.awayButtonAfter(root.awayView, 0, 0))
     if (stop && stop.kind === "stage") root.stageButton = Model.stageButtonAfter(root.orderView.rows[stop.index], root.stageButton, 0)
   }
 
@@ -268,6 +320,13 @@ Item {
         return
       }
       if (row && row.widget === "stepper") { stepConfig(row, dx > 0 ? 1 : -1); return }
+      // Over the offered (unfaded) buttons only; Left past the first one
+      // goes back to the section list.
+      if (row && row.widget === "away") {
+        var a = Model.awayButtonAfter(root.awayView, root.awayCursor, dx)
+        if (a >= 0) { root.awayCursor = a; return }
+        if (dx > 0) return
+      }
     }
     // Back to the section list (a Remove pressed once is forgotten).
     if (dx < 0) {
@@ -290,7 +349,17 @@ Item {
       if (row.widget === "switch") Daemon.setConfig(row.id, row.value !== true)
       else if (row.widget === "choices") chooseConfig(row, root.choiceCursor)
       else if (row.widget === "dropdown") openConfigList(stop.index)
+      else if (row.widget === "away") activateAway(root.awayCursor)
     }
+  }
+
+  // A button of the Away image row: Choose... (0), Add... (1) or Clear (2).
+  // The Daemon checks each against the row it read.
+  function activateAway(index) {
+    if (index === 0) return Daemon.chooseAwayImage()
+    if (index === 1) return Daemon.addAwayImage()
+    if (index === 2) return Daemon.clearAwayImage()
+    return false
   }
 
   // Enter or Space on a dropdown row: its list opens and takes the keyboard
@@ -410,7 +479,10 @@ Item {
   // Every read of the setup rebuilds the rows (the repeaters' models are the
   // views' arrays), and a dropdown's list that was open goes with its row,
   // taking the keyboard with it: the key catcher has it back.
-  onConfigViewChanged: Qt.callLater(function() { if (root.shown && !catcher.activeFocus) catcher.forceActiveFocus() })
+  onConfigViewChanged: {
+    Qt.callLater(function() { if (root.shown && !catcher.activeFocus) catcher.forceActiveFocus() })
+    if (root.pendingFocus !== "") Qt.callLater(root.applyFocus)
+  }
 
   // ---- pieces -----------------------------------------------------------------------
 
@@ -471,7 +543,7 @@ Item {
 
   OverlayWindow {
     id: overlay
-    shown: root.shown
+    shown: root.shown && !root.suspended
     WlrLayershell.namespace: "omarchy-broadcast"
 
     Rectangle {
@@ -994,7 +1066,7 @@ Item {
                       // One highlight: the row's on a switch or a number, the
                       // chip's on a row of choices, the box's on a dropdown.
                       hasCursor: row.stop >= 0 && root.hasCursor("config", row.stop)
-                        && row.widget !== "choices" && row.widget !== "dropdown"
+                        && row.widget !== "choices" && row.widget !== "dropdown" && row.widget !== "away"
                       foreground: root.foreground
                       accent: root.accent
                       // As SettingsView maps its rows: a switch is a check
@@ -1002,7 +1074,8 @@ Item {
                       // box (as is a dropdown); a value only shown is text.
                       Accessible.role: row.widget === "switch" ? Accessible.CheckBox
                         : (row.widget === "stepper" ? Accessible.SpinBox
-                          : (row.widget === "choices" || row.widget === "dropdown" ? Accessible.ComboBox : Accessible.StaticText))
+                          : (row.widget === "choices" || row.widget === "dropdown" ? Accessible.ComboBox
+                            : (row.widget === "away" ? Accessible.Grouping : Accessible.StaticText)))
                       Accessible.name: row.label
                       Accessible.description: row.valueText + (row.note !== "" ? ". " + row.note : "")
                         + (row.description !== "" ? ". " + row.description : "")
@@ -1050,12 +1123,12 @@ Item {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             implicitWidth: configRow.row.widget === "switch" ? configSwitch.implicitWidth
-                              : (configRow.row.widget === "choices" ? 0
+                              : (configRow.row.widget === "choices" || configRow.row.widget === "away" ? 0
                                 : (configRow.row.widget === "dropdown" ? Math.min(Math.max(Style.space(260), configRow.listWidth), configColumn.width * 0.7)
                                   : (configRow.row.widget === "stepper" ? configStepper.implicitWidth
                                     : Math.min(configValue.implicitWidth, configColumn.width * 0.55))))
                             implicitHeight: configRow.row.widget === "switch" ? configSwitch.implicitHeight
-                              : (configRow.row.widget === "choices" ? 0
+                              : (configRow.row.widget === "choices" || configRow.row.widget === "away" ? 0
                                 : (configRow.row.widget === "dropdown" ? configList.implicitHeight
                                   : (configRow.row.widget === "stepper" ? configStepper.implicitHeight : configValue.implicitHeight)))
                             width: implicitWidth
@@ -1161,6 +1234,94 @@ Item {
                               font.pixelSize: Style.font.body
                             }
                           }
+                        }
+
+                        // The away image (Model.awayImageView): its
+                        // thumbnail and name, then Choose..., Add... and
+                        // Clear, on a line under the label.
+                        Item {
+                          id: awayLine
+                          objectName: configRow.row.widget === "away" ? "awayLine" : ""
+                          width: parent.width
+                          visible: configRow.row.widget === "away"
+                          implicitHeight: visible ? Math.max(awayThumb.height, awayButtons.implicitHeight, awayName.implicitHeight) : 0
+                          height: implicitHeight
+
+                          MediaThumbnail {
+                            id: awayThumb
+                            objectName: configRow.row.widget === "away" ? "away" : ""
+                            anchors.verticalCenter: parent.verticalCenter
+                            name: configRow.row.label + ": " + root.awayView.label
+                            // Only the checked path's URL, only while drawn.
+                            source: root.shown && awayLine.visible && root.awayView.visible ? root.awayView.source : ""
+                            fill: root.hoverFill
+                            faint: root.dim
+                            fontFamily: root.fontFamily
+                          }
+
+                          Text {
+                            id: awayName
+                            objectName: configRow.row.widget === "away" ? "awayName" : ""
+                            textFormat: Text.PlainText
+                            anchors.left: awayThumb.right
+                            anchors.leftMargin: Style.space(10)
+                            anchors.right: awayButtons.left
+                            anchors.rightMargin: Style.space(10)
+                            anchors.verticalCenter: parent.verticalCenter
+                            elide: Text.ElideMiddle
+                            text: root.awayView.label
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                          }
+
+                          Row {
+                            id: awayButtons
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: Style.space(6)
+
+                            Repeater {
+                              model: awayLine.visible ? root.awayView.buttons.length : 0
+                              delegate: Button {
+                                id: awayButton
+                                required property int index
+                                readonly property var button: root.awayView.buttons[index]
+                                objectName: "awayButton-" + index
+                                text: button ? button.label : ""
+                                tooltipText: button ? button.tooltip : ""
+                                hasCursor: root.hasCursor("config", configRow.row.stop) && root.awayCursor === index
+                                bordered: true
+                                // Faded and inert while its tool is not on
+                                // PATH, there is nothing to clear, or a
+                                // write runs; kept enabled so the tooltip shows.
+                                opacity: button && button.enabled ? 1.0 : root.greyedOpacity
+                                foreground: root.foreground
+                                background: Commons.Color.background
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                Accessible.name: button ? button.label : ""
+                                Accessible.description: button ? button.tooltip : ""
+                                onHovered: function(on) {
+                                  if (!on) return
+                                  root.setCursor("config", configRow.row.stop)
+                                  root.awayCursor = awayButton.index
+                                }
+                                onClicked: root.activateAway(awayButton.index)
+                              }
+                            }
+                          }
+                        }
+                        Note {
+                          objectName: configRow.row.widget === "away" ? "awayHint" : ""
+                          visible: configRow.row.widget === "away" && text !== ""
+                          text: configRow.row.widget === "away" ? Model.awayImageHint(root.awayView) : ""
+                        }
+                        // No image while a switch shows it: black instead.
+                        Note {
+                          objectName: configRow.row.widget === "away" ? "awayNote" : ""
+                          visible: configRow.row.widget === "away" && text !== ""
+                          text: configRow.row.widget === "away" ? root.awayView.note : ""
                         }
 
                         // A row of choices, in the daemon's order, from the

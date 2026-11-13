@@ -117,6 +117,15 @@
 # gallery without the item). `effect replace --image PATH` is one of the
 # other commands.
 #
+# The away image's gallery (interface revision 17): `media list away --json`
+# prints $FAKE_OB_DIR/media-list-away (missing: as above); `media import away
+# PATH --select` (a usage check first), then delay, stderr and exit as above;
+# when the status is 0 and config-show exists, the daemon stores the file
+# in its gallery and selects it: the value of `effect.fallback_image` in
+# config-show becomes $FAKE_OB_DIR/away-user/<the file's name>, and a
+# `config_changed` line is appended to the feed. The away image itself is
+# set and cleared with `config set -- effect.fallback_image PATH` (or "").
+#
 # Any other command (`on`, `off`, `camera -- <id>`, `camera next`): sleeps $FAKE_OB_DIR/delay
 # seconds if that file exists, prints $FAKE_OB_DIR/stderr to stderr if it
 # exists, and exits with the status in $FAKE_OB_DIR/exit (default 0). It
@@ -377,13 +386,36 @@ case "${1:-} ${2:-} ${3:-}" in
   "config files --json") [ $# -eq 3 ] && setup_read config-files ;;
 esac
 
+# A setup write's reaction: the next serial, on a line of `type`.
+setup_changed() {
+  serial=$(($(setting_file setup-serial 1) + 1))
+  echo "$serial" > "$dir/setup-serial"
+  printf '{"v":1,"type":"%s","serial":%s}\n' "$1" "$serial" >> "$dir/feed"
+}
+
+# config-show with the "value" of the row that starts {"id":"KEY","value":...
+# replaced by VALUE (JSON as given).
+set_config_value() {
+  awk -v key="$1" -v value="$2" '{
+    head = "{\"id\":\"" key "\",\"value\":"
+    at = index($0, head)
+    if (at > 0) {
+      rest = substr($0, at + length(head))
+      cut = index(rest, ",\"")
+      $0 = substr($0, 1, at - 1) head value substr(rest, cut)
+    }
+    print
+  }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
+}
+
 if [ "${1:-}" = "media" ]; then
   case "${2:-} ${3:-}" in
     "list background") [ $# -eq 4 ] && [ "$4" = "--json" ] && setup_read media-list ;;
-    "import background") [ $# -eq 5 ] && [ "$5" = "--select" ] ;;
+    "list away") [ $# -eq 4 ] && [ "$4" = "--json" ] && setup_read media-list-away ;;
+    "import background" | "import away") [ $# -eq 5 ] && [ "$5" = "--select" ] ;;
     "remove "?*) [ $# -eq 3 ] ;;
     *) false ;;
-  esac || { echo "fake: usage: media list background --json | import background PATH --select | remove PATH" >&2; exit 2; }
+  esac || { echo "fake: usage: media list background|away --json | import background|away PATH --select | remove PATH" >&2; exit 2; }
   [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
   [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
   status=0
@@ -392,15 +424,12 @@ if [ "${1:-}" = "media" ]; then
   if [ "$2" = remove ] && [ -f "$dir/media-list-removed" ]; then
     mv -f -- "$dir/media-list-removed" "$dir/media-list"
   fi
+  if [ "$2" = import ] && [ "$3" = away ] && [ -f "$dir/config-show" ]; then
+    set_config_value effect.fallback_image "\"$dir/away-user/$(basename -- "$4")\""
+    setup_changed config_changed
+  fi
   exit 0
 fi
-
-# A setup write's reaction: the next serial, on a line of `type`.
-setup_changed() {
-  serial=$(($(setting_file setup-serial 1) + 1))
-  echo "$serial" > "$dir/setup-serial"
-  printf '{"v":1,"type":"%s","serial":%s}\n' "$1" "$serial" >> "$dir/feed"
-}
 
 setup_write=""
 case ${1:-} in
@@ -452,18 +481,7 @@ case ${1:-} in
           true | false) value=$5 ;;
           *) if printf '%s' "$5" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; then value=$5; else value="\"$5\""; fi ;;
         esac
-        [ -f "$dir/config-show" ] && {
-          awk -v key="$4" -v value="$value" '{
-            head = "{\"id\":\"" key "\",\"value\":"
-            at = index($0, head)
-            if (at > 0) {
-              rest = substr($0, at + length(head))
-              cut = index(rest, ",\"")
-              $0 = substr($0, 1, at - 1) head value substr(rest, cut)
-            }
-            print
-          }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
-        }
+        [ -f "$dir/config-show" ] && set_config_value "$4" "$value"
         setup_changed config_changed ;;
       config-reset) setup_changed config_changed ;;
     esac

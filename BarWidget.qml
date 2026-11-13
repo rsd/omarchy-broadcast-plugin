@@ -96,11 +96,13 @@ BarWidget {
   // its toggle would then close instead of open. False, with every panel
   // left as it was, when the shell has no overlay to open (the bar gave no
   // shell, or one without a toggle).
-  function openSetup() {
+  // `focus`: the key of the config row the dialog opens at (the panel's
+  // Away image row), else none.
+  function openSetup(focus) {
     var shell = root.bar ? root.bar.shell : null
     if (!shell || typeof shell.toggle !== "function") return false
     Daemon.closePanels()
-    return shell.toggle(root.moduleName, Model.setupPayloadJson(root.cliSetting)) === true
+    return shell.toggle(root.moduleName, Model.setupPayloadJson(root.cliSetting, focus)) === true
   }
 
   function press(buttonCode) {
@@ -247,6 +249,7 @@ BarWidget {
         contentRoom: panel.availableCardHeight > 0 ? Math.max(0, panel.availableCardHeight - panel.padding * 2) : 0
         onCloseRequested: root.close()
         onSettingsRequested: function(values) { root.persistSettings(values) }
+        onSetupRequested: function(focus) { root.openSetup(focus) }
         onSwitchRequested: function(direction) { root.switchPanel(direction) }
       }
     }

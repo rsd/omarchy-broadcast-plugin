@@ -88,9 +88,15 @@ widget would hide.
     (Model.galleryChoice), and goes on as an intent of the command queue
     (`effect replace --image PATH`, `media import background PATH --select`);
     the dialog's Remove is a setup intent for a user item of the read gallery
-    only (Daemon.removeMedia, Model.mediaUserItem); the thumbnail is the
-    plugin's second Image, its source only Model.mediaImageSource of the
-    checked path.
+    only (Daemon.removeMedia, Model.mediaUserItem); the thumbnail
+    (MediaThumbnail, drawn by the panel's Background row and the dialog's
+    Away image row) is the plugin's second Image, its source only
+    Model.mediaImageSource of a checked path;
+  - the away image (interface revision 17): the dialog's Choose... and Add...
+    are the same flows over the `away` gallery, ending in setup intents
+    (`config set -- effect.fallback_image PATH`, `media import away PATH
+    --select`, each re-checked when it runs); Clear writes the empty value;
+    the overlay hides while a flow runs.
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -517,15 +523,23 @@ image_block = block(panel[panel.rfind("Image {", 0, image_at):], "Image {") if i
 check("the preview Image is never cached and reads Preview.frameSource",
       re.search(r"^\s*cache:\s*false\s*$", image_block, re.M) is not None
       and "Preview.frameSource" in image_block and "retainWhileLoading: true" in image_block, image_block[:200])
-check("two Images in the plugin: the preview and the background thumbnail",
+check("two Images in the plugin: the preview and the gallery thumbnail (MediaThumbnail)",
       sum(len(re.findall(r"(?<![\w.])Image\s*\{", s)) for p, s in sources.items() if p.parent == PLUGIN) == 2)
 _panel = sources[PLUGIN / "BroadcastPanel.qml"]
-_at = _panel.find("id: backgroundImage")
-thumb_block = _panel[_at:_panel.find("}", _at)] if _at >= 0 else ""
-check("the background thumbnail reads only the checked path's URL, async, decoded at twice its size",
-      "source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : \"\"" in thumb_block
-      and "asynchronous: true" in thumb_block and "sourceSize.width: backgroundThumb.width * 2" in thumb_block
+_thumb = sources[PLUGIN / "MediaThumbnail.qml"]
+_at = _thumb.find("id: thumbImage")
+thumb_block = _thumb[_at:_thumb.find("}", _at)] if _at >= 0 else ""
+_dialog = sources[PLUGIN / "SetupDialog.qml"]
+check("the thumbnails (MediaThumbnail: the panel's Background row, the dialog's Away image row) read only the checked path's URL,"
+      " async, decoded at twice their size, only while shown",
+      "source: root.source" in thumb_block
+      and "asynchronous: true" in thumb_block and "sourceSize.width: root.width * 2" in thumb_block
+      and "source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : \"\"" in block(_panel, "MediaThumbnail {")
+      and "source: root.shown && awayLine.visible && root.awayView.visible ? root.awayView.source : \"\"" in block(_dialog, "MediaThumbnail {")
+      and len(re.findall(r"(?<![\w.])MediaThumbnail\s*\{", _panel + _dialog)) == 2
       and "out.source = mediaImageSource(record.backgroundImagePath)" in block(model, "function backgroundRowView")
+      and "out.source = mediaImageSource(row.rawPath)" in block(model, "function awayImageView")
+      and "if (s.type === \"path\") e.rawPath = mediaPath(s.value)" in block(model, "function configEntry")
       and 'return "file://" + p.split("/").map(function(seg) { return encodeURIComponent(seg) }).join("/")' in block(model, "function mediaImageSource"),
       thumb_block[:200])
 for path, src in everything.items():
@@ -605,7 +619,7 @@ check("the right click opens the setup through the shell's toggle with the setup
       re.search(r"var shell = root\.bar \? root\.bar\.shell : null\s*"
                 r'if \(!shell \|\| typeof shell\.toggle !== "function"\) return false\s*'
                 r"Daemon\.closePanels\(\)\s*"
-                r"return shell\.toggle\(root\.moduleName, Model\.setupPayloadJson\(root\.cliSetting\)\) === true",
+                r"return shell\.toggle\(root\.moduleName, Model\.setupPayloadJson\(root\.cliSetting, focus\)\) === true",
                 block(bar_src, "function openSetup")) is not None)
 # shell.qml panelEntry onLoaded: `if ("<name>" in item) item.<name> = ...` for
 # each of these; an assignment to a readonly one throws before the overlay is
@@ -616,7 +630,8 @@ check("the setup dialog declares none of the names the shell's loader assigns as
       readonly_injected == [] and re.search(r"property \S+ service\b", dialog) is None
       and "property var shell: null" in dialog and "property var manifest: null" in dialog, str(readonly_injected))
 check("the overlay window has the plugin's layer-shell namespace",
-      re.search(r'OverlayWindow \{\s*id: overlay\s*shown: root\.shown\s*WlrLayershell\.namespace: "omarchy-broadcast"', dialog) is not None
+      re.search(r'OverlayWindow \{\s*id: overlay\s*shown: root\.shown && !root\.suspended\s*WlrLayershell\.namespace: "omarchy-broadcast"', dialog) is not None
+      and "readonly property bool suspended: Daemon.mediaBusy" in dialog
       and "import Quickshell.Wayland" in dialog)
 check("the setup dialog's writes do not hold the on/off toggle",
       "!isSettingIntent(intent) && !isSetupIntent(intent)" in block(model, "function toggleBlocked"))
@@ -639,10 +654,12 @@ check("the setup reads: fixed argv, stdout in line mode and bounded, stderr chun
           'return [cli, "modules", "list", "--json"]', 'return [cli, "order", "show", "--json"]',
           'return [cli, "config", "show", "--json"]', 'return [cli, "config", "files", "--json"]',
           'if (kind === "media") return mediaListArgv(cli)'))
-      and 'return cliUsable(cli) ? [cli, "media", "list", MEDIA_KIND, "--json"] : null' in block(model, "function mediaListArgv"))
+      and 'return cliUsable(cli) ? [cli, "media", "list", mediaKindOf(kind), "--json"] : null' in block(model, "function mediaListArgv")
+      and 'return kind === AWAY_KIND ? AWAY_KIND : MEDIA_KIND' in block(model, "function mediaKindOf"))
 setup_requests = re.findall(r'request\(\{ verb: "setup", op: "([a-z-]+)"', daemon)
-check("setup writes are intents of the queue, from the five Daemon functions only",
-      setup_requests == ["module", "order", "order-reset", "config", "media-remove"]
+check("setup writes are intents of the queue, from the six Daemon functions only (and a gallery flow's end)",
+      setup_requests == ["module", "order", "order-reset", "config", "away-image", "media-remove"]
+      and 'return request({ verb: "setup", op: "away-image", path: "" })' in block(daemon, "function clearAwayImage")
       and "var item = setupBusy ? null : Model.mediaUserItem(setup.media, path)" in block(daemon, "function removeMedia")
       and 'request({ verb: "setup", op: "module", id: m.id, on: on })' in block(daemon, "function setModuleEnabled")
       and "Model.orderAfterMove(setup.order, index, direction)" in block(daemon, "function moveStage")
@@ -661,7 +678,7 @@ check("the gallery flows: one Process, argv of Model.mediaStepArgv only, stdout 
       media_block != "" and re.search(r"stdout:\s*SplitParser\s*\{\s*onRead", media_block) is not None
       and re.search(r'stderr:\s*SplitParser\s*\{\s*splitMarker:\s*""', media_block) is not None
       and re.findall(r"mediaProc\.command\s*=\s*([^\n]*)", daemon) == ["argv"]
-      and "var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, record.backgroundImagePath)" in block(daemon, "function startMediaStep")
+      and "var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, Model.mediaCurrent(flow, record, setup.config))" in block(daemon, "function startMediaStep")
       and "if (!list && mediaLines > 1) return" in block(daemon, "function mediaLine")
       and "var cap = list ? Model.LINE_CAP : Model.PATH_CAP" in block(daemon, "function mediaLine")
       and 'mediaLines > Model.readLinesCap("media")' in block(daemon, "function mediaLine")
@@ -675,7 +692,12 @@ check("a picked path is used only when it is an item of the gallery just read, t
       and 'p.indexOf(d + "/") !== 0' in block(model, "function mediaInDir")
       and "if (end.intent !== null && !request(end.intent))" in block(daemon, "function mediaEnded")
       and 'return cliUsable(cli) && p !== "" ? [cli, "effect", BACKGROUND_REPLACE, "--image", p] : null' in block(model, "function backgroundArgv")
-      and 'return cliUsable(cli) && p !== "" ? [cli, "media", "import", MEDIA_KIND, p, "--select"] : null' in block(model, "function mediaImportArgv"))
+      and 'return cliUsable(cli) && p !== "" ? [cli, "media", "import", mediaKindOf(kind), p, "--select"] : null' in block(model, "function mediaImportArgv")
+      and 'out.intent = away ? { verb: "setup", op: "away-image", path: chosen } : { verb: "background", path: chosen }' in block(model, "function mediaStepEnd")
+      and 'var p = path === "" ? "" : mediaPath(path)' in block(model, "function awayImageArgv")
+      and 'return path === "" || p !== "" ? [cli, "config", "set", "--", AWAY_IMAGE_KEY, p] : null' in block(model, "function awayImageArgv")
+      and 'case "away-image": return placeholderSupported(record) ? awayImageArgv(cli, intent.path) : null' in block(model, "function setupIntentArgv")
+      and 'case "away-import": return placeholderSupported(record) ? mediaImportArgv(cli, intent.path, AWAY_KIND) : null' in block(model, "function setupIntentArgv"))
 check("the dialog names no command: every argv is the Model's",
       all(w not in dialog for w in ('"set"', '"--"', '"enable"', '"disable"', '"reset"', '"show"', '"list"', '"--json"')))
 
