@@ -182,9 +182,12 @@ Item {
     if (!root.shown) {
       // The bar widgets keep the watch running; a dialog of a singleton no
       // widget has attached to (a reload from another URL) runs its own.
+      // It has no cliPath setting to use (the payload never carries a
+      // program to run: any process of the user can summon the overlay), so
+      // the Daemon resolves the CLI itself, `omarchy-broadcast` on PATH.
       if (Daemon.attachedCount === 0) {
         Daemon.attach(root)
-        Daemon.configure(root, payload.cliSetting)
+        Daemon.configure(root, null)
         root.attached = true
       }
       Daemon.holdSetup(root)

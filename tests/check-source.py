@@ -635,7 +635,7 @@ check("the right click opens the setup through the shell's toggle with the setup
       re.search(r"var shell = root\.bar \? root\.bar\.shell : null\s*"
                 r'if \(!shell \|\| typeof shell\.toggle !== "function"\) return false\s*'
                 r"Daemon\.closePanels\(\)\s*"
-                r"return shell\.toggle\(root\.moduleName, Model\.setupPayloadJson\(root\.cliSetting, focus\)\) === true",
+                r"return shell\.toggle\(root\.moduleName, Model\.setupPayloadJson\(focus\)\) === true",
                 block(bar_src, "function openSetup")) is not None)
 # shell.qml panelEntry onLoaded: `if ("<name>" in item) item.<name> = ...` for
 # each of these; an assignment to a readonly one throws before the overlay is
@@ -645,6 +645,12 @@ readonly_injected = [n for n in loader_names if re.search(r"readonly property \S
 check("the setup dialog declares none of the names the shell's loader assigns as readonly, and no `service`",
       readonly_injected == [] and re.search(r"property \S+ service\b", dialog) is None
       and "property var shell: null" in dialog and "property var manifest: null" in dialog, str(readonly_injected))
+check("the setup dialog's no-widget branch configures the Daemon with no program (`Daemon.configure(root, null)`), and nothing"
+      " of the payload (a cliPath or cliSetting) reaches Daemon.configure",
+      re.search(r"if \(Daemon\.attachedCount === 0\) \{\s*Daemon\.attach\(root\)\s*Daemon\.configure\(root, null\)\s*root\.attached = true\s*\}",
+                block(dialog, "function open(payloadJson)")) is not None
+      and re.findall(r"Daemon\.configure\(([^)]*)\)", dialog) == ["root, null"]
+      and re.search(r"cliPath|cliSetting", dialog) is None, str(re.findall(r"Daemon\.configure\([^)]*\)", dialog)))
 check("the overlay window has the plugin's layer-shell namespace",
       re.search(r'OverlayWindow \{\s*id: overlay\s*shown: root\.shown && !root\.suspended\s*WlrLayershell\.namespace: "omarchy-broadcast"', dialog) is not None
       and "readonly property bool suspended: Daemon.mediaBusy" in dialog
