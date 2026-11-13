@@ -2272,6 +2272,118 @@ TestCase {
     compare(Model.openGroupId("background", r.settings), "image", "a global group is never the open one")
   }
 
+  // ---- stage values (auto-frame's zoom)
+  readonly property string afEnabledId: "effect.auto_frame.enabled"
+  readonly property string afFramingId: "effect.auto_frame.framing"
+  function autoFrameGroup(on) {
+    return { id: "auto_frame", label: "Auto-frame", settings: [
+      boolS(afEnabledId, "Auto-frame", { scope: "global", value: on, "default": false }),
+      enumS(afFramingId, "Framing", [{ value: "loose", label: "Loose" }, { value: "tight", label: "Tight" }],
+            { scope: "global", value: "loose", "default": "loose" })] }
+  }
+  function zoomEntry(v) { return { stage: "auto-frame", name: "zoom", value: v } }
+  // An active camera with the auto-frame group; `extra` overrides the snapshot's fields.
+  function withAutoFrame(on, extra) {
+    var o = merged({ state: "active", consumers: 1, cameras: [cameraObjects()[0]] }, extra || {})
+    return feedAll(snap(rev9(o)), setLines(brioGroups().concat(globalGroups(), [autoFrameGroup(on)]))).record
+  }
+  function liveOf(v, id) {
+    for (var g = 0; g < v.groups.length; g++) if (v.groups[g].id === id) return v.groups[g].live
+    return null
+  }
+
+  function test_stage_values_parsed_from_the_snapshot() {
+    var r = snap({ state: "active", stage_values: [zoomEntry(1.24)] })
+    compare(JSON.stringify(r.stageValues), JSON.stringify([zoomEntry(1.24)]))
+    compare(Model.stageValue(r, "auto-frame", "zoom"), 1.24)
+    compare(Model.stageValue(r, "auto-frame", "pan"), null, "another name")
+    compare(Model.stageValue(r, "other", "zoom"), null, "another stage")
+  }
+
+  function test_stage_values_absent_or_empty_read_as_none() {
+    var absent = snap({ state: "active" })
+    compare(JSON.stringify(absent.stageValues), "[]", "an older daemon omits the key")
+    compare(Model.stageValue(absent, "auto-frame", "zoom"), null)
+    var empty = snap({ state: "active", stage_values: [] })
+    compare(JSON.stringify(empty.stageValues), "[]")
+    compare(Model.stageValue(empty, "auto-frame", "zoom"), null)
+    compare(JSON.stringify(Model.emptyRecord("connecting").stageValues), "[]")
+    compare(Model.stageValue(null, "auto-frame", "zoom"), null)
+    // a snapshot replaces what the last one said
+    var again = Model.reduce(snap({ state: "active", stage_values: [zoomEntry(1.5)] }), line(snapshotObject({ state: "active" }))).record
+    compare(JSON.stringify(again.stageValues), "[]")
+  }
+
+  function test_stage_values_hostile_input_is_bounded() {
+    compare(JSON.stringify(snap({ state: "active", stage_values: "x" }).stageValues), "[]")
+    compare(JSON.stringify(snap({ state: "active", stage_values: { stage: "a" } }).stageValues), "[]")
+    var bad = [null, 5, "z", [], { stage: "auto-frame", name: "zoom" }, { stage: "auto-frame", name: "zoom", value: "1.2" },
+               { stage: "auto-frame", name: "zoom", value: -1 }, { stage: "auto-frame", name: "zoom", value: 2e9 },
+               { stage: "", name: "zoom", value: 1 }, { stage: "auto-frame", name: 7, value: 1 }, zoomEntry(1.1)]
+    compare(JSON.stringify(snap({ state: "active", stage_values: bad }).stageValues), JSON.stringify([zoomEntry(1.1)]),
+            "only the well-formed entry stays")
+    var many = []
+    for (var i = 0; i < 100; i++) many.push({ stage: "s" + i, name: "n", value: i })
+    compare(snap({ state: "active", stage_values: many }).stageValues.length, Model.STAGE_VALUES_CAP)
+    var hostile = snap({ state: "active", stage_values: [{ stage: "<b>auto-frame</b>", name: "zo&om", value: 1 }] }).stageValues
+    compare(hostile[0].stage + "|" + hostile[0].name, "bauto-frame/b|zoom", "markup characters removed")
+  }
+
+  function test_stage_values_follow_state_lines() {
+    var r = snap({ state: "active", stage_values: [zoomEntry(1.24)] })
+    var upd = Model.reduce(r, line(stateObject({ state: "active", stage_values: [zoomEntry(1.6)] }))).record
+    compare(Model.stageValue(upd, "auto-frame", "zoom"), 1.6, "a state line that carries them replaces them")
+    var keep = Model.reduce(r, line(stateObject({ state: "active", consumers: 2 }))).record
+    compare(Model.stageValue(keep, "auto-frame", "zoom"), 1.24, "a state line without the key leaves them")
+    var idle = Model.reduce(r, line(stateObject({ state: "idle", consumers: 0 }))).record
+    compare(JSON.stringify(idle.stageValues), "[]", "cleared as the camera goes idle")
+    var back = Model.reduce(idle, line(stateObject({ state: "active", consumers: 1 }))).record
+    compare(Model.stageValue(back, "auto-frame", "zoom"), null, "none until the daemon reports one")
+    var staleIdle = snap({ state: "idle", stage_values: [zoomEntry(1.3)] })
+    compare(JSON.stringify(staleIdle.stageValues), "[]", "an idle snapshot shows none, whatever it carries")
+    compare(Model.stageValue(staleIdle, "auto-frame", "zoom"), null)
+  }
+
+  function test_zoom_label() {
+    compare(Model.zoomLabel(1.24), "Zoom 1.24\u00d7")
+    compare(Model.zoomLabel(1), "Zoom 1.00\u00d7", "1.00 is the full frame")
+    compare(Model.zoomLabel(2.5), "Zoom 2.50\u00d7")
+    compare(Model.zoomLabel(1.2449), "Zoom 1.24\u00d7")
+    compare(Model.zoomLabel(1.999), "Zoom 2.00\u00d7")
+    compare(Model.zoomLabel(null), "")
+    compare(Model.zoomLabel(undefined), "")
+    compare(Model.zoomLabel(0), "")
+    compare(Model.zoomLabel(-1), "")
+    compare(Model.zoomLabel(NaN), "")
+    compare(Model.zoomLabel(Infinity), "")
+    compare(Model.zoomLabel("1.2"), "")
+  }
+
+  function test_auto_frame_live_line_in_the_effect_view() {
+    var r = withAutoFrame(true, { stage_values: [zoomEntry(1.24)] })
+    var v = Model.effectSettingsView(r, {})
+    compare(liveOf(v, "auto_frame"), "Zoom 1.24\u00d7")
+    compare(liveOf(v, "background"), "", "another group has none")
+    compare(liveOf(v, "video"), "")
+    compare(Model.groupLiveText(r, "auto_frame"), "Zoom 1.24\u00d7")
+    compare(Model.groupLiveText(r, "background"), "")
+    compare(liveOf(Model.settingsView(r, {}, {}), "auto_frame"), null, "the Camera tab has no such group")
+    // switched off: nothing, even if the daemon still reports a value
+    var off = withAutoFrame(false, { stage_values: [zoomEntry(1.24)] })
+    compare(liveOf(Model.effectSettingsView(off, {}), "auto_frame"), "")
+    // idle camera, older daemon, empty list: nothing
+    compare(liveOf(Model.effectSettingsView(withAutoFrame(true, { state: "idle", consumers: 0, stage_values: [zoomEntry(1.24)] }), {}), "auto_frame"), "")
+    compare(liveOf(Model.effectSettingsView(withAutoFrame(true), {}), "auto_frame"), "")
+    compare(liveOf(Model.effectSettingsView(withAutoFrame(true, { stage_values: [] }), {}), "auto_frame"), "")
+    // a zoom of another stage is not auto-frame's
+    compare(liveOf(Model.effectSettingsView(withAutoFrame(true, { stage_values: [{ stage: "x", name: "zoom", value: 2 }] }), {}), "auto_frame"), "")
+    // follows the next line
+    var next = Model.reduce(r, line(stateObject({ state: "active", consumers: 1, interface_revision: 9, stage_values: [zoomEntry(1.5)] }))).record
+    compare(liveOf(Model.effectSettingsView(next, {}), "auto_frame"), "Zoom 1.50\u00d7")
+    // the other tabs' groups carry the field too
+    compare(Model.effectSettingsView(withGlobals({}), {}).groups[0].live, "")
+  }
+
   function test_effect_view_skips_the_mode_and_shows_the_rest() {
     var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "blur" })
     var v = Model.effectSettingsView(r, {})

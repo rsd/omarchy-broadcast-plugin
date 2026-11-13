@@ -57,6 +57,10 @@ var CLI_MISSING_TEXT = "omarchy-broadcast CLI not found"
 // Sane upper bounds for figures: anything above reads as unknown.
 var COUNT_MAX = 1000000
 var STAT_MAX = 1000000
+// A stage's live values (`stage_values` of the snapshot): at most this many
+// entries are read, their stage and name words cut to STAGE_WORD_CAP.
+var STAGE_VALUES_CAP = 32
+var STAGE_WORD_CAP = 48
 
 // Respawn backoff for the watch process: 1 s doubling to 30 s. One-shot;
 // armed only by an unexpected exit. It goes back to 1 s only after a watch
@@ -242,6 +246,9 @@ function emptyRecord(link, linkText) {
     camerasTruncated: false,
     camerasCapped: false,
     stats: null,
+    // The live values stages report (`stage_values`, [] when the camera is
+    // idle, nothing reports or the daemon predates them): stageValueList().
+    stageValues: [],
     // The snapshot's settings schema (`settings_schema`): "absent" when the
     // snapshot has no such field (a CLI that predates the settings),
     // "number" when it is a number (settingsSchema: that number when it is
@@ -292,6 +299,25 @@ function unknownState(record) {
   return linked(record) && record.state === "unknown"
 }
 
+// The `stage_values` of a snapshot or state line: [{ stage, name, value }],
+// bounded. An entry that is not an object with a stage, a name and a finite
+// number in 0..STAT_MAX is skipped; anything but an array reads as none.
+function stageValueList(value) {
+  var src = Array.isArray(value) ? value : []
+  var n = Math.min(src.length, STAGE_VALUES_CAP)
+  var out = []
+  for (var i = 0; i < n; i++) {
+    var e = src[i]
+    if (!isPlainObject(e)) continue
+    var stage = sanitize(e.stage, STAGE_WORD_CAP)
+    var name = sanitize(e.name, STAGE_WORD_CAP)
+    var v = statNumber(e.value)
+    if (stage === "" || name === "" || v === null) continue
+    out.push({ stage: stage, name: name, value: v })
+  }
+  return out
+}
+
 function applyScalars(r, m) {
   r.state = STATES.indexOf(m.state) >= 0 ? m.state : "unknown"
   r.rawState = sanitize(m.state, MODE_CAP)
@@ -317,8 +343,15 @@ function applyScalars(r, m) {
   // The running daemon's interface revision, on the same lines: a new CLI may
   // still be talking to a daemon started before the upgrade.
   r.interfaceRevision = interfaceRevision(m.interface_revision)
+  // The key is absent from an older daemon. A snapshot starts from the empty
+  // record, so absent reads as none there; a state line that omits it leaves
+  // the values as they were.
+  if (m.stage_values !== undefined) r.stageValues = stageValueList(m.stage_values)
   // No stats line arrives outside `active`; clear the figures as it is left.
-  if (r.state !== "active") r.stats = null
+  if (r.state !== "active") {
+    r.stats = null
+    r.stageValues = []
+  }
 }
 
 // Reads at most CAMERA_CAP entries of whatever array arrived: the traversal is
@@ -705,6 +738,49 @@ function statsRows(record) {
     { label: "CPU", value: formatStat(s.cpuPercent, 1, " %") },
     { label: "GPU", value: formatStat(s.gpuPercent, 1, " %") }
   ]
+}
+
+// A value a stage reports: the first `name` of `stage` in the record, else
+// null. Only while the camera is active (the daemon sends none otherwise).
+function stageValue(record, stage, name) {
+  if (!available(record) || record.state !== "active" || !Array.isArray(record.stageValues)) return null
+  for (var i = 0; i < record.stageValues.length; i++) {
+    var e = record.stageValues[i]
+    if (e.stage === stage && e.name === name) return e.value
+  }
+  return null
+}
+
+// A zoom factor as the panel shows it: "Zoom 1.24\u00d7" (1.00\u00d7 is the full
+// frame); "" for no value or one that is not a positive number.
+function zoomLabel(value) {
+  if (typeof value !== "number" || !isFinite(value) || value <= 0 || value > STAT_MAX) return ""
+  return "Zoom " + value.toFixed(2) + "\u00d7"
+}
+
+// The settings group whose stage reports a live value: the group's id and
+// the stage, value name and label it is shown with. Anything else in a group
+// stays generic: a group with no entry here shows no live line.
+// This table is the one place the plugin names a live stage value (a
+// documented exception to "the plugin names no settings"): adding an entry is
+// a deliberate decision, and tests/check-source.py pins the table to exactly
+// this one entry so that growth fails visibly. The generic alternative, the
+// daemon publishing the label, the unit and the group with each value, is
+// future work.
+var LIVE_GROUPS = {
+  auto_frame: { stage: "auto-frame", name: "zoom", label: zoomLabel }
+}
+
+// The live line a settings group shows under its rows, "" for none: the
+// value its stage reports while the camera is active, and only while the
+// group is switched on (its `effect.<group>.enabled` switch, by the
+// daemon's naming; a group with no such switch is not gated by one).
+function groupLiveText(record, groupId) {
+  if (!LIVE_GROUPS.hasOwnProperty(groupId)) return ""
+  var live = LIVE_GROUPS[groupId]
+  var gate = findSetting(record, "effect." + groupId + ".enabled")
+  if (gate && gate.value !== true) return ""
+  return live.label(stageValue(record, live.stage, live.name))
 }
 
 // ---------------------------------------------------------------- effects
@@ -1950,8 +2026,9 @@ function openGroupId(open, set) {
 // The settings section of a tab, exactly as it is drawn:
 //   { visible, hint, note, groups, truncation, reset, rowCount, setKey,
 //     title, collapsible }
-// groups: { id, label, index, expanded, glyph, rows, truncation }, where the
-// rows of a collapsed group are not listed; a row:
+// groups: { id, label, index, expanded, glyph, rows, truncation, live }, where
+// the rows of a collapsed group are not listed and `live` is a read-only line
+// under the rows ("" for none, see groupLiveText); a row:
 //   { id, type, widget, label, enabled, reason, value, valueText, min, max,
 //     step, options, selectedIndex, optionsNote, stop }
 // `stop` numbers the rows drawn, top to bottom (the keyboard's stops, see
@@ -2006,7 +2083,8 @@ function settingsView(record, open, drafts) {
     out.groups.push({
       id: group.id, label: group.label, index: out.groups.length, expanded: expanded,
       glyph: expanded ? GLYPH_EXPANDED : GLYPH_COLLAPSED,
-      rows: rows, truncation: expanded ? showingText(rows.length, group.total, "settings") : ""
+      rows: rows, truncation: expanded ? showingText(rows.length, group.total, "settings") : "",
+      live: groupLiveText(record, group.id)
     })
   }
   out.rowCount = stop
@@ -2058,7 +2136,8 @@ function effectSettingsView(record, drafts) {
     if (rows.length === 0) { skippedGroups++; continue }
     out.groups.push({
       id: group.id, label: group.label, index: out.groups.length, expanded: true, glyph: "",
-      rows: rows, truncation: showingText(rows.length + skipped, group.total, "settings")
+      rows: rows, truncation: showingText(rows.length + skipped, group.total, "settings"),
+      live: groupLiveText(record, group.id)
     })
   }
   out.rowCount = stop
@@ -2663,7 +2742,8 @@ function micSettingsView(record, drafts) {
     if (rows.length === 0) { undrawn++; continue }
     out.groups.push({
       id: group.id, label: group.label, index: out.groups.length, expanded: true, glyph: "",
-      rows: rows, truncation: showingText(rows.length, group.total, "settings")
+      rows: rows, truncation: showingText(rows.length, group.total, "settings"),
+      live: ""
     })
   }
   out.rowCount = stop
