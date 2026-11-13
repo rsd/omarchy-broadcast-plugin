@@ -3953,12 +3953,14 @@ ShellRoot {
   // harness puts in gallery-pick / file-pick, or exit with gallery-exit /
   // file-exit, and log their argv to the same log as the CLI.
   readonly property string mediaBundled: "/usr/share/omarchy-broadcast/media/backgrounds"
-  readonly property string mediaUser: "/home/u/.local/share/omarchy-broadcast/media/backgrounds"
+  readonly property string mediaUser: "/home/u/Pictures/omarchy-broadcast"
+  // The videos folder: the daemon's `video_dir` (revision 19); videos live here.
+  readonly property string mediaVideo: "/home/u/Videos/omarchy-broadcast"
   // A video background's poster: the JPEG run-harness.sh puts where the
   // daemon keeps them.
   function mediaPosterPath() { return shellRoot.fakeDir + "/cache/omarchy-broadcast/posters/loop.jpg" }
   // `media list background --json`: the header, then one line per item.
-  // `user`: true for the user's two (office.png, the video loop.webm), else
+  // `user`: true for the user's two (office.png in the pictures folder, the video loop.webm in the videos folder), else
   // a list of their names ("office", "loop"; false: none).
   function mediaListLines(user) {
     var items = [
@@ -3970,10 +3972,10 @@ ShellRoot {
       items.push({ path: mediaUser + "/office.png", label: "office <b>\u202e", bundled: false, media_type: "image",
                    width: 1920, height: 1080, duration_ms: 0, poster: "" })
     if (own.indexOf("loop") >= 0)
-      items.push({ path: mediaUser + "/loop.webm", label: "loop", bundled: false, media_type: "video",
+      items.push({ path: mediaVideo + "/loop.webm", label: "loop", bundled: false, media_type: "video",
                    width: 1920, height: 1080, duration_ms: 12400, poster: mediaPosterPath() })
     var out = [JSON.stringify({ v: 1, type: "media", kind: "background", serial: 1, bundled_dir: mediaBundled, user_dir: mediaUser,
-                                items: items.length, items_truncated: false })]
+                                video_dir: mediaVideo, items: items.length, items_truncated: false })]
     for (var i = 0; i < items.length; i++) {
       var it = { v: 1, type: "media_item", kind: "background" }
       for (var k in items[i]) it[k] = items[i][k]
@@ -4073,7 +4075,7 @@ ShellRoot {
       C().setCursor("background", -1)
       h.eq("the row has the cursor on Gallery…", h.find(A(), "backgroundButton-0").hasCursor, true)
       h.key(Qt.Key_Return)
-    }, function() { return S().mediaBusy && S().mediaFlow.step === "pick" && args().some(function(a) { return a.indexOf("omarchy-menu-images") === 0 }) }, 6000)
+    }, function() { return S().mediaBusy && S().mediaFlow.step === "pick" && args().some(function(a) { return a.indexOf("omarchy-menu-images --show-labels") === 0 }) }, 6000)
     h.step("media: the panel is closed while the picker runs", function() {
       h.eq("closed", A().opened, false)
       h.check("the flow remembers the widget it came from", S().mediaOpener === A())
@@ -4084,9 +4086,10 @@ ShellRoot {
     h.step("media: listed, picked, selected, and the panel back", function() {
       h.eq("the panel opened again on its widget", A().opened, true)
       h.eq("the opener forgotten", S().mediaOpener, null)
-      h.eq("the three commands, in order", JSON.stringify(args()), JSON.stringify([
+      h.eq("the four commands, in order", JSON.stringify(args()), JSON.stringify([
         "media list background --json",
-        "omarchy-menu-images --show-labels --selected " + current + " " + mediaBundled + " " + mediaUser,
+        "omarchy-menu-images --print-rows --show-labels " + mediaBundled + " " + mediaUser + " " + mediaVideo,
+        "omarchy-menu-images --show-labels --selected " + current + " " + mediaBundled + " " + mediaUser + " " + mediaVideo,
         "effect replace --image " + mediaBundled + "/aurora.webp"]))
       h.eq("no error", S().commandError, "")
       h.removeFile("gallery-delay")
@@ -4101,7 +4104,7 @@ ShellRoot {
       h.markLog()
       h.notes.steps = S().mediaSteps
       h.check("started", C().activateBackground(0))
-    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() && A().opened }, 6000)
+    }, function() { return S().mediaSteps === h.notes.steps + 3 && idle() && A().opened }, 6000)
     h.wait(300)
     h.step("media: refused, and the panel shows why", function() {
       h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
@@ -4116,11 +4119,61 @@ ShellRoot {
     h.step("media: Gallery…, then closed without a choice", function() {
       h.notes.steps = S().mediaSteps
       h.check("started", C().activateBackground(0))
-    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() && A().opened }, 6000)
+    }, function() { return S().mediaSteps === h.notes.steps + 3 && idle() && A().opened }, 6000)
     h.step("media: the panel is back after a cancel too", function() {
       h.eq("open", A().opened, true)
       A().close()
     }, function() { return !A().opened })
+
+    // an empty gallery: neither the rows nor the picker is asked for (it
+    // would show the desktop theme's backgrounds), and the panel says so
+    h.step("media: an empty gallery", function() {
+      h.writeFile("media-list", [JSON.stringify({ v: 1, type: "media", kind: "background", serial: 1, bundled_dir: mediaBundled,
+                                                  user_dir: mediaUser, video_dir: mediaVideo, items: 0, items_truncated: false })])
+      h.writeFile("gallery-pick", [mediaBundled + "/dunes.webp"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery… with nothing to choose from", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      A().open()
+      h.tab(A(), "effect")
+      h.check("started", C().activateBackground(0))
+    }, function() { return S().mediaSteps >= h.notes.steps + 1 && idle() && A().opened }, 6000)
+    h.wait(300)
+    h.step("media: listed, no picker, and the panel says why", function() {
+      h.eq("only the list ran", JSON.stringify(args()), JSON.stringify(["media list background --json"]))
+      h.eq("the failure line", S().commandError, "No backgrounds yet. Add one with Add…")
+      h.eq("the fake picker was not invoked", h.logLines().slice(h.logMark).some(function(l) { return l.indexOf("[omarchy-menu-images]") >= 0 }), false)
+      A().close()
+    }, function() { return !A().opened })
+
+    // items listed but the picker builds no row for them (its thumbnailer
+    // failed: it prints an empty line): the picker is not run either
+    h.step("media: items listed, the picker has no rows", function() {
+      h.writeFile("media-list", mediaListLines(true))
+      h.writeFile("gallery-rows", [""])
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery… with rows empty", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      A().open()
+      h.tab(A(), "effect")
+      h.check("started", C().activateBackground(0))
+    }, function() { return S().mediaSteps >= h.notes.steps + 2 && idle() && A().opened }, 6000)
+    h.wait(300)
+    h.step("media: listed, rows asked, no picker, and the panel says why", function() {
+      h.eq("the list and the rows only", JSON.stringify(args()), JSON.stringify([
+        "media list background --json",
+        "omarchy-menu-images --print-rows --show-labels " + mediaBundled + " " + mediaUser + " " + mediaVideo]))
+      h.eq("the failure line", S().commandError, "The picker cannot show any of the gallery's backgrounds. Add another with Add…")
+      h.eq("the picker did not open", h.logLines().slice(h.logMark).filter(function(l) {
+        return l.indexOf("[omarchy-menu-images]") >= 0 && l.indexOf("[--print-rows]") < 0 }).length, 0)
+      A().close()
+    }, function() { return !A().opened })
+    h.step("media: the gallery back as it was", function() {
+      h.removeFile("gallery-rows")
+      h.removeFile("gallery-pick")
+    }, function() { return h.writerIdle() })
 
     // the watchdog: a picker that never answers is stopped, and the buttons
     // say why they are faded meanwhile
@@ -4182,10 +4235,10 @@ ShellRoot {
       h.markLog()
       h.notes.steps = S().mediaSteps
       h.check("started", S().openGallery())
-    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() }, 6000)
+    }, function() { return S().mediaSteps === h.notes.steps + 3 && idle() }, 6000)
     h.wait(300)
     h.step("media: a cancel runs nothing more", function() {
-      h.eq("listed and picked only", args().length, 2)
+      h.eq("listed, rows and picked only", args().length, 3)
       h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
       h.eq("no error", S().commandError, "")
     })
@@ -4197,7 +4250,7 @@ ShellRoot {
       h.markLog()
       h.notes.steps = S().mediaSteps
       S().openGallery()
-    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() }, 6000)
+    }, function() { return S().mediaSteps === h.notes.steps + 3 && idle() }, 6000)
     h.wait(300)
     h.step("media: refused, said on the failure line", function() {
       h.eq("no selection", args().filter(function(a) { return a.indexOf("effect") === 0 }).length, 0)
@@ -4312,18 +4365,18 @@ ShellRoot {
 
     // a video background: its poster (from the gallery just read) and the badge
     h.step("media: Gallery… picks the video", function() {
-      h.writeFile("gallery-pick", [mediaUser + "/loop.webm"])
+      h.writeFile("gallery-pick", [mediaVideo + "/loop.webm"])
     }, function() { return h.writerIdle() })
     h.step("media: Gallery…, the video selected", function() {
       h.markLog()
       h.check("started", C().activateBackground(0))
-    }, function() { return has("effect replace --image " + mediaUser + "/loop.webm") && idle() && A().opened }, 6000)
+    }, function() { return has("effect replace --image " + mediaVideo + "/loop.webm") && idle() && A().opened }, 6000)
     h.step("media: the daemon reports the video in force", function() {
       h.removeFile("gallery-pick")
       var r = rev(15)
-      r.background_image = mediaUser + "/loop.webm"
+      r.background_image = mediaVideo + "/loop.webm"
       h.feed([snapshotLine(r)])
-    }, function() { return S().record.backgroundImagePath === mediaUser + "/loop.webm" && h.find(A(), "backgroundImage").status === Image.Ready }, 4000)
+    }, function() { return S().record.backgroundImagePath === mediaVideo + "/loop.webm" && h.find(A(), "backgroundImage").status === Image.Ready }, 4000)
     h.step("media: the poster, badged", function() {
       h.eq("the gallery read is kept", S().backgroundMedia.items.length, 4)
       h.eq("the poster's URL", String(h.find(A(), "backgroundImage").source), "file://" + mediaPosterPath())
@@ -4374,6 +4427,11 @@ ShellRoot {
       h.eq("shown", D().section, "backgrounds")
       h.eq("the section", dfind("backgroundsSection").visible, true)
       h.eq("the bundled count", dfind("backgroundsBundled").text, "2 bundled backgrounds")
+      h.eq("the folders' note", dfind("backgroundsFolder").text, "Your own backgrounds are kept in these folders; files you copy there appear here:")
+      h.eq("the pictures folder, on its own line", dfind("backgroundsFolderPath").text, mediaUser)
+      h.eq("the videos folder, on its own line", dfind("backgroundsVideoFolderPath").text, mediaVideo)
+      h.eq("broken anywhere", dfind("backgroundsVideoFolderPath").wrapMode, Text.WrapAnywhere)
+      h.check("the videos path under the pictures path", dfind("backgroundsVideoFolderPath").y > dfind("backgroundsFolderPath").y)
       h.eq("two of the user's own", D().mediaView.rows.length, 2)
       h.eq("its name, sanitised", dfind("mediaLabel-0").text, "office b")
       h.eq("Remove", dfind("mediaRemove-0").text, "Remove")
@@ -4403,6 +4461,66 @@ ShellRoot {
     h.step("media: the row's poster back", function() {
       dfind("mediaThumb-1").source = Qt.binding(function() { return D().shown && D().section === "backgrounds" ? D().mediaView.rows[1].source : "" })
     }, function() { return dfind("mediaThumb-1Image").status === Image.Ready })
+    // a video the CPU path cannot play (revision 19): the daemon's convert
+    // command, shown under its row with a Copy button of its own
+    h.step("media: a video that is not CPU-ready, from a revision-19 daemon", function() {
+      h.notes.convert = "ffmpeg -i '" + mediaVideo + "/loop.webm' -c:v libvpx-vp9 -an '" + mediaVideo + "/loop-vp9.webm'"
+      var lines = mediaListLines(true).map(function(l) {
+        var o = JSON.parse(l)
+        if (o.type === "media_item" && o.media_type === "video") { o.cpu_ready = false; o.convert_command = h.notes.convert }
+        return JSON.stringify(o)
+      })
+      h.writeFile("media-list", lines)
+      h.feed([snapshotLine(rev(19))])
+    }, function() { return S().record.interfaceRevision === 19 && h.writerIdle() })
+    h.step("media: the dialog reads again", function() { S().refreshSetup() },
+           function() { return !S().readArmed && S().readQueue.length === 0 && D().mediaView.rows.length === 2 && D().mediaView.rows[1].convertCommand !== "" }, 6000)
+    h.wait(300)
+    h.step("media: the note, the command and Copy under the video's row", function() {
+      h.eq("the note", dfind("mediaConvertNote-1").text, "Without an NVIDIA GPU this video shows as a still. To play it without one, convert it in a terminal; the copy lands in your videos folder:")
+      h.eq("the command", dfind("mediaConvertCommand-1").text, h.notes.convert)
+      h.eq("monospace", dfind("mediaConvertCommand-1").font.family, "monospace")
+      h.eq("breaks anywhere", dfind("mediaConvertCommand-1").wrapMode, TextEdit.WrapAnywhere)
+      h.eq("Copy", dfind("mediaCopy-1").text, "Copy")
+      h.eq("shown", dfind("mediaConvert-1").visible, true)
+      h.eq("none under the still", dfind("mediaConvert-0").visible, false)
+      h.check("under its row", dfind("mediaConvert-1").mapToItem(dfind("mediaEntry-1"), 0, 0).y >= dfind("mediaRow-1").height)
+      h.check("inside the card", dfind("mediaCopy-1").mapToItem(dfind("setupCard"), 0, 0).x + dfind("mediaCopy-1").width <= dfind("setupCard").width)
+      h.eq("not copied yet", dfind("mediaCopied-1").text, "")
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "m3c-setup-convert-command.png")
+    h.step("media: Down from Remove lands on Copy, Enter copies the command", function() {
+      D().setCursor("media-remove", 1)
+      h.key(Qt.Key_Down)
+      h.eq("on the Copy stop", D().hasCursor("media-copy", 1), true)
+      h.eq("the Copy button has the cursor", dfind("mediaCopy-1").hasCursor, true)
+      h.notes.copies = D().copies
+      h.key(Qt.Key_Return)
+      h.eq("one copy", D().copies, h.notes.copies + 1)
+      h.eq("what was copied", D().copiedText, h.notes.convert)
+      h.eq("said so", dfind("mediaCopied-1").text, "Copied")
+      h.eq("nothing else ran", args().filter(function(a) { return a.indexOf("media remove") === 0 }).length, 0)
+    })
+    h.wait(500)
+    h.step("media: no second copy from the selection", function() {
+      h.eq("still one", D().copies, h.notes.copies + 1)
+    })
+    h.step("media: a mouse click on Copy copies it too", function() {
+      D().copiedText = ""
+      h.notes.copies = D().copies
+      dfind("mediaCopy-1").clicked()
+    }, function() { return D().copies === h.notes.copies + 1 && D().copiedText === h.notes.convert }, 3000)
+    h.step("media: back to the revision-15 gallery", function() {
+      h.writeFile("media-list", mediaListLines(true))
+      h.feed([snapshotLine(rev(15))])
+    }, function() { return S().record.interfaceRevision === 15 && h.writerIdle() })
+    h.step("media: the dialog reads again, without the command", function() { S().refreshSetup() },
+           function() { return !S().readArmed && S().readQueue.length === 0 && D().mediaView.rows.length === 2 && D().mediaView.rows[1].convertCommand === "" }, 6000)
+    h.step("media: no convert block", function() {
+      h.eq("hidden", dfind("mediaConvert-1").visible, false)
+      h.eq("no note", dfind("mediaConvertNote-1").text, "")
+    })
+
     h.step("media: Remove pressed once, then the mouse moves off it", function() {
       D().setCursor("media-remove", 0)
       h.key(Qt.Key_Return)
@@ -4442,7 +4560,7 @@ ShellRoot {
     }, function() { return args().some(function(a) { return a.indexOf("media remove") === 0 }) }, 6000)
     h.step("media: the video removed, and the section read again", function() {
       h.eq("the remove", JSON.stringify(args().filter(function(a) { return a.indexOf("media remove") === 0 })),
-           JSON.stringify(["media remove " + mediaUser + "/loop.webm"]))
+           JSON.stringify(["media remove " + mediaVideo + "/loop.webm"]))
     }, function() { return !S().setupBusy && !S().readArmed && D().mediaView.rows.length === 0 }, 6000)
     h.step("media: none of the user's own left", function() {
       h.eq("no hint block", dfind("setupHintBlock").visible, false)
@@ -4496,7 +4614,7 @@ ShellRoot {
   // (`output.placeholder`, an editable `effect.fallback_image`), and those
   // of a revision-16 one (the read-only row).
   function awayBundledDir() { return shellRoot.fakeDir + "/frames" }
-  readonly property string awayUserDir: "/home/u/.local/share/omarchy-broadcast/media/away"
+  readonly property string awayUserDir: "/home/u/Pictures/omarchy-broadcast/away"
   function awayListLines() {
     var items = [
       { path: awayBundledDir() + "/0.jpg", label: "Be right back", bundled: true, media_type: "image", width: 480, height: 270, duration_ms: 0, poster: "" },
@@ -4615,8 +4733,9 @@ ShellRoot {
       return has("config set -- effect.fallback_image " + brb) && settled() && row().rawPath === brb
     }, 8000)
     h.step("away: listed, picked, set, and the dialog back", function() {
-      h.eq("the three commands, in order", JSON.stringify(args().filter(function(a) { return a.indexOf("--json") < 0 || a === "media list away --json" })), JSON.stringify([
+      h.eq("the four commands, in order", JSON.stringify(args().filter(function(a) { return a.indexOf("--json") < 0 || a === "media list away --json" })), JSON.stringify([
         "media list away --json",
+        "omarchy-menu-images --print-rows --show-labels " + awayBundledDir() + " " + awayUserDir,
         "omarchy-menu-images --show-labels " + awayBundledDir() + " " + awayUserDir,
         "config set -- effect.fallback_image " + brb]))
       h.eq("shown again", D().suspended, false)
@@ -4639,7 +4758,7 @@ ShellRoot {
       h.markLog()
       h.notes.steps = S().mediaSteps
       h.check("started", D().activateAway(0))
-    }, function() { return S().mediaSteps === h.notes.steps + 2 && settled() }, 6000)
+    }, function() { return S().mediaSteps === h.notes.steps + 3 && settled() }, 6000)
     h.step("away: refused, said on the dialog's status line", function() {
       h.eq("nothing set", args().filter(function(a) { return a.indexOf("config set") === 0 }).length, 0)
       h.eq("the dialog's error", S().setupError, h.model.GALLERY_REFUSED_TEXT)

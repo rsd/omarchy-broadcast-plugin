@@ -17,8 +17,10 @@ import "Model.js" as Model
 // Reset order), Backends (the backend profile and each stage's pin), Daemon
 // (the daemon's configuration, drawn from its schema by row type),
 // Backgrounds (from interface revision 15: how many backgrounds come
-// bundled, then the user's own, each with its thumbnail (a video's poster
-// and badge) and Remove, pressed twice to confirm)
+// bundled, the folder the user's own are kept in, then those, each with its
+// thumbnail (a video's poster and badge) and Remove, pressed twice to
+// confirm; from revision 19 a video the CPU path cannot play also shows the
+// command that converts it, selectable, with a Copy button)
 // and Diagnostics (read-only). One section is shown at a time.
 //
 // From interface revision 17 the Daemon section draws the away image's row
@@ -126,6 +128,8 @@ Item {
   // The last command copied from Diagnostics, for its "Copied" line; how
   // many copies were made (read by the test harness).
   property string copiedText: ""
+  // The text edit that made the last copy (a Backgrounds entry's "Copied").
+  property var copiedEdit: null
   property int copies: 0
 
   // ---- the keyboard cursor (Model.setupStops) ----------------------------------
@@ -190,6 +194,7 @@ Item {
     root.cursorIndex = root.sectionWords.indexOf(root.section)
     root.confirmRemove = ""
     root.copiedText = ""
+    root.copiedEdit = null
     contentFlick.contentY = 0
     root.pendingFocus = payload.focus
     if (payload.focus !== "") {
@@ -253,6 +258,7 @@ Item {
     root.choiceCursor = -1
     root.confirmRemove = ""
     root.copiedText = ""
+    root.copiedEdit = null
     contentFlick.contentY = 0
     if (root.cursorActive) root.cursorIndex = root.sectionWords.indexOf(next)
   }
@@ -346,6 +352,7 @@ Item {
     else if (stop.kind === "stage") moveStage(stop.index, root.stageButton === 1 ? 1 : -1)
     else if (stop.kind === "order-reset") Daemon.resetOrder()
     else if (stop.kind === "media-remove") pressRemove(stop.index)
+    else if (stop.kind === "media-copy") copyConvert(stop.index)
     else if (stop.kind === "config") {
       var row = Model.configViewRow(root.configView, stop.index)
       if (!row) return
@@ -414,6 +421,12 @@ Item {
     return press.remove ? Daemon.removeMedia(row.path) : true
   }
 
+  // The Copy button of a Backgrounds row's convert command.
+  function copyConvert(index) {
+    var entry = mediaRepeater.itemAt(index)
+    return entry !== null && entry.copyConvert()
+  }
+
   function stepConfig(row, direction) {
     var value = Model.configNudge(Model.findConfigRow(Daemon.setup.config, row.id), direction)
     return value !== null && Daemon.setConfig(row.id, value)
@@ -442,6 +455,7 @@ Item {
     if (!edit || edit.selectedText === "") return false
     edit.copy()
     root.copiedText = edit.selectedText
+    root.copiedEdit = edit
     root.copies++
     return true
   }
@@ -454,7 +468,7 @@ Item {
     else if (stop.kind === "stage") item = stageRepeater.itemAt(stop.index)
     else if (stop.kind === "order-reset") item = resetOrderButton
     else if (stop.kind === "config") item = findConfigItem(stop.index)
-    else if (stop.kind === "media-remove") item = mediaRepeater.itemAt(stop.index)
+    else if (stop.kind === "media-remove" || stop.kind === "media-copy") item = mediaRepeater.itemAt(stop.index)
     if (!item) return
     Qt.callLater(function() {
       if (!item) return
@@ -1389,82 +1403,171 @@ Item {
               visible: root.section === "backgrounds" && root.mediaView.bundledText !== ""
 
               Note { objectName: "backgroundsBundled"; text: root.mediaView.bundledText }
+              Note { objectName: "backgroundsFolder"; text: root.mediaView.folderText }
+              // The folder's path on a line of its own, broken anywhere (a
+              // long path has no spaces to wrap at), as the panel does for
+              // the path of a failure; plain text, shown as the daemon
+              // reports it.
+              Note { objectName: "backgroundsFolderPath"; text: root.mediaView.folderPath; wrapMode: Text.WrapAnywhere }
+              Note { objectName: "backgroundsVideoFolderPath"; text: root.mediaView.videoFolderPath; wrapMode: Text.WrapAnywhere }
               // The panel's Add... is importing a file (read again at its end).
               Note { objectName: "backgroundsBusy"; text: root.mediaView.busyText; visible: text !== "" }
 
               Repeater {
                 id: mediaRepeater
                 model: root.mediaView.rows
-                delegate: CursorSurface {
-                  id: mediaRow
+                delegate: Column {
+                  id: mediaEntry
                   required property var modelData
                   required property int index
-                  objectName: "mediaRow-" + index
+                  objectName: "mediaEntry-" + index
                   width: parent ? parent.width : 0
-                  implicitHeight: Math.max(mediaThumb.height, mediaText.implicitHeight, mediaRemove.implicitHeight) + Style.spacing.controlPaddingY * 2
-                  // The cursor is drawn on the button, not the row.
-                  hasCursor: false
-                  foreground: root.foreground
-                  accent: root.accent
-                  Accessible.role: Accessible.ListItem
-                  Accessible.name: modelData.label
-                  Accessible.description: modelData.sizeText
+                  spacing: Style.space(4)
 
-                  MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onEntered: root.setCursor("media-remove", mediaRow.index)
+                  // The Copy button of the convert command (also the
+                  // cursor's Enter): all of it selected, copied at once.
+                  function copyConvert() {
+                    convertEdit.selectAll()
+                    convertTimer.stop()
+                    return root.copySelection(convertEdit)
                   }
-                  MediaThumbnail {
-                    id: mediaThumb
-                    objectName: "mediaThumb-" + mediaRow.index
-                    x: Style.spacing.controlPaddingX
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(48)
-                    name: mediaRow.modelData.label
-                    // Only a checked path's URL (the image, or a video's
-                    // poster), only while the section is drawn.
-                    source: root.shown && root.section === "backgrounds" ? mediaRow.modelData.source : ""
-                    video: mediaRow.modelData.video
-                    fill: root.hoverFill
-                    faint: root.dim
-                    fontFamily: root.fontFamily
-                  }
-                  Column {
-                    id: mediaText
-                    x: mediaThumb.x + mediaThumb.width + Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - x - Style.spacing.controlPaddingX - mediaRemove.width - Style.space(12)
-                    spacing: Style.space(2)
-                    Text {
-                      objectName: "mediaLabel-" + mediaRow.index
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideMiddle
-                      text: mediaRow.modelData.label
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                    }
-                    Note { objectName: "mediaSize-" + mediaRow.index; text: mediaRow.modelData.sizeText; font.pixelSize: Style.font.caption }
-                  }
-                  Button {
-                    id: mediaRemove
-                    objectName: "mediaRemove-" + mediaRow.index
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.spacing.controlPaddingX
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: mediaRow.modelData.confirming ? Model.MEDIA_CONFIRM_LABEL : Model.MEDIA_REMOVE_LABEL
-                    bordered: true
-                    opacity: Daemon.setupBusy ? root.greyedOpacity : 1.0
-                    hasCursor: root.hasCursor("media-remove", mediaRow.index)
-                    foreground: mediaRow.modelData.confirming ? Commons.Color.urgent : root.foreground
-                    background: Commons.Color.background
+
+                  CursorSurface {
+                    id: mediaRow
+                    readonly property var modelData: mediaEntry.modelData
+                    readonly property int index: mediaEntry.index
+                    objectName: "mediaRow-" + index
+                    width: parent ? parent.width : 0
+                    implicitHeight: Math.max(mediaThumb.height, mediaText.implicitHeight, mediaRemove.implicitHeight) + Style.spacing.controlPaddingY * 2
+                    // The cursor is drawn on the button, not the row.
+                    hasCursor: false
+                    foreground: root.foreground
                     accent: root.accent
-                    fontFamily: root.fontFamily
-                    Accessible.name: (mediaRow.modelData.confirming ? Model.MEDIA_CONFIRM_LABEL : Model.MEDIA_REMOVE_LABEL) + " " + mediaRow.modelData.label
-                    onHovered: function(on) { if (on) root.setCursor("media-remove", mediaRow.index) }
-                    onClicked: root.pressRemove(mediaRow.index)
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: modelData.label
+                    Accessible.description: modelData.sizeText
+
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      onEntered: root.setCursor("media-remove", mediaRow.index)
+                    }
+                    MediaThumbnail {
+                      id: mediaThumb
+                      objectName: "mediaThumb-" + mediaRow.index
+                      x: Style.spacing.controlPaddingX
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(48)
+                      name: mediaRow.modelData.label
+                      // Only a checked path's URL (the image, or a video's
+                      // poster), only while the section is drawn.
+                      source: root.shown && root.section === "backgrounds" ? mediaRow.modelData.source : ""
+                      video: mediaRow.modelData.video
+                      fill: root.hoverFill
+                      faint: root.dim
+                      fontFamily: root.fontFamily
+                    }
+                    Column {
+                      id: mediaText
+                      x: mediaThumb.x + mediaThumb.width + Style.space(10)
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: parent.width - x - Style.spacing.controlPaddingX - mediaRemove.width - Style.space(12)
+                      spacing: Style.space(2)
+                      Text {
+                        objectName: "mediaLabel-" + mediaRow.index
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        elide: Text.ElideMiddle
+                        text: mediaRow.modelData.label
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+                      Note { objectName: "mediaSize-" + mediaRow.index; text: mediaRow.modelData.sizeText; font.pixelSize: Style.font.caption }
+                    }
+                    Button {
+                      id: mediaRemove
+                      objectName: "mediaRemove-" + mediaRow.index
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.spacing.controlPaddingX
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: mediaRow.modelData.confirming ? Model.MEDIA_CONFIRM_LABEL : Model.MEDIA_REMOVE_LABEL
+                      bordered: true
+                      opacity: Daemon.setupBusy ? root.greyedOpacity : 1.0
+                      hasCursor: root.hasCursor("media-remove", mediaRow.index)
+                      foreground: mediaRow.modelData.confirming ? Commons.Color.urgent : root.foreground
+                      background: Commons.Color.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      Accessible.name: (mediaRow.modelData.confirming ? Model.MEDIA_CONFIRM_LABEL : Model.MEDIA_REMOVE_LABEL) + " " + mediaRow.modelData.label
+                      onHovered: function(on) { if (on) root.setCursor("media-remove", mediaRow.index) }
+                      onClicked: root.pressRemove(mediaRow.index)
+                    }
+                  }
+
+                  // A video the CPU path cannot play (the daemon's
+                  // convert_command): how to convert it, the command in a
+                  // selectable text (selecting copies it, as in Diagnostics)
+                  // and a Copy button, which has a stop of its own.
+                  Column {
+                    id: convertBlock
+                    objectName: "mediaConvert-" + mediaEntry.index
+                    // Under the row's name and size, not the section margin.
+                    x: mediaThumb.x + mediaThumb.width + Style.space(10)
+                    width: parent.width - x
+                    bottomPadding: Style.space(6)
+                    spacing: Style.space(4)
+                    visible: mediaEntry.modelData.convertCommand !== ""
+
+                    Note { objectName: "mediaConvertNote-" + mediaEntry.index; text: convertBlock.visible ? Model.CONVERT_NOTE_TEXT : "" }
+                    TextEdit {
+                      id: convertEdit
+                      objectName: "mediaConvertCommand-" + mediaEntry.index
+                      textFormat: TextEdit.PlainText
+                      width: parent.width
+                      readOnly: true
+                      selectByMouse: true
+                      activeFocusOnPress: false
+                      persistentSelection: true
+                      wrapMode: TextEdit.WrapAnywhere
+                      text: mediaEntry.modelData.convertCommand
+                      color: root.foreground
+                      selectionColor: root.accent
+                      selectedTextColor: Commons.Color.menu.background
+                      font.family: "monospace" // intended: this is a command
+                      font.pixelSize: Style.font.bodySmall
+                      onSelectedTextChanged: if (selectedText !== "") convertTimer.restart()
+
+                      Timer {
+                        id: convertTimer
+                        interval: 300
+                        repeat: false
+                        onTriggered: root.copySelection(convertEdit)
+                      }
+                    }
+                    Row {
+                      spacing: Style.space(10)
+                      Button {
+                        id: convertCopy
+                        objectName: "mediaCopy-" + mediaEntry.index
+                        text: Model.CONVERT_COPY_LABEL
+                        bordered: true
+                        hasCursor: root.hasCursor("media-copy", mediaEntry.index)
+                        foreground: root.foreground
+                        background: Commons.Color.background
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        Accessible.name: Model.CONVERT_COPY_LABEL + " the command that converts " + mediaEntry.modelData.label
+                        onHovered: function(on) { if (on) root.setCursor("media-copy", mediaEntry.index) }
+                        onClicked: mediaEntry.copyConvert()
+                      }
+                      Note {
+                        objectName: "mediaCopied-" + mediaEntry.index
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: implicitWidth
+                        text: root.copiedText !== "" && root.copiedEdit === convertEdit ? Model.CONVERT_COPIED_TEXT : ""
+                      }
+                    }
                   }
                 }
               }

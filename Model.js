@@ -92,6 +92,11 @@ var MEDIA_REVISION = 15
 // Effect tab's Away image row (its Setup... button). Below it the dialog
 // keeps the read-only image row and the tab has no such row.
 var PLACEHOLDER_REVISION = 17
+// The interface revision from which a video's `media_item` line says whether
+// the CPU path can play it (`cpu_ready`) and, when it cannot, the ffmpeg
+// command that converts it (`convert_command`): the setup dialog's
+// Backgrounds rows show it. Below it the keys are never read.
+var VIDEO_CONVERT_REVISION = 19
 // The largest interface revision the producer can print (a u32).
 var REVISION_MAX = 4294967295
 
@@ -4109,7 +4114,8 @@ function scrollTarget(contentY, contentHeight, viewHeight, delta) {
 //             down, Enter moves; Ctrl+Up/Down moves at once), then Reset
 //             order when offered
 //   backends, daemon  each interactive config row (index: its `stop`)
-//   backgrounds  each of the user's own backgrounds (its Remove button)
+//   backgrounds  each of the user's own backgrounds (its Remove button, then
+//             the Copy button of the convert command it shows, if any)
 //   diagnostics  nothing (it only shows)
 // `view` is the shown section's view, as drawn.
 function setupStops(section, view, sections) {
@@ -4127,7 +4133,10 @@ function setupStops(section, view, sections) {
     for (var s = 0; s < view.stops; s++) stops.push({ kind: "config", index: s })
   } else if (shown === "backgrounds") {
     var mrows = Array.isArray(view.rows) ? view.rows : []
-    for (var b = 0; b < mrows.length && b < MEDIA_ITEM_CAP; b++) stops.push({ kind: "media-remove", index: b })
+    for (var b = 0; b < mrows.length && b < MEDIA_ITEM_CAP; b++) {
+      stops.push({ kind: "media-remove", index: b })
+      if (typeof mrows[b].convertCommand === "string" && mrows[b].convertCommand !== "") stops.push({ kind: "media-copy", index: b })
+    }
   }
   return stops
 }
@@ -4191,6 +4200,18 @@ var POSTER_DIR_SUFFIX = "/omarchy-broadcast/posters"
 // of M backgrounds" (each row is a decoded thumbnail).
 var MEDIA_ROW_CAP = 64
 var MEDIA_VIDEO_WORD = "video"
+// The setup dialog's note over the folder path(s) of the user's own backgrounds
+// (one folder, or the pictures and the videos folder).
+var MEDIA_FOLDER_NOTE_TEXT = "Your own backgrounds are kept in this folder; files you copy there appear here:"
+var MEDIA_FOLDERS_NOTE_TEXT = "Your own backgrounds are kept in these folders; files you copy there appear here:"
+// Under the Backgrounds row of a video the CPU path cannot play: the note,
+// the command (as the daemon prints it, a monospace text one can select)
+// and the button that copies it. The command is at most this many characters
+// (three paths' worth); a longer one is dropped, never cut.
+var CONVERT_NOTE_TEXT = "Without an NVIDIA GPU this video shows as a still. To play it without one, convert it in a terminal; the copy lands in your videos folder:"
+var CONVERT_COPY_LABEL = "Copy"
+var CONVERT_COPIED_TEXT = "Copied"
+var MEDIA_COMMAND_CAP = IMAGE_PATH_CAP * 3
 var MEDIA_ADD_TITLE = "Add a background"
 var GALLERY_TOOL = "omarchy-menu-images"
 var CHOOSER_TOOL = "omarchy-file-select"
@@ -4225,6 +4246,12 @@ var CHOOSER_WAITING_TEXT = "Waiting for the file chooser…"
 var MEDIA_IMPORTING_TEXT = "Adding the background…"
 var MEDIA_OLD_DAEMON = "The daemon needs updating for the background gallery (D-Bus interface revision 15)."
 var MEDIA_EMPTY_TEXT = "You have not added any backgrounds yet. Add one with Add… in the panel's Effect tab."
+// Gallery... / Choose... with nothing to pick (see mediaStepEnd): the gallery
+// lists no item, or the picker would show none of them.
+var GALLERY_NONE_TEXT = "No backgrounds yet. Add one with Add…"
+var AWAY_GALLERY_NONE_TEXT = "No away images yet. Add one with Add…"
+var GALLERY_NO_ROWS_TEXT = "The picker cannot show any of the gallery's backgrounds. Add another with Add…"
+var AWAY_GALLERY_NO_ROWS_TEXT = "The picker cannot show any of the gallery's away images. Add another with Add…"
 // mdi-image, the glyph the shell's own panels draw for an image file: the
 // thumbnail's placeholder.
 var GLYPH_IMAGE = String.fromCodePoint(0xF02E9)
@@ -4358,18 +4385,31 @@ function mediaSizeText(w, h, video, durationMs) {
   return parts.join(", ")
 }
 
+// A video's convert_command as a display and copy text: a string of 1 to
+// MEDIA_COMMAND_CAP characters with no control character (a newline would run
+// a second command when pasted) and no character that reorders or hides text
+// (the sanitize set); "" for anything else, nothing is cut.
+function mediaConvertCommand(value) {
+  if (typeof value !== "string" || value.trim() === "" || value.length > MEDIA_COMMAND_CAP) return ""
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f\ufeff]/.test(value)) return ""
+  return value
+}
+
 // An item of a `media` line -> { path, label, bundled, width, height,
-// video, durationMs, poster, sizeText }, or null: a mediaPath directly in
-// its own directory (the bundled one for a bundled item, else the user's).
+// video, durationMs, poster, sizeText, convertCommand }, or null: a mediaPath directly in
+// its own directory (the bundled one for a bundled item, else the user's
+// pictures folder or videos folder).
 // `label` is the daemon's, sanitised, else the file's stem; `video` whether
 // `media_type` is "video" (any other value reads as a still image);
 // `poster` a video's checked poster path (mediaPoster over `posterDir`),
-// "" for a still or none.
-function mediaItem(o, bundledDir, userDir, posterDir) {
+// "" for a still or none; `convertCommand` the checked convert_command of a
+// video that is not `cpu_ready` (mediaConvertCommand), "" for any other item.
+function mediaItem(o, bundledDir, userDir, videoDir, posterDir) {
   if (!isPlainObject(o)) return null
   var path = mediaPath(o.path)
   var bundled = o.bundled === true
-  if (path === "" || !mediaInDir(path, bundled ? bundledDir : userDir)) return null
+  if (path === "") return null
+  if (bundled ? !mediaInDir(path, bundledDir) : !mediaInDir(path, userDir) && !mediaInDir(path, videoDir)) return null
   var label = sanitize(o.label, MEDIA_LABEL_CAP)
   if (label === "") label = mediaStem(path)
   var w = mediaDimension(o.width)
@@ -4377,7 +4417,8 @@ function mediaItem(o, bundledDir, userDir, posterDir) {
   var video = o.media_type === MEDIA_TYPE_VIDEO
   var dur = video ? mediaDuration(o.duration_ms) : 0
   return { path: path, label: label, bundled: bundled, width: w, height: hgt, video: video, durationMs: dur,
-           poster: video ? mediaPoster(o.poster, posterDir) : "", sizeText: mediaSizeText(w, hgt, video, dur) }
+           poster: video ? mediaPoster(o.poster, posterDir) : "", sizeText: mediaSizeText(w, hgt, video, dur),
+           convertCommand: video && o.cpu_ready === false ? mediaConvertCommand(o.convert_command) : "" }
 }
 
 // A read gallery item's thumbnail: { source, video }, a still's own file or
@@ -4414,9 +4455,10 @@ function mediaKindOf(kind) {
 }
 
 // One stdout line of `media list <kind> --json` (`kind`: mediaKindOf) -> { kind, ... }:
-//   media        { header: { bundledDir, userDir, count, truncated } }: the
+//   media        { header: { bundledDir, userDir, videoDir, count, truncated } }: the
 //                header; a directory is "" when the producer left it out
-//                (too long) or it is unusable, and `count` is the number of
+//                (too long) or it is unusable (`video_dir` is also "" when
+//                absent: an older daemon, the away gallery), and `count` is the number of
 //                item lines that follow (0..MEDIA_ITEM_CAP)
 //   item         { item }: a `media_item` line's object, checked against the
 //                header's directories by readMedia (mediaItem)
@@ -4442,19 +4484,19 @@ function parseMediaLine(text, kind) {
   var n = m.items
   if (typeof n !== "number" || !isFinite(n) || Math.floor(n) !== n || n < 0 || n > MEDIA_ITEM_CAP) return { kind: "invalid" }
   if (typeof m.bundled_dir !== "string" || typeof m.user_dir !== "string") return { kind: "invalid" }
-  return { kind: "media", header: { bundledDir: mediaDir(m.bundled_dir), userDir: mediaDir(m.user_dir), count: n,
-                                    truncated: m.items_truncated === true } }
+  return { kind: "media", header: { bundledDir: mediaDir(m.bundled_dir), userDir: mediaDir(m.user_dir),
+                                    videoDir: mediaDir(m.video_dir), count: n, truncated: m.items_truncated === true } }
 }
 
 // The gallery read (SETUP_READS "media", and the Gallery... flow's first
-// step; `kind` the gallery's, mediaKindOf): { ok: true, bundledDir, userDir, items, bundledCount, truncated },
+// step; `kind` the gallery's, mediaKindOf): { ok: true, bundledDir, userDir, videoDir, items, bundledCount, truncated },
 // or readFailed with the error line, the exit status or a fallback. The
 // header comes first and exactly as many item lines as it counts follow it,
 // nothing else: an item line before it, a second header, a line of another
 // kind after it, or fewer or more items than counted, and the read is
 // incomplete (MEDIA_INCOMPLETE_TEXT). An item outside its own directory
 // (mediaItem; every item of a directory that is "") is dropped, and counts
-// as truncation.
+// as truncation. The away gallery has no videos folder: its `videoDir` is "".
 function readMedia(lines, code, stderrText, kind, posterDir) {
   var away = mediaKindOf(kind) === AWAY_KIND
   var incomplete = away ? AWAY_INCOMPLETE_TEXT : MEDIA_INCOMPLETE_TEXT
@@ -4477,10 +4519,10 @@ function readMedia(lines, code, stderrText, kind, posterDir) {
   }
   if (header === null) return readFailure({ error: error }, code, stderrText, away ? "omarchy-broadcast printed no away image gallery" : "omarchy-broadcast printed no background gallery")
   if (src.length > MEDIA_ITEM_CAP + 2 || raw.length !== header.count) return readFailed(incomplete)
-  var out = { ok: true, bundledDir: header.bundledDir, userDir: header.userDir, posterDir: mediaDir(posterDir),
-              items: [], bundledCount: 0, truncated: header.truncated }
+  var out = { ok: true, bundledDir: header.bundledDir, userDir: header.userDir, videoDir: away ? "" : header.videoDir,
+              posterDir: mediaDir(posterDir), items: [], bundledCount: 0, truncated: header.truncated }
   for (var k = 0; k < raw.length; k++) {
-    var it = mediaItem(raw[k], header.bundledDir, header.userDir, out.posterDir)
+    var it = mediaItem(raw[k], out.bundledDir, out.userDir, out.videoDir, out.posterDir)
     if (it === null) { out.truncated = true; continue }
     if (it.bundled) out.bundledCount++
     out.items.push(it)
@@ -4520,19 +4562,63 @@ function mediaRemoveArgv(cli, path) {
   return cliUsable(cli) && p !== "" ? [cli, "media", "remove", p] : null
 }
 
-// The shell's image picker over the gallery's directories (the two, or the
-// one the producer did not leave out), the image in force preselected when
+// The shell's image picker over the gallery's directories (the bundled, the
+// user's pictures and videos folders, those the producer did not leave out), the image in force preselected when
 // there is one.
 function galleryArgv(tool, media, current) {
-  if (!cliUsable(tool) || !isPlainObject(media) || media.ok !== true) return null
-  // A directory the producer left out ("") is not offered; with neither,
-  // there is nothing to pick from.
-  var dirs = [mediaDir(media.bundledDir), mediaDir(media.userDir)].filter(function(d) { return d !== "" })
-  if (dirs.length === 0) return null
+  var dirs = galleryDirs(media)
+  if (!cliUsable(tool) || dirs.length === 0) return null
   var argv = [tool, "--show-labels"]
   var sel = mediaPath(current)
   if (sel !== "") argv.push("--selected", sel)
   return argv.concat(dirs)
+}
+
+// A read gallery's directories the picker is given, in the order bundled,
+// pictures, videos: a directory the producer left out ("") is not offered;
+// with none (or no gallery read), there is nothing to pick from: [].
+function galleryDirs(media) {
+  if (!isPlainObject(media) || media.ok !== true) return []
+  return [mediaDir(media.bundledDir), mediaDir(media.userDir), mediaDir(media.videoDir)].filter(function(d) { return d !== "" })
+}
+
+// A read gallery's own (not bundled) folders, pictures first: the ones the
+// producer did not leave out.
+function galleryOwnDirs(media) {
+  if (!isPlainObject(media)) return []
+  return [mediaDir(media.userDir), mediaDir(media.videoDir)].filter(function(d) { return d !== "" })
+}
+
+// Whether `path` is a file directly in one of the read gallery's own folders.
+function mediaInOwnDirs(path, media) {
+  var dirs = galleryOwnDirs(media)
+  for (var i = 0; i < dirs.length; i++) if (mediaInDir(path, dirs[i])) return true
+  return false
+}
+
+// The picker's rows, as it would open them (step "rows"): the same
+// directories, `--print-rows` printing `image<TAB>thumbnail` lines and
+// exiting before the shell's picker opens.
+function galleryRowsArgv(tool, media) {
+  var dirs = galleryDirs(media)
+  return !cliUsable(tool) || dirs.length === 0 ? null : [tool, "--print-rows", "--show-labels"].concat(dirs)
+}
+
+// Whether the rows the picker printed (`image<TAB>thumbnail`, one per line;
+// an empty line when it has none) hold at least one with a thumbnail whose
+// image is a file directly in one of the gallery's directories.
+function galleryHasRow(lines, media) {
+  var dirs = galleryDirs(media)
+  if (!Array.isArray(lines)) return false
+  for (var i = 0; i < lines.length && i < MEDIA_ITEM_CAP + 2; i++) {
+    var line = lines[i]
+    if (typeof line !== "string" || line.length > LINE_CAP) continue
+    var tab = line.indexOf("\t")
+    if (tab < 0 || tab === line.length - 1) continue
+    var image = line.slice(0, tab)
+    for (var d = 0; d < dirs.length; d++) if (mediaInDir(image, dirs[d])) return true
+  }
+  return false
 }
 
 function fileSelectArgv(tool, kind) {
@@ -4582,8 +4668,10 @@ function toolsFromLines(lines) {
 // ---- the Gallery... and Add... flows, one step at a time
 //
 // A flow is { kind: "gallery" | "add", step, media, path, gallery }:
-// "gallery" first lists the gallery (step "list", the CLI), then runs the
-// picker over its two directories (step "pick"); "add" runs the file
+// "gallery" first lists the gallery (step "list", the CLI), then asks the
+// picker tool for the rows it would show over its directories (step
+// "rows", `--print-rows`), then runs the picker itself (step "pick"), only
+// when it has a row; "add" runs the file
 // chooser (step "pick") and, for a background, then imports the chosen
 // file (step "import", the CLI, `path` the file): converting an animated
 // image or a video can take a while, and as a step it runs beside the
@@ -4616,6 +4704,7 @@ function mediaStepArgv(flow, cli, tools, current, record) {
   if (flow.kind === "add" && flow.step === "import")
     return flowGallery(flow) === MEDIA_KIND && backgroundRowShown(record) ? mediaImportArgv(cli, flow.path) : null
   if (flow.kind === "gallery" && flow.step === "list") return t.gallery !== "" ? mediaListArgv(cli, flowGallery(flow)) : null
+  if (flow.kind === "gallery" && flow.step === "rows") return galleryRowsArgv(t.gallery, flow.media)
   if (flow.kind === "gallery" && flow.step === "pick") return galleryArgv(t.gallery, flow.media, current)
   if (flow.kind === "add" && flow.step === "pick") return fileSelectArgv(t.chooser, flowGallery(flow))
   return null
@@ -4653,8 +4742,25 @@ function mediaStepEnd(flow, result) {
     if (r.rejected === true) { out.error = MEDIA_OVERLONG_TEXT; return out }
     var media = readMedia(Array.isArray(r.list) ? r.list : [], r.code, r.stderr, gallery, r.posterDir)
     if (media.ok !== true) { out.error = media.error; return out }
-    if (mediaDir(media.bundledDir) === "" && mediaDir(media.userDir) === "") { out.error = GALLERY_NO_FOLDER_TEXT; return out }
-    out.flow = { kind: "gallery", step: "pick", media: media, gallery: gallery }
+    if (galleryDirs(media).length === 0) { out.error = GALLERY_NO_FOLDER_TEXT; return out }
+    // Nothing listed: nothing to pick, and the picker is not run (see "rows").
+    if (media.items.length === 0) { out.error = away ? AWAY_GALLERY_NONE_TEXT : GALLERY_NONE_TEXT; return out }
+    out.flow = { kind: "gallery", step: "rows", media: media, gallery: gallery }
+    return out
+  }
+  if (flow.kind === "gallery" && flow.step === "rows") {
+    if (r.started !== true || r.code !== 0) {
+      out.error = GALLERY_FAILED_TEXT + (r.started === true && detail !== "" ? ": " + detail : "")
+      return out
+    }
+    // Never run the picker without a row to show. When omarchy-menu-images
+    // builds no rows (it drops a row whose thumbnail fails: a damaged
+    // picture, a video its thumbnailer rejects, a lock that timed out),
+    // Omarchy's picker falls back to the desktop theme's backgrounds, which
+    // must never be shown or chosen from here: the gallery and the desktop
+    // wallpapers are unrelated.
+    if (!galleryHasRow(r.list, flow.media)) { out.error = away ? AWAY_GALLERY_NO_ROWS_TEXT : GALLERY_NO_ROWS_TEXT; return out }
+    out.flow = { kind: "gallery", step: "pick", media: flow.media, gallery: gallery }
     return out
   }
   if (flow.kind === "gallery" && flow.step === "pick") {
@@ -4750,17 +4856,24 @@ function backgroundHint(view, flow) {
 
 // ---- the setup dialog's Backgrounds section
 
-// { hint, bundledText, rows, emptyText, truncation, busyText }; a row (one
+// { hint, bundledText, folderText, folderPath, videoFolderPath, rows, emptyText, truncation, busyText }; a row (one
 // of the user's own items, at most MEDIA_ROW_CAP of them; past it
 // `truncation` says "Showing N of M backgrounds"): { path, label, sizeText,
-// source, video, confirming, index } (`source` and `video` its thumbnail's,
+// source, video, confirming, index, convertCommand } (`source` and `video` its thumbnail's,
 // mediaItemThumb of the first item of its path, the gallery indexed once).
+// `folderText` says that the user's own backgrounds are kept in a folder (or,
+// with a videos folder too, in these folders) and `folderPath` and
+// `videoFolderPath` which (the listed `userDir` and `videoDir`, checked paths
+// shown as plain text), "" while unknown. `convertCommand` is the command that
+// converts a video the CPU path cannot play ("" for none, and always below
+// VIDEO_CONVERT_REVISION): the dialog shows it, with CONVERT_NOTE_TEXT, under
+// the row.
 // `emptyText` is said under the bundled count when the user has none. `confirming` is the
 // path whose Remove was pressed once (the second press removes it).
 // `busyText` is MEDIA_IMPORTING_TEXT while `importing` (the panel's Add...
 // imports a file; the section is read again when it ends).
 function mediaSectionView(setup, record, confirming, importing) {
-  var out = { hint: "", bundledText: "", rows: [], emptyText: "", truncation: "", busyText: "" }
+  var out = { hint: "", bundledText: "", folderText: "", folderPath: "", videoFolderPath: "", rows: [], emptyText: "", truncation: "", busyText: "" }
   var gate = setupGate(record)
   if (!gate.modules) { out.hint = gate.text; return out }
   if (!mediaSupported(record)) { out.hint = MEDIA_OLD_DAEMON; return out }
@@ -4769,6 +4882,18 @@ function mediaSectionView(setup, record, confirming, importing) {
   if (out.hint !== "") return out
   var n = media.bundledCount
   out.bundledText = n === 1 ? "1 bundled background" : n + " bundled backgrounds"
+  var folder = mediaDir(media.userDir)
+  var videoFolder = mediaDir(media.videoDir)
+  if (folder !== "" && videoFolder !== "") {
+    out.folderText = MEDIA_FOLDERS_NOTE_TEXT
+    out.folderPath = folder
+    out.videoFolderPath = videoFolder
+  } else if (folder !== "" || videoFolder !== "") {
+    out.folderText = MEDIA_FOLDER_NOTE_TEXT
+    if (folder !== "") out.folderPath = folder
+    else out.folderPath = videoFolder
+  }
+  var convert = convertSupported(record)
   if (importing === true) out.busyText = MEDIA_IMPORTING_TEXT
   // The first item of each path (what mediaThumb would find), indexed once.
   var byPath = {}
@@ -4779,13 +4904,13 @@ function mediaSectionView(setup, record, confirming, importing) {
   var total = 0
   for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) {
     var it = media.items[i]
-    if (it.bundled || !mediaInDir(it.path, media.userDir)) continue
+    if (it.bundled || !mediaInOwnDirs(it.path, media)) continue
     total++
     if (out.rows.length >= MEDIA_ROW_CAP) continue
     var thumb = mediaItemThumb(byPath[it.path], media.posterDir)
     out.rows.push({ path: it.path, label: it.label, sizeText: it.sizeText, source: thumb.source, video: thumb.video,
                     confirming: typeof confirming === "string" && confirming !== "" && confirming === it.path,
-                    index: out.rows.length })
+                    index: out.rows.length, convertCommand: convert ? it.convertCommand : "" })
   }
   if (out.rows.length === 0) out.emptyText = MEDIA_EMPTY_TEXT
   var notes = []
@@ -4794,6 +4919,12 @@ function mediaSectionView(setup, record, confirming, importing) {
   if (media.truncated) notes.push("The daemon lists more backgrounds than are shown.")
   out.truncation = notes.join(". ")
   return out
+}
+
+// The daemon says which videos the CPU path cannot play and how to convert
+// them: available, at VIDEO_CONVERT_REVISION or later.
+function convertSupported(record) {
+  return available(record) && record.interfaceRevision >= VIDEO_CONVERT_REVISION
 }
 
 // A press of Remove on the row of `path`, given the path pressed before
@@ -4812,7 +4943,7 @@ function mediaUserItem(media, path) {
   if (!isPlainObject(media) || media.ok !== true || !Array.isArray(media.items)) return null
   for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) {
     var it = media.items[i]
-    if (it.path === path && !it.bundled && mediaInDir(it.path, media.userDir)) return it
+    if (it.path === path && !it.bundled && mediaInOwnDirs(it.path, media)) return it
   }
   return null
 }
