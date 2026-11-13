@@ -3954,14 +3954,24 @@ ShellRoot {
   // file-exit, and log their argv to the same log as the CLI.
   readonly property string mediaBundled: "/usr/share/omarchy-broadcast/media/backgrounds"
   readonly property string mediaUser: "/home/u/.local/share/omarchy-broadcast/media/backgrounds"
+  // A video background's poster: the JPEG run-harness.sh puts where the
+  // daemon keeps them.
+  function mediaPosterPath() { return shellRoot.fakeDir + "/cache/omarchy-broadcast/posters/loop.jpg" }
   // `media list background --json`: the header, then one line per item.
-  function mediaListLines(withUser) {
+  // `user`: true for the user's two (office.png, the video loop.webm), else
+  // a list of their names ("office", "loop"; false: none).
+  function mediaListLines(user) {
     var items = [
       { path: mediaBundled + "/aurora.webp", label: "Aurora", bundled: true, media_type: "image", width: 3840, height: 2160, duration_ms: 0, poster: "" },
       { path: mediaBundled + "/dunes.webp", label: "Dunes", bundled: true, media_type: "image", width: 3840, height: 2160, duration_ms: 0, poster: "" }
     ]
-    if (withUser) items.push({ path: mediaUser + "/office.png", label: "office <b>\u202e", bundled: false, media_type: "image",
-                               width: 1920, height: 1080, duration_ms: 0, poster: "" })
+    var own = user === true ? ["office", "loop"] : (Array.isArray(user) ? user : [])
+    if (own.indexOf("office") >= 0)
+      items.push({ path: mediaUser + "/office.png", label: "office <b>\u202e", bundled: false, media_type: "image",
+                   width: 1920, height: 1080, duration_ms: 0, poster: "" })
+    if (own.indexOf("loop") >= 0)
+      items.push({ path: mediaUser + "/loop.webm", label: "loop", bundled: false, media_type: "video",
+                   width: 1920, height: 1080, duration_ms: 12400, poster: mediaPosterPath() })
     var out = [JSON.stringify({ v: 1, type: "media", kind: "background", serial: 1, bundled_dir: mediaBundled, user_dir: mediaUser,
                                 items: items.length, items_truncated: false })]
     for (var i = 0; i < items.length; i++) {
@@ -3970,6 +3980,23 @@ ShellRoot {
       out.push(JSON.stringify(it))
     }
     return out
+  }
+
+  // A MediaThumbnail's placeholder glyph and video badge both inside it and
+  // not overlapping each other.
+  function thumbFits(thumb, what) {
+    var glyph = h.findByName(thumb, thumb.objectName + "Placeholder")
+    var badge = h.findByName(thumb, thumb.objectName + "VideoBadge")
+    var g = glyph.mapToItem(thumb, 0, 0)
+    var b = badge.mapToItem(thumb, 0, 0)
+    var gw = glyph.contentWidth, gh = glyph.contentHeight
+    var gx = g.x + (glyph.width - gw) / 2, gy = g.y + (glyph.height - gh) / 2
+    h.check(what + " badge inside the frame", b.x >= 0 && b.y >= 0 && b.x + badge.width <= thumb.width && b.y + badge.height <= thumb.height,
+            JSON.stringify([b.x, b.y, badge.width, badge.height, thumb.width, thumb.height]))
+    h.check(what + " glyph inside the frame", gx >= 0 && gy >= 0 && gx + gw <= thumb.width && gy + gh <= thumb.height,
+            JSON.stringify([gx, gy, gw, gh, thumb.width, thumb.height]))
+    var apart = b.x >= gx + gw || gx >= b.x + badge.width || b.y >= gy + gh || gy >= b.y + badge.height
+    h.check(what + " glyph and badge apart", apart, JSON.stringify({ glyph: [gx, gy, gw, gh], badge: [b.x, b.y, badge.width, badge.height] }))
   }
 
   function mediaScenario() {
@@ -4188,7 +4215,7 @@ ShellRoot {
     }, function() { return has("media import background /home/u/Pictures/beach day.jpg --select") && idle() }, 6000)
     h.step("media: chosen, then imported and selected", function() {
       h.eq("the two commands", JSON.stringify(args()), JSON.stringify([
-        "omarchy-file-select --title Add a background --extensions png jpg jpeg webp",
+        "omarchy-file-select --title Add a background --extensions png jpg jpeg webp gif apng mp4 m4v mov mkv webm",
         "media import background /home/u/Pictures/beach day.jpg --select"]))
       h.eq("no error", S().commandError, "")
       h.writeFile("file-exit", ["1"])
@@ -4221,10 +4248,117 @@ ShellRoot {
     h.wait(300)
     h.grabStep(function() { return A().popup }, "m2-effect-chooser-failed.png")
 
+    // a slow import (an animated GIF the daemon converts): a step of the
+    // flow, beside the command queue, with the panel back and saying so
+    h.step("media: Add… picks an animated GIF that takes a while", function() {
+      A().close()
+      h.writeFile("file-pick", ["/home/u/Pictures/party.gif"])
+      h.writeFile("file-exit", ["0"])
+      h.writeFile("import-delay", ["3"])
+    }, function() { return h.writerIdle() && !A().opened })
+    h.step("media: Add…, and the import runs", function() {
+      h.markLog()
+      A().open()
+      h.tab(A(), "effect")
+      h.check("started", C().activateBackground(1))
+    }, function() { return S().mediaImporting && A().opened && has("media import background /home/u/Pictures/party.gif --select") }, 6000)
+    h.wait(200)
+    h.step("media: the panel is back while it imports, and says so", function() {
+      h.eq("reopened at the import's start", A().opened, true)
+      h.eq("the hint", h.find(A(), "backgroundHint").text, "Adding the background…")
+      h.eq("the earlier failure cleared", S().commandError, "")
+      h.eq("Gallery… faded", h.find(A(), "backgroundButton-0").opacity < 1, true)
+      h.eq("Add… faded", h.find(A(), "backgroundButton-1").opacity < 1, true)
+      h.check("a press does nothing", !C().activateBackground(0))
+      h.eq("no command queued: an on/off would not wait behind it", S().commandBusy || S().toggleBusy, false)
+    })
+    h.grabStep(function() { return A().popup }, "m2b-effect-importing.png")
+    h.step("media: the import ends", function() {}, function() { return idle() }, 8000)
+    h.step("media: imported, no error, the hint gone", function() {
+      h.eq("the two commands", JSON.stringify(args()), JSON.stringify([
+        "omarchy-file-select --title Add a background --extensions png jpg jpeg webp gif apng mp4 m4v mov mkv webm",
+        "media import background /home/u/Pictures/party.gif --select"]))
+      h.eq("no error", S().commandError, "")
+      h.eq("the hint is gone", h.find(A(), "backgroundHint").visible, false)
+      h.eq("the buttons are back", h.find(A(), "backgroundButton-1").opacity, 1)
+      h.writeFile("import-delay", ["8"])
+      S().mediaWatchdogMs = 1500
+    }, function() { return h.writerIdle() })
+    // an import that never ends: the watchdog stops it
+    h.step("media: Add…, an import that does not end", function() {
+      h.check("started", C().activateBackground(1))
+    }, function() { return S().mediaImporting }, 6000)
+    h.step("media: the watchdog stops the import", function() {}, function() { return idle() }, 8000)
+    h.step("media: said on the failure line", function() {
+      h.eq("the failure line", S().commandError, h.model.MEDIA_IMPORT_TIMEOUT_TEXT)
+      h.eq("seen in the panel", h.find(A(), "commandError").text, h.model.MEDIA_IMPORT_TIMEOUT_TEXT)
+      S().mediaWatchdogMs = h.model.MEDIA_WATCHDOG_MS
+      h.removeFile("import-delay")
+      h.writeFile("stderr", ["omarchy-broadcast: animated images need ffmpeg"])
+      h.writeFile("exit", ["1"])
+    }, function() { return h.writerIdle() })
+    // the daemon refuses it (no ffmpeg): its reason on the failure line
+    h.step("media: Add…, the daemon refuses the file", function() {
+      h.notes.steps = S().mediaSteps
+      h.check("started", C().activateBackground(1))
+    }, function() { return S().mediaSteps === h.notes.steps + 2 && idle() }, 6000)
+    h.step("media: the daemon's reason", function() {
+      h.eq("the failure line", S().commandError, "The daemon refused the request: animated images need ffmpeg")
+      h.removeFile("stderr")
+      h.writeFile("exit", ["0"])
+      h.removeFile("file-pick")
+      h.removeFile("file-exit")
+    }, function() { return h.writerIdle() })
+
+    // a video background: its poster (from the gallery just read) and the badge
+    h.step("media: Gallery… picks the video", function() {
+      h.writeFile("gallery-pick", [mediaUser + "/loop.webm"])
+    }, function() { return h.writerIdle() })
+    h.step("media: Gallery…, the video selected", function() {
+      h.markLog()
+      h.check("started", C().activateBackground(0))
+    }, function() { return has("effect replace --image " + mediaUser + "/loop.webm") && idle() && A().opened }, 6000)
+    h.step("media: the daemon reports the video in force", function() {
+      h.removeFile("gallery-pick")
+      var r = rev(15)
+      r.background_image = mediaUser + "/loop.webm"
+      h.feed([snapshotLine(r)])
+    }, function() { return S().record.backgroundImagePath === mediaUser + "/loop.webm" && h.find(A(), "backgroundImage").status === Image.Ready }, 4000)
+    h.step("media: the poster, badged", function() {
+      h.eq("the gallery read is kept", S().backgroundMedia.items.length, 4)
+      h.eq("the poster's URL", String(h.find(A(), "backgroundImage").source), "file://" + mediaPosterPath())
+      h.eq("the badge", h.find(A(), "backgroundVideoBadge").visible, true)
+      h.eq("no placeholder", h.find(A(), "backgroundPlaceholder").visible, false)
+      h.eq("its name", h.find(A(), "backgroundLabel").text, "loop")
+    })
+    h.grabStep(function() { return A().popup }, "m2c-effect-video-background.png")
+    h.step("media: a video the gallery does not list", function() {
+      var r = rev(15)
+      r.background_image = "/home/u/Videos/talk.mp4"
+      h.feed([snapshotLine(r)])
+    }, function() { return S().record.backgroundImagePath === "/home/u/Videos/talk.mp4" })
+    h.wait(200)
+    h.step("media: the poster-less video's thumbnail: glyph and badge apart", function() {
+      thumbFits(h.find(A(), "background"), "the panel's")
+      h.eq("its accessible name says video", h.find(A(), "background").Accessible.name, "Background image: talk, video")
+    })
+    h.grabStep(function() { return h.find(A(), "background") }, "m2d-panel-video-no-poster.png")
+    h.step("media: badged by its name, the placeholder glyph", function() {
+      h.eq("nothing loaded", String(h.find(A(), "backgroundImage").source), "")
+      h.eq("the placeholder", h.find(A(), "backgroundPlaceholder").visible, true)
+      h.eq("the badge", h.find(A(), "backgroundVideoBadge").visible, true)
+      h.eq("the shell's video-file glyph", h.find(A(), "backgroundVideoBadge").children[0].text, h.model.GLYPH_FILE_VIDEO)
+      h.feed([snapshotLine(rev(15))])
+    }, function() { return S().record.backgroundImagePath === current })
+    h.step("media: a still again: no badge", function() {}, function() { return h.find(A(), "backgroundImage").status === Image.Ready })
+    h.step("media: the badge is gone", function() {
+      h.eq("no badge", h.find(A(), "backgroundVideoBadge").visible, false)
+    })
+
     // the setup dialog's Backgrounds section
     h.step("media: the setup dialog", function() {
       A().close()
-      h.writeFile("media-list-removed", mediaListLines(false))
+      h.writeFile("media-list-removed", mediaListLines(["loop"]))
       var comp = Qt.createComponent("file://" + shellRoot.pluginPath + "/SetupDialog.qml")
       h.notes.mediaDialog = comp.createObject(window.contentItem, { width: 900, height: 760 })
       D().shell = fakeShell
@@ -4240,11 +4374,35 @@ ShellRoot {
       h.eq("shown", D().section, "backgrounds")
       h.eq("the section", dfind("backgroundsSection").visible, true)
       h.eq("the bundled count", dfind("backgroundsBundled").text, "2 bundled backgrounds")
-      h.eq("one of the user's own", D().mediaView.rows.length, 1)
+      h.eq("two of the user's own", D().mediaView.rows.length, 2)
       h.eq("its name, sanitised", dfind("mediaLabel-0").text, "office b")
       h.eq("Remove", dfind("mediaRemove-0").text, "Remove")
-    })
+      h.eq("the still's size", dfind("mediaSize-0").text, "1920×1080")
+      h.eq("the video's name", dfind("mediaLabel-1").text, "loop")
+      h.eq("the video's size and length", dfind("mediaSize-1").text, "1920×1080, video, 0:12")
+      h.eq("the still: no badge", dfind("mediaThumb-0VideoBadge").visible, false)
+      h.eq("the video: badged", dfind("mediaThumb-1VideoBadge").visible, true)
+      h.eq("its poster", String(dfind("mediaThumb-1Image").source), "file://" + mediaPosterPath())
+      h.eq("Remove for the video too", dfind("mediaRemove-1").text, "Remove")
+    }, function() { return !!dfind("mediaThumb-1Image") && dfind("mediaThumb-1Image").status === Image.Ready
+                           && dfind("mediaThumb-0Image").status !== Image.Loading }, 4000)
     h.grabStep(function() { return dfind("setupCard") }, "m3-setup-backgrounds.png")
+    // a video without a poster yet, at the dialog's thumbnail size: the
+    // row's own thumbnail with its poster taken away
+    h.step("media: the dialog's poster-less video thumbnail", function() {
+      h.eq("its accessible name says video", dfind("mediaThumb-1").Accessible.name, "loop, video")
+      h.eq("the still's does not", dfind("mediaThumb-0").Accessible.name, "office b")
+      h.notes.thumbSource = dfind("mediaThumb-1").source
+      dfind("mediaThumb-1").source = ""
+    }, function() { return dfind("mediaThumb-1Image").status === Image.Null })
+    h.step("media: glyph and badge apart in the dialog's row", function() {
+      h.eq("the placeholder", dfind("mediaThumb-1Placeholder").visible, true)
+      thumbFits(dfind("mediaThumb-1"), "the dialog's")
+    })
+    h.grabStep(function() { return dfind("mediaThumb-1") }, "m3b-setup-video-no-poster.png")
+    h.step("media: the row's poster back", function() {
+      dfind("mediaThumb-1").source = Qt.binding(function() { return D().shown && D().section === "backgrounds" ? D().mediaView.rows[1].source : "" })
+    }, function() { return dfind("mediaThumb-1Image").status === Image.Ready })
     h.step("media: Remove pressed once, then the mouse moves off it", function() {
       D().setCursor("media-remove", 0)
       h.key(Qt.Key_Return)
@@ -4272,6 +4430,19 @@ ShellRoot {
     h.step("media: removed, and the section read again", function() {
       h.eq("the remove", JSON.stringify(args().filter(function(a) { return a.indexOf("media remove") === 0 })),
            JSON.stringify(["media remove " + mediaUser + "/office.png"]))
+      h.eq("the video left", dfind("mediaLabel-0").text, "loop")
+      h.writeFile("media-list-removed", mediaListLines(false))
+    }, function() { return !S().setupBusy && !S().readArmed && D().mediaView.rows.length === 1 && h.writerIdle() }, 6000)
+    h.step("media: the video removed the same way", function() {
+      h.markLog()
+      D().setCursor("media-remove", 0)
+      h.key(Qt.Key_Return)
+      h.eq("asks for the second press", dfind("mediaRemove-0").text, "Confirm remove")
+      h.key(Qt.Key_Return)
+    }, function() { return args().some(function(a) { return a.indexOf("media remove") === 0 }) }, 6000)
+    h.step("media: the video removed, and the section read again", function() {
+      h.eq("the remove", JSON.stringify(args().filter(function(a) { return a.indexOf("media remove") === 0 })),
+           JSON.stringify(["media remove " + mediaUser + "/loop.webm"]))
     }, function() { return !S().setupBusy && !S().readArmed && D().mediaView.rows.length === 0 }, 6000)
     h.step("media: none of the user's own left", function() {
       h.eq("no hint block", dfind("setupHintBlock").visible, false)

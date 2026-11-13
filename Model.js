@@ -3566,9 +3566,9 @@ function readConfigFiles(lines, code, stderrText) {
 }
 
 // One read's result by kind (SETUP_READS), from its stdout lines, exit
-// status and first stderr line.
-function setupRead(kind, lines, code, stderrText) {
-  if (kind === "media") return readMedia(lines, code, stderrText)
+// status and first stderr line (`posterDir`: the gallery's, readMedia).
+function setupRead(kind, lines, code, stderrText, posterDir) {
+  if (kind === "media") return readMedia(lines, code, stderrText, MEDIA_KIND, posterDir)
   if (kind === "modules") return readModules(lines, code, stderrText)
   if (kind === "order") return readOrder(lines, code, stderrText)
   if (kind === "config") return readConfig(lines, code, stderrText)
@@ -4169,8 +4169,28 @@ var BACKGROUND_REPLACE = "replace"
 var MEDIA_ITEM_CAP = 500
 var MEDIA_LABEL_CAP = 96
 var MEDIA_DIMENSION_MAX = 65535
-// The formats `media import` takes (PNG, JPEG, still WebP).
-var MEDIA_EXTENSIONS = "png jpg jpeg webp"
+// The file chooser's filter for Add... (`media import` checks the content,
+// not the name): for a background still images (PNG, JPEG, still WebP),
+// animated GIF, WebP and APNG (the daemon converts them to a video at
+// import, with ffmpeg) and videos; the away image takes still images only.
+var MEDIA_EXTENSIONS = "png jpg jpeg webp gif apng mp4 m4v mov mkv webm"
+var AWAY_EXTENSIONS = "png jpg jpeg webp"
+// The names of a video file (mediaVideoName): what the panel's thumbnail
+// goes by when the read gallery does not list the background in force.
+var MEDIA_VIDEO_EXTENSIONS = ["mp4", "m4v", "mov", "mkv", "webm"]
+// A `media_item` of a video: `media_type` this, `duration_ms` at most
+// MEDIA_DURATION_MAX_MS (else unknown and not shown).
+var MEDIA_TYPE_VIDEO = "video"
+var MEDIA_DURATION_MAX_MS = 86400000
+// A video's poster is a JPEG file directly in the daemon's poster cache:
+// exactly <cache>/omarchy-broadcast/posters (posterDir) when the shell knows
+// the cache root, else a directory ending in this; any other poster path is
+// not loaded.
+var POSTER_DIR_SUFFIX = "/omarchy-broadcast/posters"
+// Past this many rows the setup dialog's Backgrounds list says "Showing N
+// of M backgrounds" (each row is a decoded thumbnail).
+var MEDIA_ROW_CAP = 64
+var MEDIA_VIDEO_WORD = "video"
 var MEDIA_ADD_TITLE = "Add a background"
 var GALLERY_TOOL = "omarchy-menu-images"
 var CHOOSER_TOOL = "omarchy-file-select"
@@ -4179,7 +4199,7 @@ var BACKGROUND_NONE_TEXT = "No background image"
 var GALLERY_LABEL = "Gallery…"
 var ADD_LABEL = "Add…"
 var GALLERY_TOOLTIP = "Choose a background image from the gallery"
-var ADD_TOOLTIP = "Add an image to your gallery and use it as the background"
+var ADD_TOOLTIP = "Add an image or video to your gallery and use it as the background"
 var GALLERY_MISSING_TEXT = GALLERY_TOOL + " is not on PATH: update Omarchy to choose from the gallery."
 var CHOOSER_MISSING_TEXT = CHOOSER_TOOL + " is not on PATH: update Omarchy to add a background."
 var GALLERY_FAILED_TEXT = "The gallery could not open"
@@ -4195,14 +4215,22 @@ var MEDIA_OVERLONG_TEXT = "omarchy-broadcast printed more than this plugin reads
 // that never answers cannot keep Gallery... and Add... faded for good.
 var MEDIA_WATCHDOG_MS = 610000
 var MEDIA_TIMEOUT_TEXT = "The picker did not answer in ten minutes; nothing was changed"
+// Add...'s import (its last step, `media import background PATH --select`)
+// runs under the same watchdog: converting an animated image or a long clip
+// can take seconds to minutes, and ten minutes bounds it.
+var MEDIA_IMPORT_TIMEOUT_TEXT = "Adding the background did not finish in ten minutes; this plugin stopped waiting for it"
 // The hint while a flow runs (the two buttons are faded meanwhile).
 var GALLERY_WAITING_TEXT = "Waiting for the gallery…"
 var CHOOSER_WAITING_TEXT = "Waiting for the file chooser…"
+var MEDIA_IMPORTING_TEXT = "Adding the background…"
 var MEDIA_OLD_DAEMON = "The daemon needs updating for the background gallery (D-Bus interface revision 15)."
 var MEDIA_EMPTY_TEXT = "You have not added any backgrounds yet. Add one with Add… in the panel's Effect tab."
 // mdi-image, the glyph the shell's own panels draw for an image file: the
 // thumbnail's placeholder.
 var GLYPH_IMAGE = String.fromCodePoint(0xF02E9)
+// mdi-file-video, the glyph the shell's own panels draw for a video file:
+// the badge on a video's thumbnail.
+var GLYPH_FILE_VIDEO = String.fromCodePoint(0xF022B)
 var MEDIA_REMOVE_LABEL = "Remove"
 var MEDIA_CONFIRM_LABEL = "Confirm remove"
 
@@ -4266,11 +4294,78 @@ function mediaDimension(value) {
     && value >= 1 && value <= MEDIA_DIMENSION_MAX ? value : 0
 }
 
+// A video's length in milliseconds: an integer in 1..MEDIA_DURATION_MAX_MS,
+// else 0 (unknown).
+function mediaDuration(value) {
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= 1 && value <= MEDIA_DURATION_MAX_MS ? value : 0
+}
+
+// A length as M:SS (minutes not wrapped into hours), rounded to the second
+// and at least 0:01; "" for an unknown one.
+function mediaDurationText(ms) {
+  var d = mediaDuration(ms)
+  if (d === 0) return ""
+  var secs = Math.max(1, Math.round(d / 1000))
+  var s = secs % 60
+  return Math.floor(secs / 60) + ":" + (s < 10 ? "0" : "") + s
+}
+
+// Whether a file's name is a video's (MEDIA_VIDEO_EXTENSIONS, any case).
+function mediaVideoName(path) {
+  if (typeof path !== "string") return false
+  var name = path.slice(path.lastIndexOf("/") + 1)
+  var dot = name.lastIndexOf(".")
+  return dot > 0 && MEDIA_VIDEO_EXTENSIONS.indexOf(name.slice(dot + 1).toLowerCase()) >= 0
+}
+
+// The daemon's poster directory, as it derives it: <cache>/omarchy-broadcast/posters
+// with <cache> $XDG_CACHE_HOME, else $HOME/.cache (a variable that is not
+// an absolute path is ignored, as the XDG specification says); "" when
+// neither is usable.
+function posterDir(xdgCacheHome, home) {
+  var cache = mediaDir(xdgCacheHome)
+  if (cache === "") {
+    var h = mediaDir(home)
+    cache = h !== "" ? h + "/.cache" : ""
+  }
+  return cache !== "" ? mediaDir(cache + POSTER_DIR_SUFFIX) : ""
+}
+
+// A video's poster as a checked path: a mediaPath of a .jpg or .jpeg file
+// directly in `dir` (posterDir) when it is given, else (no cache root
+// known) directly in a directory ending in POSTER_DIR_SUFFIX; else ""
+// (none: the placeholder glyph). Only a poster read from a `media_item`
+// line is ever given here.
+function mediaPoster(value, dir) {
+  var p = mediaPath(value)
+  if (p === "" || !/\.jpe?g$/i.test(p)) return ""
+  var parent = p.slice(0, p.lastIndexOf("/"))
+  var root = mediaDir(dir)
+  if (root !== "") return parent === root ? p : ""
+  return parent.length > POSTER_DIR_SUFFIX.length && parent.slice(-POSTER_DIR_SUFFIX.length) === POSTER_DIR_SUFFIX ? p : ""
+}
+
+// An item's size text: its size (W×H), then for a video "video" and its
+// length (M:SS); each part only when known.
+function mediaSizeText(w, h, video, durationMs) {
+  var parts = []
+  if (w > 0 && h > 0) parts.push(w + "\u00d7" + h)
+  if (video) {
+    var d = mediaDurationText(durationMs)
+    parts.push(d !== "" ? MEDIA_VIDEO_WORD + ", " + d : MEDIA_VIDEO_WORD)
+  }
+  return parts.join(", ")
+}
+
 // An item of a `media` line -> { path, label, bundled, width, height,
-// sizeText }, or null: a mediaPath directly in its own directory (the
-// bundled one for a bundled item, else the user's). `label` is the
-// daemon's, sanitised, else the file's stem.
-function mediaItem(o, bundledDir, userDir) {
+// video, durationMs, poster, sizeText }, or null: a mediaPath directly in
+// its own directory (the bundled one for a bundled item, else the user's).
+// `label` is the daemon's, sanitised, else the file's stem; `video` whether
+// `media_type` is "video" (any other value reads as a still image);
+// `poster` a video's checked poster path (mediaPoster over `posterDir`),
+// "" for a still or none.
+function mediaItem(o, bundledDir, userDir, posterDir) {
   if (!isPlainObject(o)) return null
   var path = mediaPath(o.path)
   var bundled = o.bundled === true
@@ -4279,8 +4374,37 @@ function mediaItem(o, bundledDir, userDir) {
   if (label === "") label = mediaStem(path)
   var w = mediaDimension(o.width)
   var hgt = mediaDimension(o.height)
-  return { path: path, label: label, bundled: bundled, width: w, height: hgt,
-           sizeText: w > 0 && hgt > 0 ? w + "\u00d7" + hgt : "" }
+  var video = o.media_type === MEDIA_TYPE_VIDEO
+  var dur = video ? mediaDuration(o.duration_ms) : 0
+  return { path: path, label: label, bundled: bundled, width: w, height: hgt, video: video, durationMs: dur,
+           poster: video ? mediaPoster(o.poster, posterDir) : "", sizeText: mediaSizeText(w, hgt, video, dur) }
+}
+
+// A read gallery item's thumbnail: { source, video }, a still's own file or
+// a video's poster (mediaPoster over `posterDir`; "" for the placeholder).
+function mediaItemThumb(it, posterDir) {
+  if (it.video !== true) return { source: mediaImageSource(it.path), video: false }
+  return { source: mediaImageSource(mediaPoster(it.poster, posterDir)), video: true }
+}
+
+// A gallery file's thumbnail -> { source, video }: `source` the Image
+// source (mediaImageSource: a still's own file, a video's poster; "" for
+// the placeholder glyph), `video` whether it gets the video badge. `media`
+// is a read gallery (readMedia), or null: an item of it with exactly this
+// path is what decides; a path it does not list (or no gallery read) is a
+// video by its name (mediaVideoName), with no poster known.
+function mediaThumb(path, media) {
+  var p = mediaPath(path)
+  if (p === "") return { source: "", video: false }
+  if (isPlainObject(media) && media.ok === true && Array.isArray(media.items)) {
+    for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) {
+      var it = media.items[i]
+      if (!isPlainObject(it) || it.path !== p) continue
+      return mediaItemThumb(it, media.posterDir)
+    }
+  }
+  if (mediaVideoName(p)) return { source: "", video: true }
+  return { source: mediaImageSource(p), video: false }
 }
 
 // A gallery kind: AWAY_KIND, else MEDIA_KIND (the background gallery, the
@@ -4331,7 +4455,7 @@ function parseMediaLine(text, kind) {
 // incomplete (MEDIA_INCOMPLETE_TEXT). An item outside its own directory
 // (mediaItem; every item of a directory that is "") is dropped, and counts
 // as truncation.
-function readMedia(lines, code, stderrText, kind) {
+function readMedia(lines, code, stderrText, kind, posterDir) {
   var away = mediaKindOf(kind) === AWAY_KIND
   var incomplete = away ? AWAY_INCOMPLETE_TEXT : MEDIA_INCOMPLETE_TEXT
   var src = Array.isArray(lines) ? lines : []
@@ -4353,9 +4477,10 @@ function readMedia(lines, code, stderrText, kind) {
   }
   if (header === null) return readFailure({ error: error }, code, stderrText, away ? "omarchy-broadcast printed no away image gallery" : "omarchy-broadcast printed no background gallery")
   if (src.length > MEDIA_ITEM_CAP + 2 || raw.length !== header.count) return readFailed(incomplete)
-  var out = { ok: true, bundledDir: header.bundledDir, userDir: header.userDir, items: [], bundledCount: 0, truncated: header.truncated }
+  var out = { ok: true, bundledDir: header.bundledDir, userDir: header.userDir, posterDir: mediaDir(posterDir),
+              items: [], bundledCount: 0, truncated: header.truncated }
   for (var k = 0; k < raw.length; k++) {
-    var it = mediaItem(raw[k], header.bundledDir, header.userDir)
+    var it = mediaItem(raw[k], header.bundledDir, header.userDir, out.posterDir)
     if (it === null) { out.truncated = true; continue }
     if (it.bundled) out.bundledCount++
     out.items.push(it)
@@ -4411,8 +4536,9 @@ function galleryArgv(tool, media, current) {
 }
 
 function fileSelectArgv(tool, kind) {
-  var title = mediaKindOf(kind) === AWAY_KIND ? AWAY_ADD_TITLE : MEDIA_ADD_TITLE
-  return cliUsable(tool) ? [tool, "--title", title, "--extensions", MEDIA_EXTENSIONS] : null
+  var away = mediaKindOf(kind) === AWAY_KIND
+  return cliUsable(tool) ? [tool, "--title", away ? AWAY_ADD_TITLE : MEDIA_ADD_TITLE,
+                            "--extensions", away ? AWAY_EXTENSIONS : MEDIA_EXTENSIONS] : null
 }
 
 // ---- the two tools, looked up on PATH (as the resolver looks up the CLI)
@@ -4455,16 +4581,20 @@ function toolsFromLines(lines) {
 
 // ---- the Gallery... and Add... flows, one step at a time
 //
-// A flow is { kind: "gallery" | "add", step, media, gallery }: "gallery"
-// first lists the gallery (step "list", the CLI), then runs the picker over
-// its two directories (step "pick"); "add" runs the file chooser (step
-// "pick"). `gallery` is the gallery's kind (mediaKindOf: the background's
+// A flow is { kind: "gallery" | "add", step, media, path, gallery }:
+// "gallery" first lists the gallery (step "list", the CLI), then runs the
+// picker over its two directories (step "pick"); "add" runs the file
+// chooser (step "pick") and, for a background, then imports the chosen
+// file (step "import", the CLI, `path` the file): converting an animated
+// image or a video can take a while, and as a step it runs beside the
+// command queue (an on/off never waits behind it), under the flow's
+// watchdog, with the panel open again and saying so. `gallery` is the gallery's kind (mediaKindOf: the background's
 // when absent, the panel's; AWAY_KIND for the setup dialog's away image). A
 // step's end gives { flow, intent, error }: the next step, else the command
 // intent to queue (a background selection or an import; for the away image
 // setup intents: `away-image` and `away-import`, the dialog's writes), else
-// the error line ("" for none: a cancel), the panel's or, for the away
-// image, the dialog's.
+// the error line ("" for none: a cancel, or an import that went through:
+// `imported` true), the panel's or, for the away image, the dialog's.
 
 // The gallery kind of a flow (mediaKindOf of its `gallery`).
 function flowGallery(flow) {
@@ -4478,10 +4608,13 @@ function mediaCurrent(flow, record, config) {
   return isPlainObject(record) && typeof record.backgroundImagePath === "string" ? record.backgroundImagePath : ""
 }
 
-// The argv of a flow's current step, or null.
-function mediaStepArgv(flow, cli, tools, current) {
+// The argv of a flow's current step, or null. The import runs only while
+// `record` shows the Background row (backgroundRowShown).
+function mediaStepArgv(flow, cli, tools, current, record) {
   if (!isPlainObject(flow)) return null
   var t = isPlainObject(tools) ? tools : emptyTools()
+  if (flow.kind === "add" && flow.step === "import")
+    return flowGallery(flow) === MEDIA_KIND && backgroundRowShown(record) ? mediaImportArgv(cli, flow.path) : null
   if (flow.kind === "gallery" && flow.step === "list") return t.gallery !== "" ? mediaListArgv(cli, flowGallery(flow)) : null
   if (flow.kind === "gallery" && flow.step === "pick") return galleryArgv(t.gallery, flow.media, current)
   if (flow.kind === "add" && flow.step === "pick") return fileSelectArgv(t.chooser, flowGallery(flow))
@@ -4490,8 +4623,8 @@ function mediaStepArgv(flow, cli, tools, current) {
 
 // The picker's answer -> the path, only when it is one line and exactly the
 // path of an item of the gallery just read; else "". The picker lists files
-// the daemon skipped (other formats, videos, links), and none of them is
-// ever selected.
+// the daemon skipped (other formats, links), and none of them is ever
+// selected.
 function galleryChoice(firstLine, lineCount, media) {
   if (lineCount !== 1 || !isPlainObject(media) || media.ok !== true || !Array.isArray(media.items)) return ""
   var p = mediaPath(firstLine)
@@ -4500,13 +4633,13 @@ function galleryChoice(firstLine, lineCount, media) {
   return ""
 }
 
-// A step's end. `result`: { started, code, first, lines, list, rejected,
-// timedOut, stderr } (whether the process ran, its exit status, its first
+// A step's end -> { flow, intent, error, imported }. `result`: { started,
+// code, first, lines, list, rejected, timedOut, stderr, posterDir } (whether the process ran, its exit status, its first
 // stdout line, how many lines it printed, every line of a list step,
 // whether a line was over the cap, whether the watchdog stopped it, its
-// first stderr line).
+// first stderr line, the poster directory: posterDir).
 function mediaStepEnd(flow, result) {
-  var out = { flow: null, intent: null, error: "" }
+  var out = { flow: null, intent: null, error: "", imported: false }
   if (!isPlainObject(flow) || !isPlainObject(result)) return out
   var r = result
   var lines = typeof r.lines === "number" ? r.lines : 0
@@ -4514,11 +4647,11 @@ function mediaStepEnd(flow, result) {
   var detail = sanitize(typeof r.stderr === "string" ? r.stderr.slice(0, STDERR_CAP) : "", DETAIL_CAP)
   var gallery = flowGallery(flow)
   var away = gallery === AWAY_KIND
-  if (r.timedOut === true) { out.error = MEDIA_TIMEOUT_TEXT; return out }
+  if (r.timedOut === true) { out.error = flow.step === "import" ? MEDIA_IMPORT_TIMEOUT_TEXT : MEDIA_TIMEOUT_TEXT; return out }
   if (flow.kind === "gallery" && flow.step === "list") {
     if (r.started !== true) { out.error = CLI_MISSING_TEXT; return out }
     if (r.rejected === true) { out.error = MEDIA_OVERLONG_TEXT; return out }
-    var media = readMedia(Array.isArray(r.list) ? r.list : [], r.code, r.stderr, gallery)
+    var media = readMedia(Array.isArray(r.list) ? r.list : [], r.code, r.stderr, gallery, r.posterDir)
     if (media.ok !== true) { out.error = media.error; return out }
     if (mediaDir(media.bundledDir) === "" && mediaDir(media.userDir) === "") { out.error = GALLERY_NO_FOLDER_TEXT; return out }
     out.flow = { kind: "gallery", step: "pick", media: media, gallery: gallery }
@@ -4543,7 +4676,16 @@ function mediaStepEnd(flow, result) {
     if (r.started !== true || r.code !== 0) { out.error = CHOOSER_FAILED_TEXT; return out }
     var picked = lines === 1 && r.rejected !== true ? mediaPath(first) : ""
     if (picked === "") { out.error = lines === 0 ? "" : CHOOSER_PATH_TEXT; return out }
-    out.intent = away ? { verb: "setup", op: "away-import", path: picked } : { verb: "media-import", path: picked }
+    if (away) out.intent = { verb: "setup", op: "away-import", path: picked }
+    else out.flow = { kind: "add", step: "import", path: picked, gallery: gallery }
+    return out
+  }
+  if (flow.kind === "add" && flow.step === "import") {
+    // Its stdout (the stored path) is not read: the watch reports the
+    // background it selected.
+    if (r.started !== true) { out.error = CLI_MISSING_TEXT; return out }
+    if (r.code !== 0) { out.error = commandFailureText(r.code, typeof r.stderr === "string" ? r.stderr : "", ""); return out }
+    out.imported = true
     return out
   }
   return out
@@ -4564,19 +4706,23 @@ function backgroundRowShown(record) {
 }
 
 // The Background row, exactly as drawn:
-//   { visible, label, source, buttons: [{ label, enabled, tooltip }] }
-// `source` is the thumbnail's (mediaImageSource of the raw path, "" for the
-// placeholder); `label` the image's file stem (or the display copy's, when
+//   { visible, label, source, video, buttons: [{ label, enabled, tooltip }] }
+// `source` and `video` are the thumbnail's (mediaThumb of the raw path over
+// `media`, the last background gallery read, or null: a still's own file,
+// a listed video's poster, "" for the placeholder; `video` the badge);
+// `label` the image's file stem (or the display copy's, when
 // the raw path is not usable), else BACKGROUND_NONE_TEXT. Gallery... is
 // button 0, Add... button 1; each is disabled, its tooltip saying why, while
 // its tool is not on PATH (`tools`, the Daemon's probe), and both while a
 // flow runs (`busy`).
-function backgroundRowView(record, tools, busy) {
-  var out = { visible: false, label: "", source: "", buttons: [] }
+function backgroundRowView(record, tools, busy, media) {
+  var out = { visible: false, label: "", source: "", video: false, buttons: [] }
   if (!backgroundRowShown(record)) return out
   var t = isPlainObject(tools) ? tools : emptyTools()
   out.visible = true
-  out.source = mediaImageSource(record.backgroundImagePath)
+  var thumb = mediaThumb(record.backgroundImagePath, media)
+  out.source = thumb.source
+  out.video = thumb.video
   var label = record.backgroundImagePath !== "" ? mediaStem(record.backgroundImagePath) : mediaStem(record.backgroundImage)
   out.label = label !== "" ? label : BACKGROUND_NONE_TEXT
   var gallery = t.gallery !== ""
@@ -4589,10 +4735,14 @@ function backgroundRowView(record, tools, busy) {
 }
 
 // The hint under the Background row: while a flow runs (`flow`, the
-// Daemon's mediaFlow) what it waits for, else which tool is missing, else "".
+// Daemon's mediaFlow) what it waits for (the import: MEDIA_IMPORTING_TEXT),
+// else which tool is missing, else "".
 function backgroundHint(view, flow) {
   if (!isPlainObject(view) || !view.visible) return ""
-  if (isPlainObject(flow)) return flow.kind === "add" ? CHOOSER_WAITING_TEXT : GALLERY_WAITING_TEXT
+  if (isPlainObject(flow)) {
+    if (flow.kind === "add" && flow.step === "import") return MEDIA_IMPORTING_TEXT
+    return flow.kind === "add" ? CHOOSER_WAITING_TEXT : GALLERY_WAITING_TEXT
+  }
   var out = []
   for (var i = 0; i < view.buttons.length; i++) if (view.buttons[i].missing) out.push(view.buttons[i].tooltip)
   return out.join(" ")
@@ -4600,12 +4750,17 @@ function backgroundHint(view, flow) {
 
 // ---- the setup dialog's Backgrounds section
 
-// { hint, bundledText, rows, emptyText, truncation }; a row (one of the
-// user's own items): { path, label, sizeText, confirming, index }.
+// { hint, bundledText, rows, emptyText, truncation, busyText }; a row (one
+// of the user's own items, at most MEDIA_ROW_CAP of them; past it
+// `truncation` says "Showing N of M backgrounds"): { path, label, sizeText,
+// source, video, confirming, index } (`source` and `video` its thumbnail's,
+// mediaItemThumb of the first item of its path, the gallery indexed once).
 // `emptyText` is said under the bundled count when the user has none. `confirming` is the
 // path whose Remove was pressed once (the second press removes it).
-function mediaSectionView(setup, record, confirming) {
-  var out = { hint: "", bundledText: "", rows: [], emptyText: "", truncation: "" }
+// `busyText` is MEDIA_IMPORTING_TEXT while `importing` (the panel's Add...
+// imports a file; the section is read again when it ends).
+function mediaSectionView(setup, record, confirming, importing) {
+  var out = { hint: "", bundledText: "", rows: [], emptyText: "", truncation: "", busyText: "" }
   var gate = setupGate(record)
   if (!gate.modules) { out.hint = gate.text; return out }
   if (!mediaSupported(record)) { out.hint = MEDIA_OLD_DAEMON; return out }
@@ -4614,15 +4769,30 @@ function mediaSectionView(setup, record, confirming) {
   if (out.hint !== "") return out
   var n = media.bundledCount
   out.bundledText = n === 1 ? "1 bundled background" : n + " bundled backgrounds"
+  if (importing === true) out.busyText = MEDIA_IMPORTING_TEXT
+  // The first item of each path (what mediaThumb would find), indexed once.
+  var byPath = {}
+  for (var j = 0; j < media.items.length && j < MEDIA_ITEM_CAP; j++) {
+    var e = media.items[j]
+    if (isPlainObject(e) && !Object.prototype.hasOwnProperty.call(byPath, e.path)) byPath[e.path] = e
+  }
+  var total = 0
   for (var i = 0; i < media.items.length && i < MEDIA_ITEM_CAP; i++) {
     var it = media.items[i]
     if (it.bundled || !mediaInDir(it.path, media.userDir)) continue
-    out.rows.push({ path: it.path, label: it.label, sizeText: it.sizeText,
+    total++
+    if (out.rows.length >= MEDIA_ROW_CAP) continue
+    var thumb = mediaItemThumb(byPath[it.path], media.posterDir)
+    out.rows.push({ path: it.path, label: it.label, sizeText: it.sizeText, source: thumb.source, video: thumb.video,
                     confirming: typeof confirming === "string" && confirming !== "" && confirming === it.path,
                     index: out.rows.length })
   }
   if (out.rows.length === 0) out.emptyText = MEDIA_EMPTY_TEXT
-  if (media.truncated) out.truncation = "The daemon lists more backgrounds than are shown."
+  var notes = []
+  var showing = showingText(out.rows.length, total, "backgrounds")
+  if (showing !== "") notes.push(showing)
+  if (media.truncated) notes.push("The daemon lists more backgrounds than are shown.")
+  out.truncation = notes.join(". ")
   return out
 }
 
