@@ -90,8 +90,8 @@ BarWidget {
   }
 
   // The right click: the setup dialog, through the shell's toggle of this
-  // plugin with the setup payload (the overlay's open() reads it; the
-  // widget's cliPath setting rides along). Every open panel closes first:
+  // plugin with the setup payload (the overlay's open() reads it; it names
+  // no program to run, only the row to open at). Every open panel closes first:
   // the shell reports the plugin open while one is (SetupDialog.opened), and
   // its toggle would then close instead of open. False, with every panel
   // left as it was, when the shell has no overlay to open (the bar gave no
@@ -102,7 +102,7 @@ BarWidget {
     var shell = root.bar ? root.bar.shell : null
     if (!shell || typeof shell.toggle !== "function") return false
     Daemon.closePanels()
-    return shell.toggle(root.moduleName, Model.setupPayloadJson(root.cliSetting, focus)) === true
+    return shell.toggle(root.moduleName, Model.setupPayloadJson(focus)) === true
   }
 
   function press(buttonCode) {

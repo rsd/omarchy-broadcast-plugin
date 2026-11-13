@@ -3081,7 +3081,7 @@ ShellRoot {
       ]
     }
     var micState = function(o) {
-      var m = { state: "active", consumers: 1, provider: "mic-denoise: NVIDIA Maxine AFX (GPU)", latency_ms: 20, error: "" }
+      var m = { state: "active", consumers: 1, provider: "mic-denoise: Example Denoiser (GPU)", latency_ms: 20, error: "" }
       for (var k in o) m[k] = o[k]
       return m
     }
@@ -3112,7 +3112,7 @@ ShellRoot {
       h.eq("no hint", h.find(A(), "micHint").visible, false)
       h.eq("the switch is on", h.find(A(), "micSwitch").checked, true)
       h.eq("status rows", h.find(A(), "micStatusRepeater").count, 3)
-      h.eq("runs on", h.find(A(), "micRunsOn").text, "Runs on: mic-denoise: NVIDIA Maxine AFX (GPU)")
+      h.eq("runs on", h.find(A(), "micRunsOn").text, "Runs on: mic-denoise: Example Denoiser (GPU)")
       h.eq("no error", h.find(A(), "micError").visible, false)
       h.eq("processing switch", !!h.find(A(), "settingSwitch-mic.input.enabled"), true)
       h.eq("the device is a dropdown of node names", !!h.find(A(), "settingDropdown-mic.input.device"), true)
@@ -3474,7 +3474,7 @@ ShellRoot {
       h.eq("panel closed", A().opened, false)
       h.eq("one toggle", fakeShell.toggles.length, 1)
       h.eq("for the plugin", fakeShell.toggles[0].id, shellRoot.moduleName)
-      h.eq("payload", fakeShell.toggles[0].payload, JSON.stringify({ view: "setup", cliPath: shellRoot.cli }))
+      h.eq("payload, no program in it", fakeShell.toggles[0].payload, JSON.stringify({ view: "setup" }))
       h.eq("held", S().setupHeld, true)
       h.eq("the four reads, in order", JSON.stringify(reads()),
            JSON.stringify(["modules list --json", "order show --json", "config show --json", "config files --json"]))
@@ -3920,19 +3920,24 @@ ShellRoot {
       h.notes.loader = null
     })
     // An overlay whose singleton no widget attached to (the plugin copy, at
-    // another URL than the widgets): it runs the watch itself while shown.
+    // another URL than the widgets): it runs the watch itself while shown,
+    // with the CLI the resolver finds on PATH (the payload names none).
     h.step("setup: an overlay of a singleton with no widget", function() {
       var comp = Qt.createComponent("file://" + shellRoot.pluginCopy + "/SetupDialog.qml")
       h.notes.lone = comp.createObject(window.contentItem, { width: 900, height: 760 })
       h.check("another singleton", h.notes.lone.daemonService !== S())
       h.eq("no reader", h.notes.lone.daemonService.attachedCount, 0)
-      h.notes.lone.open(h.model.setupPayloadJson(shellRoot.cli))
+      // A payload that names a program is ignored: the dialog never runs one
+      // a summoning process names.
+      h.notes.lone.open('{"view":"setup","cliPath":"/tmp/x"}')
     }, function() { return h.notes.lone.shown && h.notes.lone.daemonService.record.link === "ok" }, 8000)
-    h.step("setup: it attached and configured from the payload", function() {
+    h.step("setup: it attached and resolved the CLI from PATH", function() {
       var ls = h.notes.lone.daemonService
       h.eq("attached", h.notes.lone.attached, true)
       h.eq("one reader", ls.attachedCount, 1)
-      h.eq("the payload's CLI", ls.cliPath, shellRoot.cli)
+      h.eq("the resolver's CLI, the fake on PATH", ls.cliPath, shellRoot.cli)
+      h.check("the payload's cliPath was not taken", ls.cliPath !== "/tmp/x")
+      h.eq("the dialog is shown", h.notes.lone.shown, true)
       h.notes.lone.close()
       h.eq("detached on close", ls.attachedCount, 0)
       h.notes.lone.destroy()
@@ -4418,7 +4423,7 @@ ShellRoot {
       D().manifest = { id: shellRoot.moduleName }
       h.check("the widgets' singleton", D().daemonService === S())
       h.markLog()
-      D().open(h.model.setupPayloadJson(shellRoot.cli))
+      D().open(h.model.setupPayloadJson())
     }, function() { return D().shown && S().setup.media !== null && !S().readArmed && S().readQueue.length === 0 && h.writerIdle() }, 8000)
     h.step("media: Backgrounds, the fifth of six sections", function() {
       h.eq("the sections", D().sectionWords.join(","), "modules,order,backends,daemon,backgrounds,diagnostics")
@@ -4868,7 +4873,7 @@ ShellRoot {
       h.check("pressing does nothing", !C().openAwayImage())
       A().close()
       h.markLog()
-      D().open(h.model.setupPayloadJson(shellRoot.cli))
+      D().open(h.model.setupPayloadJson())
     }, function() { return D().shown && settled() }, 8000)
     h.step("away: back to Backgrounds, as the steps after these expect", function() {
       h.key("5")

@@ -1080,8 +1080,6 @@ TestCase {
     compare(Model.parseResolverLine("omarchy-broadcast"), "")
     compare(Model.parseResolverLine(""), "")
     compare(Model.parseResolverLine(7), "")
-    compare(Model.localPathFromUrl("file:///a/b%20c/"), "/a/b c")
-    compare(Model.localPathFromUrl("qrc:/x"), "")
   }
 
   // ---- preview -------------------------------------------------------------
@@ -2329,6 +2327,23 @@ TestCase {
     compare(hostile[0].stage + "|" + hostile[0].name, "bauto-frame/b|zoom", "markup characters removed")
   }
 
+  // The stage and name words are cut at STAGE_WORD_CAP (48), declared once: a
+  // 40-character word is whole, a longer one is cut to it.
+  function test_stage_word_cap_is_48() {
+    compare(Model.STAGE_WORD_CAP, 48)
+    var word40 = "abcdefghij-abcdefghij-abcdefghij-abcdefghij"
+    word40 = word40.slice(0, 40)
+    compare(word40.length, 40)
+    var kept = snap({ state: "active", stage_values: [{ stage: word40, name: word40, value: 1 }] }).stageValues
+    compare(kept.length, 1)
+    compare(kept[0].stage, word40, "a 40-character stage word is not clipped")
+    compare(kept[0].name, word40, "nor a 40-character name")
+    var word60 = word40 + "abcdefghijklmnopqrst"
+    var cut = snap({ state: "active", stage_values: [{ stage: word60, name: word60, value: 1 }] }).stageValues
+    compare(cut[0].stage.length, 48)
+    compare(cut[0].name, word60.slice(0, 47) + "\u2026", "cut to the cap, with the ellipsis")
+  }
+
   function test_stage_values_follow_state_lines() {
     var r = snap({ state: "active", stage_values: [zoomEntry(1.24)] })
     var upd = Model.reduce(r, line(stateObject({ state: "active", stage_values: [zoomEntry(1.6)] }))).record
@@ -3072,29 +3087,34 @@ TestCase {
   }
 
   function test_setup_payload() {
-    compare(JSON.stringify(Model.setupPayload("")), JSON.stringify({ view: "panel", cliSetting: null, focus: "" }), "the panel hotkey")
+    compare(JSON.stringify(Model.setupPayload("")), JSON.stringify({ view: "panel", focus: "" }), "the panel hotkey")
     compare(Model.setupPayload("{}").view, "panel", "the shell's togglePanelAt")
     compare(Model.setupPayload(undefined).view, "panel")
     compare(Model.setupPayload("not json").view, "panel")
     compare(Model.setupPayload("[\"setup\"]").view, "panel")
     compare(Model.setupPayload('{"view":"panel"}').view, "panel")
     compare(Model.setupPayload('{"view":"Setup"}').view, "panel", "exact word only")
-    var p = Model.setupPayload(Model.setupPayloadJson("/opt/bin/omarchy-broadcast"))
+    var p = Model.setupPayload(Model.setupPayloadJson())
     compare(p.view, "setup")
-    compare(p.cliSetting, "/opt/bin/omarchy-broadcast")
-    compare(Model.setupPayload(Model.setupPayloadJson(null)).cliSetting, null, "no setting: none passed")
+    compare(Model.setupPayloadJson(), '{"view":"setup"}')
     compare(Model.setupPayloadJson(null), '{"view":"setup"}')
-    compare(Model.setupPayload('{"view":"setup","cliPath":5}').cliSetting, null)
+    // the payload never names a program: a cliPath key is ignored whatever it holds
+    var summoned = Model.setupPayload('{"view":"setup","cliPath":"/tmp/x"}')
+    compare(JSON.stringify(Object.keys(summoned).sort()), JSON.stringify(["focus", "view"]), "exactly view and focus")
+    compare(summoned.view, "setup")
+    compare(summoned.cliSetting, undefined, "no cliSetting")
+    compare(summoned.cliPath, undefined)
+    compare(JSON.stringify(Object.keys(Model.setupPayload('{"view":"panel","cliPath":"/tmp/x"}')).sort()), JSON.stringify(["focus", "view"]))
+    compare(Model.setupPayloadJson("effect.fallback_image").indexOf("cliPath"), -1, "never written")
+    compare(Model.setupPayloadJson("/opt/bin/omarchy-broadcast").indexOf("cliPath"), -1, "a path is no focus, nor written")
     var long = "/"
-    for (var i = 0; i < Model.PATH_CAP + 10; i++) long += "x"
-    compare(Model.setupPayload('{"view":"setup","cliPath":"' + long + '"}').cliSetting, null, "a path over PATH_CAP is no setting")
-    for (var j = 0; j < 300; j++) long += "y"
-    compare(Model.setupPayload('{"view":"setup","cliPath":"' + long + '"}').view, "panel", "an over-cap payload is not read")
+    for (var i = 0; i < 1100; i++) long += "x"
+    compare(Model.setupPayload('{"view":"setup","focus":"' + long + '"}').view, "panel", "an over-cap payload is not read")
     // the row to open at (the panel's Away image...): a key of the grammar only
     compare(p.focus, "", "the right click asks for none")
-    compare(Model.setupPayloadJson("/c", "effect.fallback_image"), '{"view":"setup","cliPath":"/c","focus":"effect.fallback_image"}')
-    compare(Model.setupPayload(Model.setupPayloadJson("/c", "effect.fallback_image")).focus, "effect.fallback_image")
-    compare(Model.setupPayloadJson(null, "Not A Key"), '{"view":"setup"}', "not of the grammar: not sent")
+    compare(Model.setupPayloadJson("effect.fallback_image"), '{"view":"setup","focus":"effect.fallback_image"}')
+    compare(Model.setupPayload(Model.setupPayloadJson("effect.fallback_image")).focus, "effect.fallback_image")
+    compare(Model.setupPayloadJson("Not A Key"), '{"view":"setup"}', "not of the grammar: not sent")
     compare(Model.setupPayload('{"view":"setup","focus":"--x"}').focus, "", "nor read")
     compare(Model.setupPayload('{"view":"setup","focus":7}').focus, "")
     compare(Model.configKeySection("effect.fallback_image"), "daemon")
@@ -3653,7 +3673,7 @@ TestCase {
 
   readonly property string micDevice: "alsa_input.usb-C-Media-00.mono"
   function micObj(o) {
-    return merged({ state: "active", consumers: 2, provider: "mic-denoise: NVIDIA Maxine AFX (GPU)", latency_ms: 20, error: "" }, o || {})
+    return merged({ state: "active", consumers: 2, provider: "mic-denoise: Example Denoiser (GPU)", latency_ms: 20, error: "" }, o || {})
   }
   function micLine(o) { return merged({ v: 1, type: "mic" }, micObj(o)) }
   function rev13(o) { return merged({ interface_revision: 13, settings_schema: 1, settings_revision: 5, mic: micObj() }, o || {}) }
@@ -3691,7 +3711,7 @@ TestCase {
   function test_mic_snapshot_and_lines() {
     var r = snap(rev13({}))
     compare(r.micField, "object")
-    compare(JSON.stringify(r.mic), JSON.stringify({ state: "active", rawState: "active", consumers: 2, provider: "mic-denoise: NVIDIA Maxine AFX (GPU)",
+    compare(JSON.stringify(r.mic), JSON.stringify({ state: "active", rawState: "active", consumers: 2, provider: "mic-denoise: Example Denoiser (GPU)",
                                                     latencyMs: 20, error: "" }))
     var res = Model.reduce(r, line(micLine({ state: "passthrough", consumers: 0, provider: "", latency_ms: 0 })))
     compare(res.outcome, "mic")
@@ -3745,7 +3765,7 @@ TestCase {
     compare(v.hostOn, true)
     compare(JSON.stringify(v.rows), JSON.stringify([{ label: "State", value: "Processing" }, { label: "Consumers", value: "2 apps" },
                                                     { label: "Added delay", value: "20.0 ms" }]))
-    compare(v.runsOn, "Runs on: mic-denoise: NVIDIA Maxine AFX (GPU)")
+    compare(v.runsOn, "Runs on: mic-denoise: Example Denoiser (GPU)")
     compare(v.error, "")
     var pass = Model.micView(snap(rev13({ mic: micObj({ state: "passthrough", consumers: 1, provider: "", latency_ms: 0 }) })))
     compare(JSON.stringify(pass.rows.map(function(x) { return x.value })), JSON.stringify(["On, not processed", "1 app", "None"]))
@@ -3756,7 +3776,7 @@ TestCase {
     compare(passStale.runsOn, "", "and no module")
     var starting = Model.micView(snap(rev13({ mic: micObj({ state: "starting", latency_ms: 20 }) })))
     compare(starting.rows[2].value, "20.0 ms")
-    compare(starting.runsOn, "Runs on: mic-denoise: NVIDIA Maxine AFX (GPU)")
+    compare(starting.runsOn, "Runs on: mic-denoise: Example Denoiser (GPU)")
     var off = Model.micView(snap(rev13({ mic: micObj({ state: "off", consumers: 0, provider: "x", latency_ms: 12 }) })))
     compare(off.hostOn, false)
     compare(JSON.stringify(off.rows.map(function(x) { return x.value })), JSON.stringify(["Off", "None", "None"]))
@@ -3992,7 +4012,7 @@ TestCase {
   }
 
   function test_module_kind_and_mic_pins() {
-    var list = Model.readModules(moduleLines([moduleObj("br.com.dias.maxine-afx", { kind: "audio-filter", stages: [
+    var list = Model.readModules(moduleLines([moduleObj("com.example.denoiser", { kind: "audio-filter", stages: [
       { id: "mic-denoise", slot: "clean", rank: 300, device: "nvidia-gpu", available: true, reason: "", selected: true }] }),
       moduleObj("org.example.odd", { kind: "<b>sensor</b>" }), moduleObj("org.example.old", { kind: undefined, stages: [] })]), 0, "")
     compare(JSON.stringify(list.modules.map(function(m) { return m.kind })), JSON.stringify(["audio-filter", "bsensor/b", ""]))
@@ -4005,7 +4025,7 @@ TestCase {
     // the Backends section shows the mic stages' pins as any other
     var groups = cfgGroups()
     groups[4].settings.push(cfgRow("modules.pin.mic-denoise", "enum", { label: "Module for mic-denoise", value: "", "default": "", apply: "reload",
-      options: [{ value: "", label: "Automatic" }, { value: "br.com.dias.maxine-afx", label: "NVIDIA Maxine AFX" }, { value: "br.com.dias.voice-cpu", label: "DeepFilterNet" }] }))
+      options: [{ value: "", label: "Automatic" }, { value: "com.example.denoiser", label: "Example Denoiser" }, { value: "br.com.dias.voice-cpu", label: "DeepFilterNet" }] }))
     var back = Model.backendsSectionView(Model.withSetupRead(setup, "config", Model.readConfig(configLines(groups), 0, "")), setupRecord(13))
     compare(JSON.stringify(back.groups[0].rows.map(function(x) { return x.id })),
             JSON.stringify(["modules.profile", "modules.pin.background", "modules.pin.mic-denoise"]))

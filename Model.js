@@ -2964,19 +2964,6 @@ function resolverAnswer(firstLine, lineCount) {
   return lineCount === 1 ? parseResolverLine(firstLine) : ""
 }
 
-// "file:///a/b%20c/" -> "/a/b c"
-function localPathFromUrl(url) {
-  var s = String(url === undefined || url === null ? "" : url)
-  if (s.indexOf("file://") !== 0) return ""
-  var path
-  try {
-    path = decodeURIComponent(s.slice("file://".length))
-  } catch (e) {
-    return ""
-  }
-  return path.length > 1 ? path.replace(/\/+$/, "") : path
-}
-
 // A widget setting as given (cliPlan type-checks it); absent -> null.
 function settingValue(settings, key) {
   if (settings === null || typeof settings !== "object") return null
@@ -3067,9 +3054,8 @@ var CONFIG_VALUE_CAP = 160
 var CONFIG_REASON_CAP = 160
 var CONFIG_FILE_CAP = 96
 var CONFIG_DIR_CAP = 256
-var STAGE_WORD_CAP = 32
-// The payload a summon carries: a few keys only.
-var SETUP_PAYLOAD_CAP = PATH_CAP + 256
+// The payload a summon carries: a view and a config key only.
+var SETUP_PAYLOAD_CAP = 1024
 
 // The grammars (docs/modules.md, "Reserved names"; a config key is a dotted
 // path whose last parts may be a module id).
@@ -3098,29 +3084,32 @@ var FILE_STATUSES = ["loaded", "absent", "error"]
 
 // ---- payload and the panel it forwards to
 
-// The overlay's open() payload -> { view, cliSetting, focus }: "setup" only
-// for an object whose `view` is "setup" (the right click's); anything else,
-// the empty payload of the panel hotkey and the shell's "{}" included, is
-// the bar panel ("panel"). `cliSetting` is the clicked widget's cliPath
-// setting as given (a string within PATH_CAP), else null; `focus` the key
-// of the config row the dialog opens at (the panel's Away image row),
-// a key of the grammar, else "".
+// The overlay's open() payload -> { view, focus }: "setup" only for an
+// object whose `view` is "setup" (the right click's); anything else, the
+// empty payload of the panel hotkey and the shell's "{}" included, is the
+// bar panel ("panel"). `focus` is the key of the config row the dialog opens
+// at (the panel's Away image row), a key of the grammar, else "".
+//
+// The payload never carries a program to run. Any process of the user can
+// summon the overlay with a payload of its own choosing, so a path read from
+// it would let that process pick the executable the shell starts; a `cliPath`
+// key (or any other key but the two above) is ignored. A dialog that has to
+// find the CLI itself (no widget attached) uses the resolver, as a widget
+// without a cliPath setting does.
 function setupPayload(json) {
   var p = null
   if (typeof json === "string" && json !== "" && json.length <= SETUP_PAYLOAD_CAP) {
     try { p = JSON.parse(json) } catch (e) { p = null }
   }
-  if (!isPlainObject(p) || p.view !== "setup") return { view: "panel", cliSetting: null, focus: "" }
-  var cli = p.cliPath
-  return { view: "setup", cliSetting: typeof cli === "string" && cli.length <= PATH_CAP ? cli : null, focus: configKeyOf(p.focus) }
+  if (!isPlainObject(p) || p.view !== "setup") return { view: "panel", focus: "" }
+  return { view: "setup", focus: configKeyOf(p.focus) }
 }
 
-// The right click's payload: the view, the widget's cliPath setting when it
-// has one, and the config row to open at when one is asked for (a key of
-// the grammar).
-function setupPayloadJson(cliSetting, focus) {
+// The right click's payload: the view, and the config row to open at when
+// one is asked for (a key of the grammar). It names no executable; see
+// setupPayload.
+function setupPayloadJson(focus) {
   var p = { view: "setup" }
-  if (typeof cliSetting === "string" && cliSetting.length <= PATH_CAP) p.cliPath = cliSetting
   if (configKeyOf(focus) !== "") p.focus = focus
   return JSON.stringify(p)
 }

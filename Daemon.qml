@@ -1171,9 +1171,13 @@ Singleton {
     onRunningChanged: if (!running && root.watchArmed) root.watchEnded()
   }
 
+  // The resolver: stdout in line mode. The parser hands over each line whole,
+  // however long it is (nothing here limits what it buffers before the
+  // newline); once a line is delivered it is counted, and the first one is
+  // kept cut to Model.PATH_CAP + 1 characters. Only a single-line answer
+  // that parseResolverLine accepts is used.
   property Process resolverProc: Process {
     stdout: SplitParser {
-      // Lines are counted: only a single-line answer is used.
       onRead: function(data) {
         root.resolverLines++
         if (root.resolverLines === 1) root.resolverFirst = String(data).slice(0, Model.PATH_CAP + 1)
@@ -1183,8 +1187,12 @@ Singleton {
   }
 
   // The setup dialog's reads, one at a time (nextRead): stdout in line mode,
-  // as the watch's (a camera or module id must not be garbled), bounded by
-  // readLine; stderr in chunks, as a command's.
+  // as the watch's (a camera or module id must not be garbled); stderr in
+  // chunks, as a command's. The parser delivers each stdout line whole, however
+  // long, and readLine checks its length only then: a line over Model.LINE_CAP,
+  // or one past the lines the read's kind allows, stops the read (readProc is
+  // stopped and the read fails). So the bound is on what is kept, not on what
+  // the parser buffers before a newline arrives.
   property Process readProc: Process {
     stdout: SplitParser {
       onRead: function(data) { root.readLine(data) }
@@ -1204,8 +1212,10 @@ Singleton {
     onTriggered: root.mediaTimeout()
   }
 
-  // The tool lookup: a fixed script, stdout in line mode, at most four
-  // lines kept (Model.toolsFromLines reads two).
+  // The tool lookup: a fixed script, stdout in line mode. Each line is
+  // delivered whole, however long; toolsLine then keeps the first four, each
+  // cut to Model.PATH_CAP + 64 characters, and drops the rest
+  // (Model.toolsFromLines reads two).
   property Process toolsProc: Process {
     stdout: SplitParser {
       onRead: function(data) { root.toolsLine(data) }
@@ -1214,8 +1224,12 @@ Singleton {
   }
 
   // A gallery flow's steps, one at a time (startMediaStep): stdout in line
-  // mode (a path must not be garbled), its first line only, bounded by
-  // mediaLine; stderr in chunks, as a command's.
+  // mode (a path must not be garbled); stderr in chunks, as a command's. The
+  // parser delivers each stdout line whole, however long, and mediaLine
+  // checks it only then, against the caps its own comment gives (a picker
+  // step looks at its first line only). So the bounds are on what is kept
+  // and on when the step is stopped, not on what the parser buffers before
+  // a newline arrives.
   property Process mediaProc: Process {
     stdout: SplitParser {
       onRead: function(data) { root.mediaLine(data) }
