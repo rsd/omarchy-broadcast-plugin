@@ -1562,6 +1562,7 @@ ShellRoot {
 
     previewScenario()
     settingsScenario()
+    healthScenario()
     setupScenario()
     mediaScenario()
 
@@ -3293,6 +3294,215 @@ ShellRoot {
       h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
       h.eq("queue empty", S().pendingIntents.length, 0)
     })
+  }
+
+
+  // ---- the camera's health (mock, interface revision 20) -----------------------
+  //
+  // The snapshot's `camera_health` and the watch's `camera_health` lines, in
+  // the Camera tab for the active camera only: the delivered rate, the
+  // warnings, a suggestion's button (`settings set`, as a switch writes) and
+  // Use recommended settings (`recommended apply`, whose result shows only
+  // when the next camera_health line arrives: the fake appends it).
+  function healthObj(o) {
+    var m = { camera: brioId, delivered_fps: 19.5, nominal_fps: 30, corrupt_frames: 12,
+              warnings: ["<b>Shared</b> USB hub: the camera may drop frames"],
+              suggestions: [{ setting: "effect.video.denoise", value: "on", reason: "The image is noisy in this light" }],
+              has_recommendation: true,
+              recommended: [{ setting: "camera.image.sharpness", label: "Sharpness", value: "150", current: "128" },
+                            { setting: "camera.exposure.power_line_frequency", label: "Anti-flicker", value: "50 Hz", current: "60 Hz" }] }
+    for (var k in o) m[k] = o[k]
+    return m
+  }
+  function healthLine(o) {
+    var m = healthObj(o)
+    m.v = 1
+    m.type = "camera_health"
+    return JSON.stringify(m)
+  }
+  function healthScenario() {
+    var A = function() { return h.widgetA }
+    var S = function() { return h.widgetA.service }
+    var C = function() { return h.content(A()) }
+    var rev20 = function(o) {
+      var m = { interface_revision: 20, settings_schema: 1, settings_revision: 5, loopback_consumers: 0, pipewire_consumers: 0,
+                preview_consumers: 0, pipewire_output: "ready", camera_health: healthObj({}) }
+      for (var k in o) m[k] = o[k]
+      return m
+    }
+    var denoise = stateRow("video", "Video", "effect.video.denoise", "bool", "Noise removal", "false", "false", { scope: "global" })
+    var kinds = function() { return C().stops.map(function(st) { return st.kind + (st.index >= 0 ? st.index : "") }).join(",") }
+    var visible = function(name) { var it = h.find(A(), name); return !!it && it.visible }
+    var args = function(verb) { return h.newLogArgs().filter(function(a) { return a[0] === verb }) }
+
+    h.step("health: a revision-20 daemon reports the MX Brio's health", function() {
+      h.writeFile("settings-state", brioState().concat([denoise]))
+      h.writeFile("settings-camera", [brioId])
+      h.writeFile("settings-rev", ["5"])
+      h.writeFile("settings-serial", ["2"])
+      h.writeFile("settings-per-line", ["4"])
+      h.writeFile("settings-mode", ["list"])
+      h.writeFile("camera-health", [healthLine({})])
+      h.removeFile("camera-health-applied")
+      h.removeFile("delay")
+      h.removeFile("stderr")
+      h.writeFile("exit", ["0"])
+      h.feed([snapshotLine(rev20({}))])
+    }, function() { return !!S().record.health && !!S().record.settings && S().record.settings.groups.length === 5 && h.writerIdle() })
+    h.step("health: the Camera tab", function() { A().open(); h.tab(A(), "camera") }, function() { return C() !== null && h.find(A(), "cameraTab").visible })
+    h.wait(300)
+    h.step("health: the delivered rate, the warning, the suggestion and the recommended settings", function() {
+      h.eq("the block", visible("healthBlock"), true)
+      h.eq("the rate", h.find(A(), "healthDelivers").text, "Delivers 19.5 of 30 fps")
+      h.check("muted", String(h.find(A(), "healthDelivers").color) === String(C().dim), String(h.find(A(), "healthDelivers").color))
+      var w = h.find(A(), "healthWarning-0")
+      h.eq("the warning, as text, behind the caution sign", w.text, h.model.GLYPH_WARNING + " bShared/b USB hub: the camera may drop frames")
+      h.eq("plain text", w.textFormat, Text.PlainText)
+      h.check("not urgent", String(w.color) !== String(barA.urgent), String(w.color))
+      h.eq("one warning", h.find(A(), "healthWarning-1"), null)
+      h.eq("the suggestion's label", h.find(A(), "healthSuggestionLabel-0").text, "Noise removal")
+      h.eq("its reason", h.find(A(), "healthSuggestionReason-0").text, "The image is noisy in this light")
+      h.eq("its button", h.find(A(), "healthSuggestionButton-0").text, "Turn on")
+      h.check("the button on the right", h.find(A(), "healthSuggestionButton-0").x > h.find(A(), "healthSuggestionLabel-0").x)
+      h.eq("a rule above the health", visible("healthSeparator"), true)
+      h.check("the suggestion's label wraps, never elides", h.find(A(), "healthSuggestionLabel-0").wrapMode === Text.Wrap
+              && h.find(A(), "healthSuggestionLabel-0").elide === Text.ElideNone)
+      h.eq("one suggestion: no line to open more", visible("healthSuggestionsMore"), false)
+      h.eq("the recommended block", visible("recommendedBlock"), true)
+      h.eq("its title, as the panel's section headers", h.find(A(), "recommendedTitle").text, "RECOMMENDED FOR THIS CAMERA")
+      h.eq("the changes folded to one line", h.find(A(), "recommendedSummary").text, "2 changes: Sharpness, Anti-flicker")
+      h.eq("no change listed while folded", h.find(A(), "recommendedChange-0"), null)
+      h.eq("the button", h.find(A(), "recommendedButton").text, "Use recommended settings")
+      var title = h.find(A(), "recommendedTitle"), button = h.find(A(), "recommendedButton")
+      var tp = title.mapToItem(C(), 0, 0), bp = button.mapToItem(C(), 0, 0)
+      h.check("the button on its title's line, at the right (as Reset on SETTINGS)",
+              bp.x > tp.x + title.implicitWidth && bp.y < tp.y + title.height && tp.y < bp.y + button.height
+              && Math.abs((bp.x + button.width) - h.find(A(), "settingsReset").mapToItem(C(), 0, 0).x - h.find(A(), "settingsReset").width) < 1,
+              JSON.stringify([tp, bp]))
+      h.check("above the settings' title", bp.y < h.find(A(), "settingsTitle").mapToItem(C(), 0, 0).y)
+      h.eq("stops", kinds(), "switch,preview,fps,tabs,camera0,camera1,camera2,next,suggestion0,recommended,recommended-changes,reset,group0,"
+           + "setting0,setting1,setting2,setting3,setting4,group1,group2,group3")
+      h.eq("the Camera tab carries the caution sign", h.find(A(), "tab-camera").iconText, h.model.GLYPH_WARNING)
+      h.eq("and says so", h.find(A(), "tab-camera").Accessible.name, "Camera, with a warning")
+      h.eq("the other tabs do not", h.find(A(), "tab-effect").iconText + h.find(A(), "tab-mic").iconText + h.find(A(), "tab-status").iconText, "")
+      h.eq("the chips keep one height", h.find(A(), "tab-camera").height, h.find(A(), "tab-effect").height)
+      h.eq("nothing written by showing it", args("settings").length + args("recommended").length, 0)
+      // Three cameras, the health and two changes on a 1080 screen: the
+      // panel does not scroll, and the settings' groups keep a usable
+      // viewport of their own (at least six rows), never a sliver.
+      var flick = h.find(A(), "panelFlick")
+      h.check("the panel itself does not scroll", !flick.interactive && flick.contentHeight <= flick.height + 0.5,
+              flick.contentHeight + " in " + flick.height)
+      var groups = h.find(A(), "settingsFlick")
+      var rowH = h.find(A(), "setting-camera.image.brightness").height
+      h.check("the settings' groups keep at least six rows in view", rowH > 0 && groups.height >= 6 * rowH,
+              groups.height + " for rows of " + rowH)
+      h.eq("Reset to defaults still in view, above the groups", visible("settingsReset"), true)
+    })
+    h.grabStep(function() { return A().popup }, "h1-camera-health.png")
+
+    h.step("health: open the recommended changes", function() {
+      var line = h.find(A(), "recommendedChangesLine")
+      keys.mouseClick(line, line.width / 2, line.height / 2)
+    }, function() { return h.find(A(), "recommendedChange-1") !== null })
+    h.wait(250)
+    h.step("health: the changes, listed", function() {
+      h.eq("the changes", h.find(A(), "recommendedChange-0").text + " | " + h.find(A(), "recommendedChange-1").text,
+           "Sharpness: 128 → 150 | Anti-flicker: 60 Hz → 50 Hz")
+      // Opened by hand, the list may take the groups' room down to their
+      // minimum (past it the panel scrolls, the designed fallback); the
+      // groups still show and Reset stays reachable.
+      h.eq("the settings still drawn", visible("settingsReset") && visible("settingsFlick"), true)
+    })
+    h.grabStep(function() { return A().popup }, "h2-camera-health-changes.png")
+    h.step("health: Enter on the line folds them again", function() {
+      C().setCursor("recommended-changes", -1)
+      h.key(Qt.Key_Return)
+    }, function() { return h.find(A(), "recommendedChange-0") === null })
+    h.step("health: another tab shows the camera's warning on its button", function() { h.tab(A(), "status") },
+           function() { return !h.find(A(), "cameraTab").visible })
+    h.grabStep(function() { return A().popup }, "h3-status-tab-warning.png")
+    h.step("health: back to the Camera tab", function() { h.tab(A(), "camera") }, function() { return h.find(A(), "cameraTab").visible })
+
+    h.step("health: Turn on writes the setting, as its switch would", function() {
+      h.markLog()
+      h.find(A(), "healthSuggestionButton-0").clicked()
+    }, function() { return args("settings").length >= 1 && !S().commandBusy }, 3000)
+    h.step("health: the write", function() {
+      h.eq("argv", JSON.stringify(args("settings")), JSON.stringify([["settings", "set", "--", "effect.video.denoise", "true"]]))
+      h.eq("no error", S().commandError, "")
+      // the daemon's next value drops the suggestion
+      h.feed([healthLine({ suggestions: [] })])
+    }, function() { return S().record.health.suggestions.length === 0 })
+    h.wait(250)
+    h.step("health: the suggestion is gone", function() {
+      h.eq("no row", h.find(A(), "healthSuggestion-0"), null)
+      h.eq("the rate and the warning stay", visible("healthDelivers") && visible("healthWarning-0"), true)
+      h.eq("stops", kinds().indexOf("suggestion"), -1)
+    })
+
+    h.step("health: a refused apply shows the error and changes nothing", function() {
+      h.writeFile("exit", ["1"])
+      h.writeFile("stderr", ["omarchy-broadcast: this camera has no recommended settings"])
+      h.writeFile("camera-health-applied", [healthLine({ suggestions: [], recommended: [] })])
+    }, function() { return h.writerIdle() })
+    h.step("health: click Use recommended settings", function() {
+      h.markLog()
+      S().commandError = ""
+      h.find(A(), "recommendedButton").clicked()
+    }, function() { return S().commandError !== "" && !S().commandBusy }, 3000)
+    h.wait(250)
+    h.step("health: refused", function() {
+      h.eq("argv", JSON.stringify(args("recommended")), JSON.stringify([["recommended", "apply"]]))
+      h.check("the error", S().commandError.indexOf("no recommended settings") >= 0, S().commandError)
+      h.eq("the changes still listed", visible("recommendedBlock") && S().record.health.recommended.length === 2, true)
+      h.writeFile("exit", ["0"])
+      h.removeFile("stderr")
+    }, function() { return h.writerIdle() })
+
+    h.step("health: Enter on Use recommended settings applies them", function() {
+      h.markLog()
+      C().setCursor("recommended", -1)
+      h.eq("the button has the cursor", h.find(A(), "recommendedButton").hasCursor, true)
+      h.key(Qt.Key_Return)
+    }, function() { return args("recommended").length >= 1 && S().record.health.recommended.length === 0 }, 3000)
+    h.wait(250)
+    h.step("health: applied; the daemon's next value shows it", function() {
+      h.eq("argv", JSON.stringify(args("recommended")), JSON.stringify([["recommended", "apply"]]))
+      h.eq("no error", S().commandError, "")
+      h.eq("the recommended block is gone", visible("recommendedBlock"), false)
+      h.eq("stops", kinds().indexOf("recommended"), -1)
+    })
+
+    h.step("health: another camera's health shows nothing", function() {
+      h.feed([healthLine({ camera: fhdId })])
+    }, function() { return S().record.health.camera === fhdId })
+    h.wait(250)
+    h.step("health: nothing for another camera", function() {
+      h.eq("no block", visible("healthBlock"), false)
+      h.eq("no recommended settings", visible("recommendedBlock"), false)
+    })
+    h.step("health: a daemon below revision 20 (null)", function() {
+      h.feed([snapshotLine(rev20({ interface_revision: 19, camera_health: null }))])
+    }, function() { return S().record.interfaceRevision === 19 && S().record.health === null })
+    h.wait(250)
+    h.step("health: nothing at all", function() {
+      h.eq("no block", visible("healthBlock"), false)
+      h.eq("no recommended settings", visible("recommendedBlock"), false)
+      h.eq("the settings still drawn", visible("settingsArea"), true)
+    })
+    h.step("health: close", function() {
+      A().close()
+      h.removeFile("settings-mode")
+      h.removeFile("settings-state")
+      h.removeFile("settings-camera")
+      h.removeFile("settings-rev")
+      h.removeFile("settings-serial")
+      h.removeFile("settings-per-line")
+      h.removeFile("camera-health")
+      h.removeFile("camera-health-applied")
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.interfaceRevision === 4 && h.writerIdle() })
   }
 
   // ---- the setup dialog (mock): the overlay, its reads and writes ------------------

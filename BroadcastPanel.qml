@@ -18,10 +18,16 @@ import "Model.js" as Model
 //           row, then the daemon's other global
 //           settings (strength, noise removal, ...) drawn generically, or
 //           the hint that replaces them (a daemon below revision 9);
-//   Camera  the camera list and Next camera, then the camera's settings as
-//           the daemon publishes them (SettingsView: groups that open and
-//           close, a widget per type, Reset to defaults), or the hint that
-//           replaces them;
+//   Camera  the camera list and Next camera, then from interface revision
+//           20 the active camera's health (the rate it really delivers when
+//           short of its mode's, the daemon's warnings about it, and effect
+//           suggestions, each with its button, the first shown and the
+//           rest behind a line that opens them), then the camera's settings
+//           as the daemon publishes them: Use recommended settings on its
+//           title's line and the changes it would make folded to one line
+//           that opens their list, when there are any, then SettingsView
+//           (groups that open and close, a widget per type, Reset to
+//           defaults), or the hint that replaces them;
 //   Mic     the Omarchy Broadcast Mic: its own switch (`mic on|off`), its
 //           state, the apps recording from it, the delay its processing
 //           adds, the modules it runs on and its error, then its settings
@@ -132,6 +138,14 @@ Item {
   // of surface "mic"), drawn generically.
   readonly property var micView: Model.micView(record)
   readonly property var micSettings: Model.micSettingsView(record, Daemon.settingDrafts)
+  // The Camera tab's health part (interface revision 20): only for the
+  // active camera, as the daemon last reported it (Model.healthView).
+  // Its suggestions and recommended changes open or fold on their lines:
+  // this panel's choice of the session (memory only), for one camera
+  // (Model.healthOpenAfter); null: both folded.
+  property var healthOpen: null
+  readonly property var health: Model.healthView(record, healthOpen)
+  readonly property bool recommendedShown: Model.recommendedShown(health)
   // What the keyboard walks and the rows act on: the tab shown's section.
   readonly property var activeView: tab === "effect" ? effectSettings : (tab === "mic" ? micSettings : settingsView)
   readonly property SettingsView activeBlock: tab === "effect" ? effectSettingsBlock : (tab === "mic" ? micSettingsBlock : settingsBlock)
@@ -141,11 +155,11 @@ Item {
   // ---- the tab shown ----------------------------------------------------------
   // Always a word of Model.PANEL_TABS (showTab validates it).
   property string tab: Model.PANEL_TAB_DEFAULT
-  readonly property var tabOptions: Model.panelTabOptions(tab)
+  readonly property var tabOptions: Model.panelTabOptions(tab, health)
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings)
+  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
@@ -393,6 +407,27 @@ Item {
     for (var i = 0; i < groups.length; i++) if (groups[i].id === id) return setGroupOpen(i, !groups[i].expanded)
   }
 
+  // A suggestion's button: its setting written as a switch or a choice is
+  // (Daemon.commitSetting checks it against the row again). The suggestion
+  // goes when the daemon's next camera_health line leaves it out.
+  function applySuggestion(index) {
+    var s = root.health.suggestions[index]
+    if (!root.available || !s) return false
+    return Daemon.commitSetting(s.setting, s.value)
+  }
+
+  // Open or fold the suggestions past the first ("suggestions") or the
+  // recommended changes ("changes"). Nothing is written.
+  function toggleHealthList(which) {
+    root.healthOpen = Model.healthOpenAfter(root.healthOpen, root.health, which)
+  }
+
+  // Use recommended settings, for the camera whose changes are listed.
+  function applyRecommended() {
+    if (!root.available || !root.recommendedShown) return false
+    return Daemon.applyRecommended()
+  }
+
   // Queued behind a running command rather than refused: it replaces the
   // setting writes still to run (Model.enqueueIntent).
   function resetSettings() {
@@ -428,6 +463,10 @@ Item {
     else if (stop.kind === "background") activateBackground(backgroundCursor)
     else if (stop.kind === "away") openAwayImage()
     else if (stop.kind === "reset") resetSettings()
+    else if (stop.kind === "suggestion") applySuggestion(stop.index)
+    else if (stop.kind === "recommended") applyRecommended()
+    else if (stop.kind === "suggestions-more") toggleHealthList("suggestions")
+    else if (stop.kind === "recommended-changes") toggleHealthList("changes")
     else if (stop.kind === "group") setGroupOpen(stop.index, !(root.settingsView.groups[stop.index] || {}).expanded)
     else if (stop.kind === "setting") activateSetting(stop.index)
     else if (stop.kind === "camera") {
@@ -469,6 +508,10 @@ Item {
     else if (stop.kind === "group") scrollItemIntoView(settingsBlock.groupItem(stop.index), true)
     else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index), true)
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
+    else if (stop.kind === "suggestion") scrollItemIntoView(suggestionRepeater.itemAt(stop.index))
+    else if (stop.kind === "recommended") scrollItemIntoView(recommendedButton)
+    else if (stop.kind === "suggestions-more") scrollItemIntoView(suggestionsMore)
+    else if (stop.kind === "recommended-changes") scrollItemIntoView(recommendedChangesLine)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "background") scrollItemIntoView(backgroundLine)
     else if (stop.kind === "away") scrollItemIntoView(awayLine)
@@ -966,6 +1009,10 @@ Item {
                 objectName: "tab-" + modelData.value
                 width: (tabRow.width - tabRow.spacing * (Model.PANEL_TABS.length - 1)) / Model.PANEL_TABS.length
                 text: modelData.label
+                // The Camera tab's caution sign while the camera has a warning,
+                // at the label's size so the chip keeps the row's height.
+                iconText: modelData.glyph
+                iconSize: fontSize
                 tooltipText: modelData.description + " (" + (index + 1) + ")"
                 selected: modelData.selected
                 // One highlight: the panel cursor, which the mouse moves too.
@@ -977,7 +1024,7 @@ Item {
                 accent: root.accent
                 fontFamily: root.fontFamily
                 Accessible.role: Accessible.PageTab
-                Accessible.name: modelData.label
+                Accessible.name: modelData.name
                 Accessible.description: modelData.description
                 Accessible.selectable: true
                 Accessible.selected: modelData.selected
@@ -1400,6 +1447,177 @@ Item {
               onClicked: Daemon.nextCamera()
             }
 
+            // ---- the active camera's health (interface revision 20): the
+            // rate it really delivers when short of its mode's, the daemon's
+            // warnings about it (as the daemon's own warning: the normal text
+            // colour behind a caution sign), and effect suggestions, each
+            // with its button: the first, then a line that opens the rest
+            // (Model.healthView folds them, so the settings' groups keep
+            // their room). Nothing for another camera, or before the daemon
+            // reports it; a button writes only on a click, and what it
+            // changed shows when the daemon next reports. Count models, as
+            // SettingsView's: a new report changes what a row shows.
+            PanelSeparator {
+              objectName: "healthSeparator"
+              visible: root.health.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: healthBlock
+              objectName: "healthBlock"
+              width: parent.width
+              spacing: Style.space(6)
+              visible: root.health.visible
+
+              Text {
+                objectName: "healthDelivers"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.health.delivers
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                objectName: "healthWarnings"
+                model: root.health.warnings.length
+                delegate: Text {
+                  required property int index
+                  readonly property string warning: root.health.warnings[index] || ""
+                  objectName: "healthWarning-" + index
+                  Accessible.role: Accessible.StaticText
+                  Accessible.name: "Warning: " + warning
+                  textFormat: Text.PlainText
+                  width: parent ? parent.width : 0
+                  wrapMode: Text.Wrap
+                  text: Model.GLYPH_WARNING + " " + warning
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Repeater {
+                id: suggestionRepeater
+                objectName: "healthSuggestions"
+                model: root.health.shownSuggestions
+                delegate: Item {
+                  id: suggestionRow
+                  required property int index
+                  readonly property var suggestion: root.health.suggestions[index] || ({ label: "", reason: "", action: "" })
+                  objectName: "healthSuggestion-" + index
+                  width: parent ? parent.width : 0
+                  implicitHeight: Math.max(suggestionText.implicitHeight, suggestionButton.implicitHeight)
+                  height: implicitHeight
+
+                  Column {
+                    id: suggestionText
+                    anchors.left: parent.left
+                    anchors.right: suggestionButton.left
+                    anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                      objectName: "healthSuggestionLabel-" + suggestionRow.index
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      wrapMode: Text.Wrap
+                      text: suggestionRow.suggestion.label
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                    Text {
+                      objectName: "healthSuggestionReason-" + suggestionRow.index
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      wrapMode: Text.Wrap
+                      visible: text !== ""
+                      text: suggestionRow.suggestion.reason
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+
+                  Button {
+                    id: suggestionButton
+                    objectName: "healthSuggestionButton-" + suggestionRow.index
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: suggestionRow.suggestion.action
+                    hasCursor: root.hasCursor("suggestion", suggestionRow.index)
+                    bordered: true
+                    foreground: root.foreground
+                    background: Commons.Color.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.role: Accessible.Button
+                    Accessible.name: suggestionRow.suggestion.label + ": " + suggestionRow.suggestion.action
+                    Accessible.description: suggestionRow.suggestion.reason
+                    onHovered: function(on) { if (on) root.setCursor("suggestion", suggestionRow.index) }
+                    onClicked: root.applySuggestion(suggestionRow.index)
+                  }
+                }
+              }
+
+              // "+2 more" / "Fewer suggestions": opens or folds the
+              // suggestions past the first, as a settings group's header
+              // (the chevron at the right edge).
+              CursorSurface {
+                id: suggestionsMore
+                objectName: "healthSuggestionsMore"
+                width: parent.width
+                visible: root.health.more.visible
+                implicitHeight: suggestionsMoreText.implicitHeight + Style.space(6)
+                hasCursor: root.hasCursor("suggestions-more", -1)
+                foreground: root.foreground
+                fill: root.hoverFill
+                Accessible.role: Accessible.Button
+                Accessible.name: root.health.more.text
+                Accessible.description: root.health.shownSuggestions < root.health.suggestions.length ? "Collapsed" : "Expanded"
+
+                Text {
+                  id: suggestionsMoreText
+                  objectName: "healthSuggestionsMoreText"
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  anchors.right: suggestionsMoreGlyph.left
+                  anchors.rightMargin: Style.space(6)
+                  anchors.verticalCenter: parent.verticalCenter
+                  elide: Text.ElideRight
+                  text: root.health.more.text
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  id: suggestionsMoreGlyph
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(6)
+                  width: Style.space(16)
+                  anchors.verticalCenter: parent.verticalCenter
+                  horizontalAlignment: Text.AlignHCenter
+                  text: root.health.more.glyph
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onEntered: root.setCursor("suggestions-more", -1)
+                  onClicked: root.toggleHealthList("suggestions")
+                }
+              }
+            }
+
             // ---- camera settings: what the daemon publishes for the camera.
             // While the daemon has the camera open (starting or active) a
             // change applies at once and shows in the preview above;
@@ -1411,9 +1629,127 @@ Item {
               objectName: "settingsArea"
               width: parent.width
               spacing: Style.space(10)
-              visible: root.settingsView.visible
+              visible: root.settingsView.visible || root.recommendedShown
 
               PanelSeparator { foreground: root.foreground }
+
+              // ---- Use recommended settings (interface revision 20): its
+              // title, and on its line the button (as Reset to defaults sits
+              // on SETTINGS), then the changes the daemon's row for this
+              // camera would make as one line ("2 changes: Sharpness, ...")
+              // that opens the list (label: now -> then). Shown only while
+              // there are changes, applied only on the button's click.
+              Column {
+                id: recommendedBlock
+                objectName: "recommendedBlock"
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.recommendedShown
+
+                Item {
+                  objectName: "recommendedHeader"
+                  width: parent.width
+                  height: Math.max(recommendedTitle.implicitHeight, recommendedButton.implicitHeight)
+
+                  PanelSectionHeader {
+                    id: recommendedTitle
+                    objectName: "recommendedTitle"
+                    anchors.left: parent.left
+                    anchors.right: recommendedButton.left
+                    anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: Model.RECOMMENDED_TITLE
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                  }
+
+                  Button {
+                    id: recommendedButton
+                    objectName: "recommendedButton"
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.RECOMMENDED_LABEL
+                    tooltipText: Model.RECOMMENDED_TOOLTIP
+                    bordered: true
+                    hasCursor: root.hasCursor("recommended", -1)
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.role: Accessible.Button
+                    Accessible.name: Model.RECOMMENDED_LABEL
+                    Accessible.description: Model.RECOMMENDED_TOOLTIP
+                    onHovered: function(on) { if (on) root.setCursor("recommended", -1) }
+                    onClicked: root.applyRecommended()
+                  }
+                }
+
+                // The changes in one line, with the chevron of a settings
+                // group's header: a click, Enter or Space opens the list.
+                CursorSurface {
+                  id: recommendedChangesLine
+                  objectName: "recommendedChangesLine"
+                  width: parent.width
+                  implicitHeight: recommendedSummary.implicitHeight + Style.space(6)
+                  hasCursor: root.hasCursor("recommended-changes", -1)
+                  foreground: root.foreground
+                  fill: root.hoverFill
+                  Accessible.role: Accessible.Button
+                  Accessible.name: root.health.changes.text
+                  Accessible.description: root.health.changes.open ? "Expanded" : "Collapsed"
+
+                  Text {
+                    id: recommendedSummary
+                    objectName: "recommendedSummary"
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.right: recommendedGlyph.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: root.health.changes.text
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Text {
+                    id: recommendedGlyph
+                    textFormat: Text.PlainText
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(6)
+                    width: Style.space(16)
+                    anchors.verticalCenter: parent.verticalCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    text: root.health.changes.glyph
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onEntered: root.setCursor("recommended-changes", -1)
+                    onClicked: root.toggleHealthList("changes")
+                  }
+                }
+
+                Repeater {
+                  objectName: "recommendedChanges"
+                  model: root.health.changes.open ? root.health.recommended.length : 0
+                  delegate: Text {
+                    required property int index
+                    objectName: "recommendedChange-" + index
+                    textFormat: Text.PlainText
+                    width: parent ? parent.width : 0
+                    wrapMode: Text.Wrap
+                    text: (root.health.recommended[index] || { text: "" }).text
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+              }
 
               SettingsView {
                 id: settingsBlock

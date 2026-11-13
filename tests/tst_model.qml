@@ -5127,4 +5127,216 @@ TestCase {
     compare(kindsOf(Model.setupStops("backgrounds", old, Model.setupSections(rev15()))).indexOf("media-copy"), -1)
     compare(Model.CONVERT_NOTE_TEXT, "Without an NVIDIA GPU this video shows as a still. To play it without one, convert it in a terminal; the copy lands in your videos folder:")
   }
+
+  // ---- the camera's health (interface revision 20)
+
+  function healthObj(o) {
+    return merged({ camera: brioId, delivered_fps: 19.5, nominal_fps: 30, corrupt_frames: 0, warnings: [],
+                    suggestions: [{ setting: denoiseId, value: "on", reason: "The image is noisy in this light" }],
+                    has_recommendation: true,
+                    recommended: [{ setting: "camera.image.sharpness", label: "Sharpness", value: "5", current: "3" }] }, o || {})
+  }
+  function healthLine(o) { return merged({ v: 1, type: "camera_health" }, healthObj(o)) }
+  function rev20(o) { return merged({ interface_revision: 20, settings_schema: 1, settings_revision: 5, camera_health: healthObj() }, o || {}) }
+  // The MX Brio with the global groups (noise removal off), at revision 20.
+  function healthRecord(o, g) {
+    return feedAll(snap(rev20(o)), setLines(brioGroups().concat(globalGroups(merged({ denoise: false }, g || {}))))).record
+  }
+
+  function test_health_snapshot_and_lines() {
+    var r = snap(rev20({}))
+    compare(JSON.stringify(r.health), JSON.stringify({ camera: brioId, deliveredFps: 19.5, nominalFps: 30, corruptFrames: 0, warnings: [],
+      suggestions: [{ setting: denoiseId, value: "on", reason: "The image is noisy in this light" }], hasRecommendation: true,
+      recommended: [{ setting: "camera.image.sharpness", label: "Sharpness", value: "5", current: "3" }] }))
+    var res = Model.reduce(r, line(healthLine({ delivered_fps: 29.9, warnings: ["Shared USB hub"] })))
+    compare(res.outcome, "camera_health")
+    compare(res.record.health.deliveredFps, 29.9)
+    compare(JSON.stringify(res.record.health.warnings), JSON.stringify(["Shared USB hub"]))
+    compare(r.health.deliveredFps, 19.5, "records are never mutated")
+    // a state line keeps it; a snapshot replaces it; null and absent read as none
+    compare(Model.reduce(res.record, line(stateObject({ interface_revision: 20 }))).record.health.deliveredFps, 29.9)
+    compare(snap(rev20({ camera_health: null })).health, null)
+    compare(snap(rev9({})).health, null)
+    compare(Model.reduce(r, line(snapshotObject(rev20({ camera_health: null })))).record.health, null)
+    // not linked: ignored
+    compare(Model.reduce(Model.emptyRecord("not-running"), line(healthLine())).outcome, "ignored")
+    // not measured, hostile and malformed fields
+    var h = Model.reduce(r, line(healthLine({ delivered_fps: -1, nominal_fps: "30", corrupt_frames: -2,
+      warnings: ["<b>bad</b> & frames\nhere", 7, ""],
+      suggestions: [{ setting: "Effect.Video", value: "on", reason: "x" }, { setting: denoiseId, value: "on; rm", reason: "x" },
+                    "nope", { setting: denoiseId, value: "on", reason: "<img src=x>Noisy" }],
+      has_recommendation: "yes",
+      recommended: [{ setting: "camera.image.sharpness", label: "", value: "5", current: "3" }, { setting: "bad id", label: "X", value: "1", current: "2" },
+                    { setting: "camera.image.contrast", label: "Contrast <i>", value: 5, current: "<b>3</b>" }] }))).record.health
+    compare(h.deliveredFps, null)
+    compare(h.nominalFps, null)
+    compare(h.corruptFrames, -1)
+    compare(JSON.stringify(h.warnings), JSON.stringify(["bbad/b frames here"]))
+    compare(JSON.stringify(h.suggestions), JSON.stringify([{ setting: denoiseId, value: "on", reason: "img src=xNoisy" }]))
+    compare(h.hasRecommendation, false)
+    compare(JSON.stringify(h.recommended), JSON.stringify([{ setting: "camera.image.contrast", label: "Contrast i", value: "", current: "b3/b" }]))
+    // lists are read to their caps only
+    var many = []
+    for (var i = 0; i < 50; i++) many.push("Warning " + i)
+    compare(Model.reduce(r, line(healthLine({ warnings: many }))).record.health.warnings.length, Model.HEALTH_WARNINGS_CAP)
+  }
+
+  function test_health_delivers_text() {
+    var at = function(got, nominal) { return Model.deliversText({ deliveredFps: got, nominalFps: nominal }) }
+    compare(at(19.5, 30), "Delivers 19.5 of 30 fps")
+    compare(at(28.4, 30), "Delivers 28.4 of 30 fps", "below 95 %")
+    compare(at(28.5, 30), "", "95 % exactly: nothing")
+    compare(at(30, 30), "")
+    compare(at(14.96, 29.97), "Delivers 15 of 30 fps", "one decimal at most, none when whole")
+    compare(at(null, 30), "", "not measured")
+    compare(at(10, null), "", "no capture rate")
+    compare(at(0, 30), "Delivers 0 of 30 fps")
+    compare(at(10, 0), "")
+    compare(Model.deliversText(null), "")
+  }
+
+  function test_health_view() {
+    var r = healthRecord()
+    var v = Model.healthView(r)
+    compare(v.visible, true)
+    compare(v.camera, brioId)
+    compare(v.delivers, "Delivers 19.5 of 30 fps")
+    compare(JSON.stringify(v.suggestions), JSON.stringify([{ setting: denoiseId, label: "Noise removal", reason: "The image is noisy in this light",
+                                                             action: "Turn on", value: true }]))
+    compare(JSON.stringify(v.recommended), JSON.stringify([{ setting: "camera.image.sharpness", label: "Sharpness", text: "Sharpness: 3 → 5" }]))
+    compare(JSON.stringify(v.changes), JSON.stringify({ open: false, text: "1 change: Sharpness", glyph: Model.GLYPH_COLLAPSED }))
+    compare(v.shownSuggestions, 1)
+    compare(v.more.visible, false, "one suggestion: nothing to open")
+    compare(Model.recommendedShown(v), true)
+    // nothing for another camera, no camera, a null value, an unavailable daemon
+    var other = Model.reduce(r, line(healthLine({ camera: fhdId }))).record
+    compare(Model.healthView(other).visible, false)
+    compare(Model.healthView(other).recommended.length, 0)
+    compare(Model.recommendedShown(Model.healthView(other)), false)
+    compare(Model.healthView(Model.reduce(r, line(healthLine({ camera: "" }))).record).visible, false)
+    var moved = Model.reduce(r, line({ v: 1, type: "cameras", active_camera: fhdId, cameras: cameraObjects(), cameras_truncated: false })).record
+    compare(Model.healthView(moved).visible, false, "the active camera changed: the old camera's health goes")
+    compare(Model.healthView(snap(rev20({ camera_health: null }))).visible, false)
+    compare(Model.healthView(Model.emptyRecord("not-running")).visible, false)
+    // full rate, no warnings, no suggestions: nothing to show (the recommended
+    // settings are in the settings area, apart)
+    var quiet = Model.reduce(r, line(healthLine({ delivered_fps: 30, suggestions: [] }))).record
+    compare(Model.healthView(quiet).visible, false)
+    compare(Model.recommendedShown(Model.healthView(quiet)), true)
+    compare(Model.healthView(Model.reduce(r, line(healthLine({ delivered_fps: 30, suggestions: [], warnings: ["Shared hub"] }))).record).visible, true)
+    compare(Model.recommendedShown(Model.healthView(Model.reduce(r, line(healthLine({ recommended: [] }))).record)), false)
+  }
+
+  function test_health_suggestions_actionable_only() {
+    var sugg = function(list, g) {
+      return Model.healthView(feedAll(snap(rev20({ camera_health: healthObj({ suggestions: list }) })),
+                                      setLines(brioGroups().concat(globalGroups(merged({ denoise: false }, g || {}))))).record).suggestions
+    }
+    compare(sugg([{ setting: denoiseId, value: "on", reason: "" }], { denoise: true }).length, 0, "already on")
+    compare(sugg([{ setting: denoiseId, value: "on", reason: "" }], { denoiseOk: false }).length, 0, "greyed out")
+    compare(sugg([{ setting: "effect.video.enhance", value: "on", reason: "" }]).length, 0, "no such row")
+    compare(sugg([{ setting: "camera.image.brightness", value: "1", reason: "" }]).length, 0, "a camera setting is not a suggestion")
+    compare(sugg([{ setting: denoiseId, value: "maybe", reason: "" }]).length, 0, "not a value of the row")
+    compare(JSON.stringify(sugg([{ setting: denoiseId, value: "true", reason: "" }]).map(function(x) { return x.action })), JSON.stringify(["Turn on"]))
+    var blur = sugg([{ setting: modeId, value: "blur", reason: "Busy background" }, { setting: strengthId, value: "50", reason: "" }], { effect: "none" })
+    compare(JSON.stringify(blur.map(function(x) { return x.action + "=" + x.value })), JSON.stringify(["Use Blur=blur"]), "the strength is greyed under none")
+    var strength = sugg([{ setting: strengthId, value: "80", reason: "" }], { effect: "blur" })
+    compare(JSON.stringify(strength.map(function(x) { return x.action + "=" + x.value })), JSON.stringify(["Set to 80 %=80"]))
+    // no settings (an old CLI's snapshot): nothing can be acted on
+    compare(Model.healthView(snap(rev20({}))).suggestions.length, 0)
+  }
+
+  function test_health_recommended_argv_and_queue() {
+    var r = healthRecord()
+    var intent = { verb: "recommended", camera: brioId }
+    compare(JSON.stringify(Model.intentArgv(intent, cli, r)), JSON.stringify([cli, "recommended", "apply"]))
+    compare(Model.intentArgv({ verb: "recommended", camera: fhdId }, cli, r), null, "another camera's changes")
+    compare(Model.intentArgv({ verb: "recommended" }, cli, r), null, "bound to a camera")
+    compare(Model.intentArgv(intent, "relative/cli", r), null)
+    compare(Model.intentArgv(intent, cli, Model.reduce(r, line(healthLine({ recommended: [] }))).record), null, "nothing left to change")
+    var moved = Model.reduce(r, line({ v: 1, type: "cameras", active_camera: fhdId, cameras: cameraObjects(), cameras_truncated: false })).record
+    compare(Model.intentArgv(intent, cli, moved), null, "the camera changed before it ran")
+    compare(Model.intentArgv(intent, cli, Model.emptyRecord("not-running")), null)
+    // an other ask: queued behind camera writes made before it, replaced by a later other ask
+    var write = { verb: "setting", id: "camera.image.brightness", value: 10, camera: brioId }
+    var q = Model.enqueueIntent(Model.enqueueIntent([], write), intent)
+    compare(JSON.stringify(q.map(function(x) { return x.verb })), JSON.stringify(["setting", "recommended"]))
+    q = Model.enqueueIntent(q, { verb: "next" })
+    compare(JSON.stringify(q.map(function(x) { return x.verb })), JSON.stringify(["setting", "next"]))
+    compare(Model.isSettingIntent(intent), false)
+  }
+
+  function test_health_stops() {
+    var r = healthRecord({ cameras: [cameraObjects()[0]] })
+    var sv = Model.settingsView(r, {}, {})
+    var hv = Model.healthView(r)
+    var stops = Model.cursorStops(r, 1, false, "camera", sv, Model.effectSettingsView(r, {}), Model.micSettingsView(r, {}), hv)
+    compare(kindsOf(stops.slice(0, 7)), JSON.stringify(["switch", "tabs", "camera", "suggestion", "recommended", "recommended-changes", "reset"]))
+    compare(stops[3].index, 0)
+    compare(Model.stopHasIndex("suggestion"), true)
+    compare(Model.stopIndex(stops, "suggestion", 0), 3)
+    compare(Model.stopIndex(stops, "recommended", -1), 4)
+    compare(kindsOf(Model.cursorStops(r, 1, false, "camera", sv, null, null)).indexOf("suggestion"), -1, "no health view: no stops")
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", sv, Model.effectSettingsView(r, {}), null, hv)).indexOf("suggestion"), -1, "the Camera tab's only")
+  }
+
+  // Two suggestions (noise removal and the effect) and three changes: folded,
+  // one suggestion and a "+1 more" line, the changes as one line; each opens
+  // on its line, for that camera only, and the cursor walks what is drawn.
+  function test_health_folding() {
+    var two = [{ setting: denoiseId, value: "on", reason: "Noisy" }, { setting: modeId, value: "blur", reason: "Busy background" }]
+    var three = [{ setting: "camera.image.sharpness", label: "Sharpness", value: "5", current: "3" },
+                 { setting: "camera.image.contrast", label: "Contrast", value: "40", current: "32" },
+                 { setting: "camera.exposure.power_line_frequency", label: "Anti-flicker", value: "50 Hz", current: "60 Hz" }]
+    var r = healthRecord({ cameras: [cameraObjects()[0]], camera_health: healthObj({ suggestions: two, recommended: three }) }, { effect: "none" })
+    var sv = Model.settingsView(r, {}, {})
+    var stopsOf = function(v) {
+      return kindsOf(Model.cursorStops(r, 1, false, "camera", sv, null, null, v).filter(function(s) {
+        return ["suggestion", "suggestions-more", "recommended", "recommended-changes"].indexOf(s.kind) >= 0 }))
+    }
+    var v = Model.healthView(r)
+    compare(v.suggestions.length, 2)
+    compare(v.shownSuggestions, 1)
+    compare(JSON.stringify(v.more), JSON.stringify({ visible: true, text: "+1 more", glyph: Model.GLYPH_COLLAPSED }))
+    compare(JSON.stringify(v.changes), JSON.stringify({ open: false, text: "3 changes: Sharpness, Contrast, Anti-flicker", glyph: Model.GLYPH_COLLAPSED }))
+    compare(stopsOf(v), JSON.stringify(["suggestion", "suggestions-more", "recommended", "recommended-changes"]))
+    // open the suggestions
+    var open = Model.healthOpenAfter(null, v, "suggestions")
+    compare(JSON.stringify(open), JSON.stringify({ camera: brioId, suggestions: true, changes: false }))
+    v = Model.healthView(r, open)
+    compare(v.shownSuggestions, 2)
+    compare(JSON.stringify(v.more), JSON.stringify({ visible: true, text: "Fewer suggestions", glyph: Model.GLYPH_EXPANDED }))
+    compare(stopsOf(v), JSON.stringify(["suggestion", "suggestion", "suggestions-more", "recommended", "recommended-changes"]))
+    // then the changes: the suggestions stay open
+    open = Model.healthOpenAfter(open, v, "changes")
+    compare(JSON.stringify(open), JSON.stringify({ camera: brioId, suggestions: true, changes: true }))
+    v = Model.healthView(r, open)
+    compare(v.changes.open, true)
+    compare(v.changes.glyph, Model.GLYPH_EXPANDED)
+    // fold the suggestions again
+    compare(Model.healthView(r, Model.healthOpenAfter(open, v, "suggestions")).shownSuggestions, 1)
+    // another camera's choice: folded
+    var other = { camera: fhdId, suggestions: true, changes: true }
+    compare(Model.healthView(r, other).shownSuggestions, 1)
+    compare(Model.healthView(r, other).changes.open, false)
+    compare(JSON.stringify(Model.healthOpenAfter(other, Model.healthView(r), "changes")), JSON.stringify({ camera: brioId, suggestions: false, changes: true }),
+            "a new camera: the other list starts folded")
+    // malformed choices read as folded
+    compare(Model.healthView(r, "open").shownSuggestions, 1)
+    compare(Model.healthView(r, { camera: brioId, suggestions: "yes" }).shownSuggestions, 1)
+  }
+
+  function test_panel_tab_warning() {
+    var r = healthRecord({ camera_health: healthObj({ warnings: ["Shared USB hub"] }) })
+    var o = Model.panelTabOptions("effect", Model.healthView(r))
+    compare(JSON.stringify(o.map(function(x) { return x.glyph })), JSON.stringify(["", Model.GLYPH_WARNING, "", ""]))
+    compare(JSON.stringify(o.map(function(x) { return x.name })), JSON.stringify(["Effect", "Camera, with a warning", "Mic", "Status"]))
+    compare(o[1].label, "Camera", "the label itself stays")
+    var none = Model.panelTabOptions("effect", Model.healthView(healthRecord()))
+    compare(JSON.stringify(none.map(function(x) { return x.glyph })), JSON.stringify(["", "", "", ""]), "no warnings: no sign")
+    compare(none[1].name, "Camera")
+    var other = Model.reduce(r, line(healthLine({ camera: fhdId, warnings: ["Shared USB hub"] }))).record
+    compare(Model.panelTabOptions("effect", Model.healthView(other))[1].glyph, "", "another camera's warning: no sign")
+    compare(Model.panelTabOptions("effect")[1].glyph, "", "no health view")
+  }
 }
