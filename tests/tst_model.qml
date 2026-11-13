@@ -4054,7 +4054,8 @@ TestCase {
   // ---- the background gallery (interface revision 15)
 
   readonly property string bundledDir: "/usr/share/omarchy-broadcast/media/backgrounds"
-  readonly property string userDir: "/home/u/.local/share/omarchy-broadcast/media/backgrounds"
+  readonly property string userDir: "/home/u/Pictures/omarchy-broadcast"
+  readonly property string videoDir: "/home/u/Videos/omarchy-broadcast"
 
   function mediaObject(o) {
     return merged({ v: 1, type: "media", kind: "background", serial: 3, bundled_dir: bundledDir, user_dir: userDir,
@@ -4144,6 +4145,75 @@ TestCase {
     compare(rev15({ background_image: image }).backgroundImagePath, image)
     compare(rev15({ background_image: "…/clipped/end.png" }).backgroundImagePath, "", "a clipped path is no path")
     compare(rev15({ background_image: 42 }).backgroundImagePath, "")
+  }
+
+  // The header and an item of the videos folder, as a daemon of revision 19 prints them.
+  function test_media_video_dir() {
+    // absent (an older daemon): "", nothing breaks
+    var old = readOk()
+    compare(old.videoDir, "")
+    compare(Model.parseMediaLine(mediaLines()[0]).header.videoDir, "")
+    // present: parsed like user_dir (trailing slashes dropped; unusable or wrong type: "")
+    var r = readOk({ video_dir: videoDir + "/" })
+    verify(r.ok)
+    compare(r.videoDir, videoDir)
+    compare(readOk({ video_dir: "" }).videoDir, "")
+    compare(readOk({ video_dir: "relative" }).videoDir, "")
+    compare(readOk({ video_dir: "/home/u/V\nx" }).videoDir, "")
+    compare(readOk({ video_dir: "/home/u/../x" }).videoDir, "")
+    compare(readOk({ video_dir: 7 }).videoDir, "", "not a string: left out, not invalid")
+    verify(readOk({ video_dir: 7 }).ok)
+    // a video in the videos folder is an item; one in a folder never named is dropped
+    var items = [{ path: videoDir + "/loop.webm", label: "loop", bundled: false, media_type: "video", width: 1280, height: 720, duration_ms: 4000 },
+                 { path: userDir + "/office.png", label: "office", bundled: false, media_type: "image", width: 1, height: 1 },
+                 { path: "/home/u/Elsewhere/x.webm", label: "x", bundled: false, media_type: "video" },
+                 { path: videoDir + "/sub/y.webm", label: "y", bundled: false, media_type: "video" }]
+    var v = readOk({ video_dir: videoDir, items: items })
+    compare(v.items.length, 2)
+    compare(v.items[0].path, videoDir + "/loop.webm")
+    compare(v.truncated, true, "the dropped ones count as truncation")
+    // without video_dir the same video is outside the gallery
+    compare(readOk({ items: items }).items.length, 1)
+    // a bundled item is not accepted in the videos folder
+    compare(readOk({ video_dir: videoDir, items: [{ path: videoDir + "/b.webm", label: "b", bundled: true }] }).items.length, 0)
+    // the away gallery has no videos folder, whatever the header says
+    var away = Model.readMedia(awayLines({ video_dir: videoDir, items: [{ path: videoDir + "/a.png", label: "a", bundled: false }] }), 0, "", "away")
+    compare(away.videoDir, "")
+    compare(away.items.length, 0)
+    // the picker is given the bundled, pictures and videos folders, in this order
+    compare(JSON.stringify(Model.galleryArgv("/t", r, "")), JSON.stringify(["/t", "--show-labels", bundledDir, userDir, videoDir]))
+    compare(JSON.stringify(Model.galleryArgv("/t", r, "/x/y.png")), JSON.stringify(["/t", "--show-labels", "--selected", "/x/y.png", bundledDir, userDir, videoDir]))
+    compare(JSON.stringify(Model.galleryRowsArgv("/t", r)), JSON.stringify(["/t", "--print-rows", "--show-labels", bundledDir, userDir, videoDir]))
+    compare(JSON.stringify(Model.galleryArgv("/t", readOk({ user_dir: "", video_dir: videoDir, items: [] }), "")),
+            JSON.stringify(["/t", "--show-labels", bundledDir, videoDir]), "a folder left out is not offered")
+    compare(JSON.stringify(Model.galleryArgv("/t", readOk({ items: [] }), "")), JSON.stringify(["/t", "--show-labels", bundledDir, userDir]),
+            "an older daemon: the two it knows")
+    // the rows check accepts a row directly in the videos folder, and no other
+    verify(Model.galleryHasRow([videoDir + "/loop.webm\t/c/9.jpg"], r))
+    verify(!Model.galleryHasRow([videoDir + "/sub/loop.webm\t/c/9.jpg"], r))
+    verify(!Model.galleryHasRow([videoDir + "/loop.webm\t/c/9.jpg"], readOk()), "an older daemon has no such folder")
+    // the picked path may be a listed item of the videos folder
+    compare(Model.galleryChoice(videoDir + "/loop.webm", 1, v), videoDir + "/loop.webm")
+    compare(Model.galleryChoice(videoDir + "/other.webm", 1, v), "", "in the folder but not listed")
+    // the flow: list -> rows (three dirs) -> pick
+    var tools = { known: true, gallery: "/t/omarchy-menu-images", chooser: "/t/omarchy-file-select" }
+    var end = Model.mediaStepEnd({ kind: "gallery", step: "list" }, { started: true, code: 0, lines: 1, list: mediaLines({ video_dir: videoDir, items: items.slice(0, 1) }), rejected: false })
+    compare(end.error, "")
+    compare(end.flow.step, "rows")
+    compare(JSON.stringify(Model.mediaStepArgv(end.flow, "/cli", tools, "")),
+            JSON.stringify(["/t/omarchy-menu-images", "--print-rows", "--show-labels", bundledDir, userDir, videoDir]))
+    // a gallery whose only known folder is the videos folder is still a gallery
+    var onlyVideo = Model.mediaStepEnd({ kind: "gallery", step: "list" }, { started: true, code: 0, lines: 1,
+      list: mediaLines({ bundled_dir: "", user_dir: "", video_dir: videoDir, items: items.slice(0, 1) }), rejected: false })
+    compare(onlyVideo.flow.step, "rows")
+    // the dialog: a video of the videos folder is one of the user's own, and removable
+    var setup = Model.withSetupRead(Model.emptySetup(), "media", v)
+    var sv = Model.mediaSectionView(setup, rev15(), "")
+    compare(sv.rows.length, 2)
+    compare(sv.rows[0].label, "loop")
+    verify(sv.rows[0].video)
+    verify(Model.mediaUserItem(v, videoDir + "/loop.webm") !== null)
+    compare(Model.mediaUserItem(v, "/home/u/Elsewhere/x.webm"), null)
   }
 
   function test_media_line_parsing() {
@@ -4281,14 +4351,26 @@ TestCase {
     var list = { kind: "gallery", step: "list" }
     compare(JSON.stringify(Model.mediaStepArgv(list, cli, tools, "")), JSON.stringify([cli, "media", "list", "background", "--json"]))
     compare(Model.mediaStepArgv(list, cli, { known: true, gallery: "", chooser: "" }, ""), null, "no picker: nothing runs")
-    // list -> pick
+    // list -> rows -> pick
     var end = Model.mediaStepEnd(list, { started: true, code: 0, first: mediaLines()[0], lines: 4, list: mediaLines(), rejected: false, stderr: "" })
     compare(end.error, "")
     compare(end.intent, null)
-    compare(end.flow.step, "pick")
-    var pick = end.flow
+    compare(end.flow.step, "rows")
+    var rows = end.flow
+    compare(JSON.stringify(Model.mediaStepArgv(rows, cli, tools, image)),
+            JSON.stringify(["/t/omarchy-menu-images", "--print-rows", "--show-labels", bundledDir, userDir]), "the picker's own dirs, no shell")
+    compare(Model.mediaStepArgv(rows, cli, { known: true, gallery: "", chooser: "" }, ""), null)
+    var rowRes = function(lines) { return { started: true, code: 0, first: lines[0], lines: lines.length, list: lines, rejected: false, stderr: "" } }
+    var next = Model.mediaStepEnd(rows, rowRes([bundledDir + "/aurora.webp\t/c/a.jpg"]))
+    compare(next.error, "")
+    compare(next.flow.step, "pick")
+    var pick = next.flow
     compare(JSON.stringify(Model.mediaStepArgv(pick, cli, tools, image)),
             JSON.stringify(["/t/omarchy-menu-images", "--show-labels", "--selected", image, bundledDir, userDir]))
+    // a failed rows step: no picker
+    compare(Model.mediaStepEnd(rows, { started: false }).error, Model.GALLERY_FAILED_TEXT)
+    compare(Model.mediaStepEnd(rows, { started: true, code: 255, list: [], lines: 0, stderr: "boom" }).error, "The gallery could not open: boom")
+    compare(Model.mediaStepEnd(rows, { started: true, code: 143, timedOut: true }).error, Model.MEDIA_TIMEOUT_TEXT, "the watchdog")
     // a failed list
     compare(Model.mediaStepEnd(list, { started: false }).error, Model.CLI_MISSING_TEXT)
     compare(Model.mediaStepEnd(list, { started: true, code: 0, first: "", lines: 0 }).error, "omarchy-broadcast printed no background gallery")
@@ -4349,7 +4431,7 @@ TestCase {
     compare(Model.mediaStepArgv({ kind: "add", step: "import", path: "relative.gif" }, cli, tools, "", rev15()), null)
     compare(Model.mediaStepArgv({ kind: "add", step: "import", path: "/a.png", gallery: "away" }, cli, tools, "", rev15()), null,
             "the away image is imported through the queue, never as a step")
-    var done = Model.mediaStepEnd(imp, res("/home/u/.local/share/omarchy-broadcast/media/backgrounds/beach photo.webm", 1, 0))
+    var done = Model.mediaStepEnd(imp, res("/home/u/Pictures/omarchy-broadcast/beach photo.webm", 1, 0))
     verify(done.imported && done.error === "" && done.flow === null && done.intent === null, "imported")
     var huge = Model.mediaStepEnd(imp, { started: true, code: 0, first: "", lines: 3, rejected: false, stderr: "" })
     verify(huge.imported, "its stdout is not read")
@@ -4654,7 +4736,7 @@ TestCase {
   // ---- the away image (interface revision 17)
 
   readonly property string awayBundled: "/usr/share/omarchy-broadcast/media/away"
-  readonly property string awayUser: "/home/u/.local/share/omarchy-broadcast/media/away"
+  readonly property string awayUser: "/home/u/Pictures/omarchy-broadcast/away"
   function rev17(o) { return rev15(merged({ interface_revision: 17 }, o || {})) }
   // `media list away --json`: the background gallery's lines, of kind away,
   // over the away directories.
@@ -4865,8 +4947,13 @@ TestCase {
     var lines = awayLines()
     var end = Model.mediaStepEnd(list, { started: true, code: 0, first: lines[0], lines: lines.length, list: lines, rejected: false, stderr: "" })
     compare(end.error, "")
-    compare(end.flow.gallery, "away", "the pick stays on the away gallery")
-    var pick = end.flow
+    compare(end.flow.gallery, "away", "the rows step stays on the away gallery")
+    compare(end.flow.step, "rows")
+    compare(JSON.stringify(Model.mediaStepArgv(end.flow, cli, awayTools, "")),
+            JSON.stringify(["/t/omarchy-menu-images", "--print-rows", "--show-labels", awayBundled, awayUser]))
+    var pickEnd = Model.mediaStepEnd(end.flow, { started: true, code: 0, list: [awayUser + "/me.jpg\t/c/1.jpg"], lines: 1, rejected: false, stderr: "" })
+    compare(pickEnd.flow.gallery, "away", "the pick stays on the away gallery")
+    var pick = pickEnd.flow
     var current = awayUser + "/me.jpg"
     compare(Model.mediaCurrent(pick, rev17(), awaySetup(current).config), current, "the away image in force is preselected")
     compare(Model.mediaCurrent({ kind: "gallery", step: "list" }, rev17({ background_image: image }), awaySetup(current).config), image)
@@ -4897,5 +4984,127 @@ TestCase {
             JSON.stringify({ verb: "setup", op: "away-import", path: "/home/u/Pictures/me.png" }))
     compare(Model.mediaStepEnd(add, res("", 0, 1)).intent, null, "nothing picked")
     compare(Model.mediaStepEnd(add, res("relative.png", 1)).error, Model.CHOOSER_PATH_TEXT)
+  }
+
+  // ---- the picker never runs without a row (it would show the desktop theme's backgrounds)
+
+  function test_gallery_rows_guard() {
+    var list = { kind: "gallery", step: "list" }
+    var run = function(f, lines) { return Model.mediaStepEnd(f, { started: true, code: 0, first: lines[0], lines: lines.length, list: lines, rejected: false, stderr: "" }) }
+    var vid = function(dir, name) { return { path: dir + "/" + name, label: name, bundled: false, media_type: "video", width: 1280, height: 720, duration_ms: 5000, poster: "" } }
+    // nothing listed: the picker's rows are not even asked for
+    var none = run(list, mediaLines({ items: [] }))
+    compare(none.flow, null)
+    compare(none.error, "No backgrounds yet. Add one with Add…")
+    var anone = run({ kind: "gallery", step: "list", gallery: "away" }, awayLines({ items: [] }))
+    compare(anone.flow, null)
+    compare(anone.error, "No away images yet. Add one with Add…")
+    // listed: the rows come next
+    var rows = run(list, mediaLines()).flow
+    compare(rows.step, "rows")
+    var arows = run({ kind: "gallery", step: "list", gallery: "away" }, awayLines()).flow
+    var step = function(f, lines, code) { return Model.mediaStepEnd(f, { started: true, code: code === undefined ? 0 : code, list: lines, lines: lines.length, rejected: false, stderr: "" }) }
+    // rows present: the picker runs
+    var ok = step(rows, [userDir + "/office.png\t/c/1.jpg"])
+    compare(ok.error, "")
+    compare(ok.flow.step, "pick")
+    compare(step(rows, ["junk", bundledDir + "/aurora.webp\t/c/2.jpg"]).flow.step, "pick", "one row among others is enough")
+    // no rows (the real script prints one empty line): a message, no picker
+    var empty = step(rows, [""])
+    compare(empty.flow, null)
+    compare(empty.error, "The picker cannot show any of the gallery's backgrounds. Add another with Add…")
+    compare(step(rows, []).error, Model.GALLERY_NO_ROWS_TEXT, "no output at all")
+    compare(step(arows, [""]).error, "The picker cannot show any of the gallery's away images. Add another with Add…")
+    compare(step(arows, [awayUser + "/c.png\t/c/3.jpg"]).flow.step, "pick")
+    // a row outside the gallery's directories (a theme wallpaper) is no row of the gallery
+    var foreign = ["/home/u/.local/state/omarchy/current/theme/backgrounds/a.png\t/c/4.jpg", userDir + "/sub/x.png\t/c/5.jpg",
+                   userDir + "x/y.png\t/c/6.jpg", userDir + "/../x.png\t/c/7.jpg", "relative.png\t/c/8.jpg", userDir + "/no-thumbnail.png\t",
+                   userDir + "/no-tab.png", "\t/c/9.jpg", userDir + "\t/c/10.jpg"]
+    for (var i = 0; i < foreign.length; i++) compare(step(rows, [foreign[i]]).error, Model.GALLERY_NO_ROWS_TEXT, foreign[i])
+    compare(step(arows, [bundledDir + "/aurora.webp\t/c/11.jpg"]).error, Model.AWAY_GALLERY_NO_ROWS_TEXT, "another gallery's directory")
+    // a video-only gallery that has rows is shown
+    var vrows = run(list, mediaLines({ items: [vid(userDir, "loop.webm")] })).flow
+    compare(vrows.step, "rows", "videos alone: rows asked for")
+    compare(step(vrows, [userDir + "/loop.webm\t/c/12.jpg"]).flow.step, "pick")
+    compare(step(vrows, [""]).error, Model.GALLERY_NO_ROWS_TEXT)
+    // a failed rows step is the gallery failing to open
+    compare(step(rows, [""], 255).error, Model.GALLERY_FAILED_TEXT)
+  }
+
+  function test_backgrounds_folder_note() {
+    var r = rev15()
+    var v = Model.mediaSectionView(Model.withSetupRead(Model.emptySetup(), "media", readOk({})), r, "")
+    compare(v.folderText, "Your own backgrounds are kept in this folder; files you copy there appear here:")
+    compare(v.folderPath, "/home/u/Pictures/omarchy-broadcast", "the path alone, for its own line")
+    var unknown = Model.withSetupRead(Model.emptySetup(), "media", readOk({ user_dir: "" , items: [{ path: bundledDir + "/a.webp", label: "A", bundled: true }] }))
+    var uv = Model.mediaSectionView(unknown, r, "")
+    compare(uv.folderText, "", "hidden when the folder is unknown")
+    compare(uv.folderPath, "")
+    compare(v.videoFolderPath, "", "an older daemon reports no videos folder")
+    // both folders: the plural sentence, then each path on a line of its own
+    var both = Model.withSetupRead(Model.emptySetup(), "media", readOk({ video_dir: videoDir, items: [] }))
+    var bv = Model.mediaSectionView(both, r, "")
+    compare(bv.folderText, "Your own backgrounds are kept in these folders; files you copy there appear here:")
+    compare(bv.folderPath, userDir)
+    compare(bv.videoFolderPath, videoDir)
+    // only the videos folder known: the singular sentence over that path
+    var vonly = Model.withSetupRead(Model.emptySetup(), "media", readOk({ user_dir: "", video_dir: videoDir, items: [] }))
+    var vv = Model.mediaSectionView(vonly, r, "")
+    compare(vv.folderText, "Your own backgrounds are kept in this folder; files you copy there appear here:")
+    compare(vv.folderPath, videoDir)
+    compare(vv.videoFolderPath, "")
+    // plain text: a path with &, < or > is shown as it is, never altered
+    var odd = "/home/u/Pictures/a&b <c>/omarchy-broadcast"
+    var os = Model.withSetupRead(Model.emptySetup(), "media", readOk({ user_dir: odd, items: [] }))
+    compare(Model.mediaSectionView(os, r, "").folderPath, odd)
+    // a path with a control character is no path
+    var ctl = Model.withSetupRead(Model.emptySetup(), "media", readOk({ user_dir: "/home/u/x\ny", items: [] }))
+    compare(Model.mediaSectionView(ctl, r, "").folderPath, "")
+  }
+
+  // ---- a video the CPU path cannot play (interface revision 19)
+
+  function rev19(o) { return rev15(merged({ interface_revision: 19 }, o || {})) }
+  readonly property string convertCmd: "ffmpeg -i '/home/u/Pictures/omarchy-broadcast/loop.mov' -c:v libvpx-vp9 -an '/home/u/Pictures/omarchy-broadcast/loop.webm'"
+
+  function test_video_convert_command() {
+    compare(Model.VIDEO_CONVERT_REVISION, 19)
+    var items = function(o) { return readOk({ items: [videoItem(o)] }).items[0] }
+    compare(items({ cpu_ready: false, convert_command: convertCmd }).convertCommand, convertCmd)
+    compare(items({ cpu_ready: true, convert_command: convertCmd }).convertCommand, "", "ready: nothing to convert")
+    compare(items({ convert_command: convertCmd }).convertCommand, "", "no cpu_ready (an older daemon): nothing")
+    compare(items({ cpu_ready: false }).convertCommand, "", "no command (it did not fit): nothing")
+    compare(items({ cpu_ready: false, convert_command: 5 }).convertCommand, "")
+    compare(items({ cpu_ready: false, convert_command: "" }).convertCommand, "")
+    compare(items({ cpu_ready: false, convert_command: "   " }).convertCommand, "")
+    compare(items({ cpu_ready: false, convert_command: "ffmpeg -i a\nrm -rf ~" }).convertCommand, "", "a newline is a second command")
+    compare(items({ cpu_ready: false, convert_command: "ffmpeg -i a\u001b[2J" }).convertCommand, "")
+    compare(items({ cpu_ready: false, convert_command: "ffmpeg \u202e-i a" }).convertCommand, "", "bidi controls")
+    var atCap = "ffmpeg " + "a".repeat(Model.MEDIA_COMMAND_CAP - 7)
+    compare(items({ cpu_ready: false, convert_command: atCap }).convertCommand, atCap, "at the cap")
+    compare(items({ cpu_ready: false, convert_command: atCap + "a" }).convertCommand, "", "over it: dropped, never cut")
+    compare(Model.MEDIA_COMMAND_CAP, Model.IMAGE_PATH_CAP * 3)
+    // a still never has one
+    var still = readOk({ items: [{ path: userDir + "/s.png", label: "s", bundled: false, media_type: "image", cpu_ready: false, convert_command: convertCmd }] }).items[0]
+    compare(still.convertCommand, "")
+    // the row, and its own stop for the keyboard
+    var setup = Model.withSetupRead(Model.emptySetup(), "media", readOk({ items: [
+      videoItem({ cpu_ready: false, convert_command: convertCmd }),
+      { path: userDir + "/s.png", label: "s", bundled: false, media_type: "image", width: 8, height: 8 },
+      videoItem({ path: userDir + "/b.webm", cpu_ready: true })] }))
+    var v = Model.mediaSectionView(setup, rev19(), "")
+    compare(v.rows[0].convertCommand, convertCmd)
+    compare(v.rows[1].convertCommand, "")
+    compare(v.rows[2].convertCommand, "")
+    var secs = Model.setupSections(rev19())
+    compare(JSON.stringify(JSON.parse(kindsOf(Model.setupStops("backgrounds", v, secs))).slice(secs.length)),
+            JSON.stringify(["media-remove", "media-copy", "media-remove", "media-remove"]), "Remove, then Copy where there is a command")
+    var copyStop = Model.setupStops("backgrounds", v, secs)[secs.length + 1]
+    compare(copyStop.index, 0, "the Copy stop of row 0")
+    // below revision 19 the keys are not read
+    var old = Model.mediaSectionView(setup, rev15({ interface_revision: 18 }), "")
+    compare(old.rows[0].convertCommand, "")
+    compare(kindsOf(Model.setupStops("backgrounds", old, Model.setupSections(rev15()))).indexOf("media-copy"), -1)
+    compare(Model.CONVERT_NOTE_TEXT, "Without an NVIDIA GPU this video shows as a still. To play it without one, convert it in a terminal; the copy lands in your videos folder:")
   }
 }

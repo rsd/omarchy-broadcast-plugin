@@ -7,7 +7,14 @@
 # Every invocation appends one line to $FAKE_OB_DIR/log, as the fake CLI does:
 #   <pid> [omarchy-menu-images] [arg1] [arg2] ...
 #
-# Then sleeps $FAKE_OB_DIR/gallery-delay seconds if that file exists (a
+# With --print-rows (the real one prints its rows and exits before the shell's
+# picker opens) it prints $FAKE_OB_DIR/gallery-rows verbatim (the `image<TAB>
+# thumbnail` lines the harness writes; an empty line for no rows, as the real
+# one does) and exits 0 without the delay, the pick or gallery-exit. With no
+# such file it prints one row per directory argument (<dir>/x.png<TAB>
+# /tmp/x.jpg), so a gallery that has directories has rows.
+#
+# Otherwise sleeps $FAKE_OB_DIR/gallery-delay seconds if that file exists (a
 # picker the user leaves open), and, as the real one: prints
 # $FAKE_OB_DIR/gallery-stderr to stderr if it exists, and exits with the status in $FAKE_OB_DIR/gallery-exit (default 0).
 # With status 0 it prints the first line of $FAKE_OB_DIR/gallery-pick, the
@@ -22,6 +29,19 @@ dir=${FAKE_OB_DIR:?FAKE_OB_DIR is not set}
   for arg in "$@"; do printf ' [%s]' "$arg"; done
   printf '\n'
 } >> "$dir/log"
+
+for arg in "$@"; do
+  if [ "$arg" = "--print-rows" ]; then
+    if [ -f "$dir/gallery-rows" ]; then
+      cat -- "$dir/gallery-rows"
+    else
+      for d in "$@"; do
+        case $d in /*) printf '%s/x.png\t/tmp/x.jpg\n' "$d" ;; esac
+      done
+    fi
+    exit 0
+  fi
+done
 
 [ -f "$dir/gallery-delay" ] && sleep "$(cat -- "$dir/gallery-delay")"
 [ -f "$dir/gallery-stderr" ] && cat -- "$dir/gallery-stderr" >&2

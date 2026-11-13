@@ -36,7 +36,9 @@ import "Model.js" as Model
 // The background gallery (interface revision Model.MEDIA_REVISION): the
 // panel's Gallery... and Add... run one flow at a time on one more child
 // (mediaProc), one step after another (Model.mediaStepArgv, mediaStepEnd):
-// the gallery's list, then the shell's image picker (omarchy-menu-images);
+// the gallery's list, the rows the shell's image picker (omarchy-menu-images)
+// would show (`--print-rows`; the picker runs only when it has one), then the
+// picker itself;
 // or the file chooser (omarchy-file-select), then the import of the chosen
 // file (`media import background PATH --select`: converting an animated
 // image or a video may take a while, so it runs here, beside the command
@@ -224,7 +226,7 @@ Singleton {
   property int mediaExitCode: 0
   property string mediaFirst: ""
   property int mediaLines: 0
-  // A list step's lines (Model.readMedia reads them at its end).
+  // A list step's lines (Model.readMedia reads them at its end), or a rows step's.
   property var mediaList: []
   // The bar widget whose panel started the flow (null: none was open), for
   // reopenMediaPanel.
@@ -1031,11 +1033,19 @@ Singleton {
   // A list step keeps its lines, each up to Model.LINE_CAP and at most
   // Model.readLinesCap("media") of them; a picker step only its first line,
   // up to Model.PATH_CAP. Past a cap the step is stopped. An import's lines
-  // are counted only (never a reason to stop it half-way).
+  // are counted only (never a reason to stop it half-way). A rows step (the
+  // picker's `--print-rows`) keeps the lines of up to Model.LINE_CAP, at most
+  // Model.readLinesCap("media") of them, and ignores the rest: one row is
+  // all it looks for, so a line past a cap is never a reason to stop it.
   function mediaLine(line) {
     if (mediaRejected) return
     mediaLines++
     if (mediaFlow !== null && mediaFlow.step === "import") return
+    if (mediaFlow !== null && mediaFlow.step === "rows") {
+      if (typeof line === "string" && line.length <= Model.LINE_CAP && mediaList.length < Model.readLinesCap("media"))
+        mediaList = mediaList.concat([line])
+      return
+    }
     var list = mediaFlow !== null && mediaFlow.step === "list"
     if (!list && mediaLines > 1) return
     var cap = list ? Model.LINE_CAP : Model.PATH_CAP
