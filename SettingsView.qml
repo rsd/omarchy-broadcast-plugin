@@ -681,6 +681,24 @@ Column {
               }
             }
 
+            // A live, read-only figure of the group (the view's `live`, ""
+            // for none): the panel's dim small text, hidden while empty. One
+            // line, elided (never wrapped), so it never changes height while
+            // shown. It has no Accessible name: it changes up to 4 times a
+            // second and a screen reader would announce each change.
+            Text {
+              objectName: root.namePrefix + "settingsGroupLive-" + groupBlock.group.id
+              textFormat: Text.PlainText
+              x: root.inset
+              width: parent.width - 2 * root.inset
+              elide: Text.ElideRight
+              visible: text !== ""
+              text: groupBlock.group.live || ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
             // Rows past the caps or skipped: said, never silently dropped.
             Text {
               objectName: root.namePrefix + "settingsGroupTruncated-" + groupBlock.group.id

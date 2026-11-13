@@ -679,6 +679,16 @@ check("a picked path is used only when it is an item of the gallery just read, t
 check("the dialog names no command: every argv is the Model's",
       all(w not in dialog for w in ('"set"', '"--"', '"enable"', '"disable"', '"reset"', '"show"', '"list"', '"--json"')))
 
+# ---- live stage values: one documented exception ----------------------------
+# LIVE_GROUPS is the one place the plugin names a live stage value; a second
+# entry is a deliberate decision that must change this rule too.
+live_table = block(model, "var LIVE_GROUPS")
+live_entries = re.findall(r"^\s*(\w+):\s*\{([^}]*)\}", live_table, re.M)
+check("LIVE_GROUPS holds exactly the auto-frame zoom entry",
+      len(live_entries) == 1 and live_entries[0][0] == "auto_frame"
+      and re.fullmatch(r'\s*stage: "auto-frame", name: "zoom", label: zoomLabel\s*', live_entries[0][1]) is not None
+      and len(re.findall(r"\bLIVE_GROUPS\b", model)) == 3, str(live_entries))
+
 # ---- pending re-arm through Qt.callLater (rule 8) ---------------------------
 check("command retry deferred with Qt.callLater", "Qt.callLater(root.flushPending)" in daemon_src)
 check("watch re-arm deferred with Qt.callLater", "Qt.callLater(root.syncWatch)" in daemon_src)

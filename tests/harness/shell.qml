@@ -2235,8 +2235,8 @@ ShellRoot {
     var S = function() { return h.widgetA.service }
     var P = function() { return h.widgetA.previewService }
     var C = function() { return h.content(A()) }
-    var rev7 = function(o) {
-      var m = { interface_revision: 7, settings_schema: 1, settings_revision: 5, loopback_consumers: 0, pipewire_consumers: 0,
+    var rev7 = function(o, revision) {
+      var m = { interface_revision: revision || 7, settings_schema: 1, settings_revision: 5, loopback_consumers: 0, pipewire_consumers: 0,
                 preview_consumers: 0, pipewire_output: "ready" }
       for (var k in o) m[k] = o[k]
       return m
@@ -2977,6 +2977,66 @@ ShellRoot {
       h.eq("the switch follows the daemon", h.find(A(), "settingSwitch-effect.video.denoise").checked, true)
       h.eq("no error", S().commandError, "")
     })
+    // auto-frame's zoom (stage_values): a read-only line under the group's
+    // rows, only while the stage is on, the camera active and a value reported
+    var autoFrameRows = function(on) {
+      return [
+        stateRow("auto_frame", "Auto-frame", "effect.auto_frame.enabled", "bool", "Auto-frame", on ? "true" : "false", "false", { scope: "global" }),
+        stateRow("auto_frame", "Auto-frame", "effect.auto_frame.framing", "enum", "Framing", "loose", "loose",
+                 { scope: "global", options: "loose:Loose,tight:Tight" })
+      ]
+    }
+    var zoomLine = function() { return h.find(A(), "effect-settingsGroupLive-auto_frame") }
+    var zoomState = function(o) {
+      var m = { effect: "none", blur_strength: 0.5, denoise: false }
+      for (var k in o) m[k] = o[k]
+      return rev7(m, 9)
+    }
+    var zoomZ = function(v) { return [{ stage: "auto-frame", name: "zoom", value: v }] }
+    h.step("zoom readout: an active camera reports a zoom", function() {
+      h.writeFile("settings-state", brioState().concat(globalRows("none"), autoFrameRows(true)))
+      h.feed([snapshotLine(zoomState({ state: "active", consumers: 1, stage_values: zoomZ(1.24) }))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 7 && h.writerIdle() && !!zoomLine() })
+    h.wait(300)
+    h.step("zoom readout: shown under the group's rows", function() {
+      h.eq("the group is drawn", C().effectSettings.groups.map(function(g) { return g.id }).join(","), "background,video,auto_frame")
+      h.eq("text", zoomLine().text, "Zoom 1.24\u00d7")
+      h.eq("visible", zoomLine().visible, true)
+      h.eq("the Camera tab's groups carry none", C().settingsView.groups.map(function(g) { return g.live }).join(""), "")
+      h.fits(A(), "Effect tab with the zoom readout")
+    })
+    h.grabStep(function() { return A().popup }, "e2b-effect-zoom.png")
+    h.step("zoom readout: it follows the daemon's next state line", function() {
+      h.feed([stateLine(zoomState({ state: "active", consumers: 1, stage_values: zoomZ(1.6) }))])
+    }, function() { return zoomLine() && zoomLine().text === "Zoom 1.60\u00d7" }, 3000)
+    h.step("zoom readout: a state line without the key leaves it", function() {
+      h.feed([stateLine(zoomState({ state: "active", consumers: 2 }))])
+    }, function() { return S().record.consumers === 2 })
+    h.step("zoom readout: still shown", function() {
+      h.eq("text", zoomLine().text, "Zoom 1.60\u00d7")
+    })
+    h.step("zoom readout: the camera goes idle, nothing shown", function() {
+      h.feed([stateLine(zoomState({ state: "idle", consumers: 0 }))])
+    }, function() { return S().record.state === "idle" })
+    h.step("zoom readout: gone while idle", function() {
+      h.eq("hidden", zoomLine().visible, false)
+      h.eq("empty", zoomLine().text, "")
+    })
+    h.step("zoom readout: active again, none reported yet (an empty list), nothing shown", function() {
+      h.feed([stateLine(zoomState({ state: "active", consumers: 1, stage_values: [] }))])
+    }, function() { return S().record.state === "active" })
+    h.step("zoom readout: hidden", function() { h.eq("hidden", zoomLine().visible, false) })
+    h.step("zoom readout: an older daemon's snapshot has no key, nothing shown", function() {
+      h.feed([snapshotLine(zoomState({ state: "active", consumers: 1 }))])
+    }, function() { return !!S().record.settings && S().record.settings.groups.length === 7 && h.writerIdle() })
+    h.wait(200)
+    h.step("zoom readout: hidden without the key", function() { h.eq("hidden", zoomLine().visible, false) })
+    h.step("zoom readout: auto-frame switched off, a value is not shown", function() {
+      h.writeFile("settings-state", brioState().concat(globalRows("none"), autoFrameRows(false)))
+      h.feed([snapshotLine(zoomState({ state: "active", consumers: 1, stage_values: zoomZ(1.3) }))])
+    }, function() { return !!S().record.settings && h.model.findSetting(S().record, "effect.auto_frame.enabled").value === false && h.writerIdle() })
+    h.wait(200)
+    h.step("zoom readout: hidden while off", function() { h.eq("hidden", zoomLine().visible, false) })
     h.step("global settings: no global setting published (no module): no choices, a hint", function() {
       h.writeFile("settings-state", brioState())
       h.feed([snapshotLine(rev7({ interface_revision: 9, effect: "blur", blur_strength: 0.5, denoise: true }))])
