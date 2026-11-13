@@ -96,7 +96,15 @@ widget would hide.
     are the same flows over the `away` gallery, ending in setup intents
     (`config set -- effect.fallback_image PATH`, `media import away PATH
     --select`, each re-checked when it runs); Clear writes the empty value;
-    the overlay hides while a flow runs.
+    the overlay hides while a flow runs;
+  - the camera's health (interface revision 20): drawn only from
+    Model.healthView, only for the active camera; a suggestion's button
+    writes its setting as a row's (Daemon.commitSetting, a global row Model
+    matched it to), and Use recommended settings runs only `recommended
+    apply` (fixed words) as an intent of the queue, re-checked when it runs
+    against the camera whose changes were listed; its lists are capped, and
+    the suggestions past the first and the changes fold (healthView), so
+    opening or folding them writes nothing.
 
 Run: python3 -I tests/check-source.py   (exit status 0 = all hold)
 """
@@ -411,8 +419,12 @@ check("the settings debounce is (re)started only by moveSetting, a user's move",
 check("no Timer in the panel or the renderer", all(re.search(r"\bTimer\b", sources[PLUGIN / n]) is None
                                                    for n in ("BroadcastPanel.qml", "SettingsView.qml")))
 qml_writes = re.findall(r"Daemon\.(?:moveSetting|commitSetting|runSettingAction)\(([^,)]*)", panel + settings_view)
-check("QML writes a setting only by the id of a row of the view",
-      qml_writes != [] and all(w in ("row.id", "settingRow.row.id") for w in qml_writes)
+check("QML writes a setting only by the id of a row of the view (or of a suggestion Model matched to one)",
+      qml_writes != [] and all(w in ("row.id", "settingRow.row.id", "s.setting") for w in qml_writes)
+      and qml_writes.count("s.setting") == 1
+      and "Daemon.commitSetting(s.setting, s.value)" in block(panel, "function applySuggestion")
+      and "var s = root.health.suggestions[index]" in block(panel, "function applySuggestion")
+      and "setting: row.id" in block(model, "function healthView")
       and "var row = Model.viewRow(root.activeView, stop)" in block(panel, "function nudgeSetting"), str(qml_writes))
 literals = [(p.name, lit) for p in plugin_qml for lit in re.findall(r'"([^"\n]*)"', sources[p])]
 named = [x for x in literals if re.fullmatch(r"[a-z0-9]+(\.[a-z0-9_]+){1,3}", x[1]) or "camera." in x[1]]
@@ -437,10 +449,10 @@ check("a held slider keeps both Flickables from taking the drag",
       and "onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }" in panel)
 check("the settings section is drawn only from Model.settingsView",
       "readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)" in panel
-      and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible', panel) is not None
+      and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible \|\| root\.recommendedShown\n', panel) is not None
       and "view: root.settingsView" in panel
       and "readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)" in panel
-      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings)" in panel
+      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health)" in panel
       and re.search(r'objectName: "effectSettingsArea"[^}]*visible: root\.genericEffect', panel) is not None
       and "view: root.effectSettings" in panel)
 check("the set's lines, options and changes are capped before they are walked",
@@ -736,6 +748,32 @@ check("LIVE_GROUPS holds exactly the auto-frame zoom entry",
       len(live_entries) == 1 and live_entries[0][0] == "auto_frame"
       and re.fullmatch(r'\s*stage: "auto-frame", name: "zoom", label: zoomLabel\s*', live_entries[0][1]) is not None
       and len(re.findall(r"\bLIVE_GROUPS\b", model)) == 3, str(live_entries))
+
+# ---- the camera's health (interface revision 20) ----------------------------
+check("the camera's health is drawn only from Model.healthView, for the active camera",
+      "readonly property var health: Model.healthView(record, healthOpen)" in panel
+      and "readonly property var tabOptions: Model.panelTabOptions(tab, health)" in panel
+      and "readonly property bool recommendedShown: Model.recommendedShown(health)" in panel
+      and re.search(r'objectName: "healthBlock"[^}]*visible: root\.health\.visible\n', panel) is not None
+      and re.search(r'objectName: "recommendedBlock"[^}]*visible: root\.recommendedShown\n', panel) is not None
+      and "return h.camera !== \"\" && h.camera === record.activeCamera ? h : null" in block(model, "function shownHealth")
+      and "var h = shownHealth(record)" in block(model, "function healthView"))
+check("Use recommended settings runs only `recommended apply` from its click, re-checked when it runs",
+      panel.count("Daemon.applyRecommended()") == 1 and "Daemon.applyRecommended()" in block(panel, "function applyRecommended")
+      and "Daemon.applyRecommended" not in settings_view
+      and 'return request({ verb: "recommended", camera: view.camera })' in block(daemon, "function applyRecommended")
+      and 'return [cli, "recommended", "apply"]' in block(model, "function recommendedArgv")
+      and "var h = shownHealth(record)" in block(model, "function recommendedArgv")
+      and "h.camera !== intent.camera" in block(model, "function recommendedArgv")
+      and 'case "recommended": return recommendedArgv(cli, record, intent)' in block(model, "function intentArgv"))
+check("the health's suggestions and changes fold, drawn and walked from healthView alone (nothing written)",
+      "model: root.health.shownSuggestions" in panel
+      and "model: root.health.changes.open ? root.health.recommended.length : 0" in panel
+      and "root.healthOpen = Model.healthOpenAfter(root.healthOpen, root.health, which)" in block(panel, "function toggleHealthList")
+      and "Daemon." not in block(panel, "function toggleHealthList")
+      and "Math.min(Number(health.shownSuggestions) || 0, hints.length)" in block(model, "function cursorStops"))
+check("the health's lists are capped before they are walked",
+      all(c in block(model, "function healthFields") for c in ("i < HEALTH_WARNINGS_CAP", "j < HEALTH_SUGGESTIONS_CAP", "k < HEALTH_RECOMMENDED_CAP")))
 
 # ---- pending re-arm through Qt.callLater (rule 8) ---------------------------
 check("command retry deferred with Qt.callLater", "Qt.callLater(root.flushPending)" in daemon_src)

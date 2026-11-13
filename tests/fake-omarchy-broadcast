@@ -130,6 +130,17 @@
 # `config_changed` line is appended to the feed. The away image itself is
 # set and cleared with `config set -- effect.fallback_image PATH` (or "").
 #
+# The camera's health (interface revision 20): the harness puts
+# `camera_health` in its snapshot lines and writes `camera_health` lines to
+# the feed itself. `recommended [--json]` prints $FAKE_OB_DIR/camera-health
+# (the `camera_health` line, as the harness writes it; missing: a daemon that
+# predates it, as the setup reads above). `recommended apply [--json]` (a
+# usage check first, exit 2 for any other shape) then delay, stderr and exit
+# as the commands below; when the status is 0 and
+# $FAKE_OB_DIR/camera-health-applied exists, it is the daemon: that line
+# replaces camera-health, is appended to the feed (as the property change
+# would reach a watch) and, with --json, printed.
+#
 # Any other command (`on`, `off`, `camera -- <id>`, `camera next`): sleeps $FAKE_OB_DIR/delay
 # seconds if that file exists, prints $FAKE_OB_DIR/stderr to stderr if it
 # exists, and exits with the status in $FAKE_OB_DIR/exit (default 0). It
@@ -508,6 +519,34 @@ if [ "${1:-}" = "mic" ]; then
     on) printf '{"v":1,"type":"mic","state":"%s","consumers":0,"provider":"","latency_ms":0,"error":""}\n' "$(setting_file mic-on-state passthrough)" >> "$dir/feed" ;;
     off) printf '{"v":1,"type":"mic","state":"off","consumers":0,"provider":"","latency_ms":0,"error":""}\n' >> "$dir/feed" ;;
   esac
+  exit 0
+fi
+
+if [ "${1:-}" = "recommended" ]; then
+  json=""
+  case "$# ${2:-} ${3:-}" in
+    "1  ") ;;
+    "2 --json ") json=1 ;;
+    "2 apply ") ;;
+    "3 apply --json") json=1 ;;
+    *) echo "fake: usage: recommended [apply] [--json]" >&2; exit 2 ;;
+  esac
+  if [ "${2:-}" != apply ]; then
+    if [ -n "$json" ]; then setup_read camera-health; fi
+    if [ -f "$dir/camera-health" ]; then echo "Recommended settings: see --json"; exit 0; fi
+    echo "omarchy-broadcast: the daemon does not support this" >&2
+    exit 1
+  fi
+  [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
+  [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
+  status=0
+  [ -f "$dir/exit" ] && status=$(cat "$dir/exit")
+  [ "$status" -eq 0 ] || exit "$status"
+  if [ -f "$dir/camera-health-applied" ]; then
+    mv -f -- "$dir/camera-health-applied" "$dir/camera-health"
+    cat -- "$dir/camera-health" >> "$dir/feed"
+    if [ -n "$json" ]; then cat -- "$dir/camera-health"; fi
+  fi
   exit 0
 fi
 

@@ -869,6 +869,18 @@ Singleton {
     return true
   }
 
+  // Use recommended settings: `recommended apply`, for the active camera
+  // whose changes the panel listed (Model.recommendedArgv checks again when
+  // it runs that it is still the active camera and still has changes). Queued
+  // behind a running command as any other ask; camera writes queued before
+  // it run first. Nothing is drafted: the settings lines and the next
+  // camera_health line show what the daemon did.
+  function applyRecommended() {
+    var view = Model.healthView(record)
+    if (!Model.recommendedShown(view)) return false
+    return request({ verb: "recommended", camera: view.camera })
+  }
+
   // ---- setup writes (the dialog's): one at a time, each re-read after it ------
 
   // A module on or off, by the id of a row the read list has; not while a

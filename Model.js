@@ -282,7 +282,11 @@ function emptyRecord(link, linkText) {
     // MIC_REVISION). `mic` is micFields() of it, or null; a `mic` line
     // replaces it.
     micField: "absent",
-    mic: null
+    mic: null,
+    // The camera's health (interface revision HEALTH_REVISION): healthFields
+    // of the snapshot's `camera_health`, or null (null or absent there); a
+    // `camera_health` line replaces it.
+    health: null
   }
 }
 
@@ -446,7 +450,7 @@ function parseLine(text) {
 
 // Apply one raw line to a record. Returns { record, outcome }; `record` is the
 // same object when nothing changed. Outcomes: snapshot, state, cameras,
-// stats, mic, settings_group (a part of a set kept), settings (a set committed),
+// stats, mic, camera_health, settings_group (a part of a set kept), settings (a set committed),
 // settings_delta, settings_clear, config_changed, modules_changed, error, ignored (an unknown type, such as
 // the `controls` line of interface revision 6, or a line that cannot apply
 // in the current link state), dropped, invalid, unsupported.
@@ -481,6 +485,7 @@ function applyMessage(record, m) {
     r.modulesSerial = settingsNumber(m.modules_serial)
     r.micField = m.mic === undefined ? "absent" : (isPlainObject(m.mic) ? "object" : "null")
     r.mic = micFields(m.mic)
+    r.health = healthFields(m.camera_health)
     return { record: r, outcome: "snapshot" }
   case "state":
     // Unavailable until the next snapshot (docs/cli-json.md, "Writing a client").
@@ -512,6 +517,13 @@ function applyMessage(record, m) {
     r.micField = "object"
     r.mic = micFields(m)
     return { record: r, outcome: "mic" }
+  case "camera_health":
+    // The camera's health changed (interface revision HEALTH_REVISION): the
+    // whole value, replacing the snapshot's.
+    if (!linked(record)) return { record: record, outcome: "ignored" }
+    r = copyRecord(record)
+    r.health = healthFields(m)
+    return { record: r, outcome: "camera_health" }
   case "settings_group":
     // A line of a settings set; the set is committed by its last line.
     if (!linked(record)) return { record: record, outcome: "ignored" }
@@ -988,7 +1000,7 @@ function canNext(record) {
 // A control request is kept as an intent, { verb, on, id, effect, value, camera },
 // and turned into an argv when it runs: with the CLI path and the availability of that moment,
 // so a request queued behind a slow one never runs against a daemon that has
-// gone meanwhile (`on`/`off`/`camera`/`settings`/`config`/`modules`/`order`/`mic` would D-Bus-activate it) or
+// gone meanwhile (`on`/`off`/`camera`/`settings`/`config`/`modules`/`order`/`mic`/`recommended` would D-Bus-activate it) or
 // with a CLI path that has changed. null = do not run.
 function intentArgv(intent, cli, record) {
   if (!intent || typeof intent !== "object") return null
@@ -1002,6 +1014,7 @@ function intentArgv(intent, cli, record) {
   case "reset-settings": return settingsSupported(record) && settingIntentBound(intent, record) ? resetSettingsArgv(cli, record.settings.camera) : null
   case "background": return backgroundRowShown(record) ? backgroundArgv(cli, intent.path) : null
   case "media-import": return backgroundRowShown(record) ? mediaImportArgv(cli, intent.path) : null
+  case "recommended": return recommendedArgv(cli, record, intent)
   default: return null
   }
 }
@@ -1441,7 +1454,7 @@ var SEGMENTED_MAX_CHARS = 28
 var CONTROLS_DEBOUNCE_MS = 150
 // Commands waiting behind a running one (see enqueueIntent). Every kind the
 // queue can hold, and its most:
-//   other ask (select, next, enable ...)                     1
+//   other ask (select, next, enable, recommended ...)        1
 //   setup write (config, modules, order: the setup dialog)  SETUP_QUEUE_CAP
 //   reset                                                    1
 //   slider write (setting, no quick), one per id             SETTING_QUEUE_CAP
@@ -2553,13 +2566,21 @@ function panelTabValue(value) {
   return typeof value === "string" && PANEL_TABS.indexOf(value) >= 0 ? value : PANEL_TAB_DEFAULT
 }
 
-// The tab row: { value, label, description, selected }, constants only.
-function panelTabOptions(tab) {
+// The tab row: { value, label, description, selected, glyph, name },
+// constants only. `health` (healthView): while the active camera's health
+// has warnings, the Camera tab carries the caution sign (`glyph`) and says
+// so in its accessible `name`, so it shows from another tab; the warnings
+// themselves are only in the Camera tab.
+var PANEL_TAB_WARNING_NAME = "Camera, with a warning"
+function panelTabOptions(tab, health) {
   var current = panelTabValue(tab)
+  var warned = isPlainObject(health) && Array.isArray(health.warnings) && health.warnings.length > 0
   var out = []
   for (var i = 0; i < PANEL_TABS.length; i++) {
     var v = PANEL_TABS[i]
-    out.push({ value: v, label: PANEL_TAB_LABELS[v], description: PANEL_TAB_DESCRIPTIONS[v], selected: v === current })
+    var flag = warned && v === "camera"
+    out.push({ value: v, label: PANEL_TAB_LABELS[v], description: PANEL_TAB_DESCRIPTIONS[v], selected: v === current,
+               glyph: flag ? GLYPH_WARNING : "", name: flag ? PANEL_TAB_WARNING_NAME : PANEL_TAB_LABELS[v] })
   }
   return out
 }
@@ -2822,6 +2843,215 @@ function micBlocked(running, queue) {
   return false
 }
 
+// ---------------------------------------------------------------- camera health
+
+// The camera's health (interface revision 20): the snapshot's
+// `camera_health` (null below it; absent from a CLI that predates it) and the
+// watch's `camera_health` lines, each the whole value. What the daemon knows
+// of the camera named by its active camera: the rate of good frames it really
+// delivers and its capture mode's rate (-1: not measured), the damaged frames
+// it dropped, warnings for people, effect suggestions and the changes "Use
+// recommended settings" would make. Shown only for the active camera, in the
+// Camera tab; nothing is written without a click (`settings set` for a
+// suggestion, `recommended apply` for the recommended settings), and nothing
+// shown is kept past the next line: the daemon's next value replaces it all.
+var HEALTH_REVISION = 20
+var HEALTH_WARNINGS_CAP = 8
+var HEALTH_SUGGESTIONS_CAP = 8
+var HEALTH_RECOMMENDED_CAP = 32
+var HEALTH_REASON_CAP = DETAIL_CAP
+var HEALTH_VALUE_CAP = 48
+// "Delivers ... of ... fps" shows below this share of the capture mode's rate.
+var HEALTH_DELIVERS_SHARE = 0.95
+var RECOMMENDED_TITLE = "RECOMMENDED FOR THIS CAMERA"
+var RECOMMENDED_LABEL = "Use recommended settings"
+var RECOMMENDED_TOOLTIP = "Set this camera's settings to the recommended values listed below"
+// Folded, the health shows this many suggestions and the recommended
+// changes as one line, so the settings' groups keep their room on a 1080
+// screen; each opens on its line (healthView's `open`).
+var HEALTH_SUGGESTIONS_FOLDED = 1
+var HEALTH_FEWER_TEXT = "Fewer suggestions"
+
+// A `camera_health` object -> { camera, deliveredFps, nominalFps,
+// corruptFrames, warnings, suggestions, hasRecommendation, recommended }, or
+// null (not an object). `camera` is the raw id (rawId), compared with the
+// active camera, never shown; a figure not measured is null (-1 on the wire);
+// `corruptFrames` is -1 when unknown. A suggestion is kept only with a setting
+// id of the daemon's grammar and a value word (OPTION_VALUE_RE, or a decimal
+// integer); a recommended change only with a setting id and a label. Every
+// list is read to its cap only.
+function healthFields(m) {
+  if (!isPlainObject(m)) return null
+  var warnings = []
+  var src = Array.isArray(m.warnings) ? m.warnings : []
+  for (var i = 0; i < src.length && i < HEALTH_WARNINGS_CAP; i++) {
+    var w = sanitize(src[i], ERROR_CAP)
+    if (w !== "") warnings.push(w)
+  }
+  var suggestions = []
+  src = Array.isArray(m.suggestions) ? m.suggestions : []
+  for (var j = 0; j < src.length && j < HEALTH_SUGGESTIONS_CAP; j++) {
+    var s = src[j]
+    if (!isPlainObject(s)) continue
+    var sid = settingId(s.setting)
+    var word = typeof s.value === "string" && (/^-?[0-9]{1,10}$/.test(s.value) || optionValueOf(s.value, "") !== "") ? s.value : ""
+    if (sid === "" || word === "") continue
+    suggestions.push({ setting: sid, value: word, reason: settingText(s.reason, HEALTH_REASON_CAP) })
+  }
+  var recommended = []
+  src = Array.isArray(m.recommended) ? m.recommended : []
+  for (var k = 0; k < src.length && k < HEALTH_RECOMMENDED_CAP; k++) {
+    var c = src[k]
+    if (!isPlainObject(c)) continue
+    var cid = settingId(c.setting)
+    var label = settingText(c.label, SETTING_LABEL_CAP)
+    if (cid === "" || label === "") continue
+    recommended.push({ setting: cid, label: label, value: settingText(c.value, HEALTH_VALUE_CAP),
+                       current: settingText(c.current, HEALTH_VALUE_CAP) })
+  }
+  return {
+    camera: rawId(m.camera),
+    deliveredFps: statNumber(m.delivered_fps),
+    nominalFps: statNumber(m.nominal_fps),
+    corruptFrames: count(m.corrupt_frames),
+    warnings: warnings,
+    suggestions: suggestions,
+    hasRecommendation: m.has_recommendation === true,
+    recommended: recommended
+  }
+}
+
+// A rate as the panel writes it: at most one decimal, none when whole
+// (19.5, 30).
+function fpsText(value) {
+  return String(Math.round(value * 10) / 10)
+}
+
+// "Delivers 19.5 of 30 fps" while the camera delivers less than
+// HEALTH_DELIVERS_SHARE of its capture mode's rate, both measured; else "".
+function deliversText(health) {
+  if (!isPlainObject(health)) return ""
+  var got = health.deliveredFps, nominal = health.nominalFps
+  if (got === null || nominal === null || !(nominal > 0) || !(got < nominal * HEALTH_DELIVERS_SHARE)) return ""
+  return "Delivers " + fpsText(got) + " of " + fpsText(nominal) + " fps"
+}
+
+// The health shown: the daemon's value while it is the active camera's (an
+// available daemon, a camera named, the one in force); null otherwise.
+function shownHealth(record) {
+  if (!available(record) || !isPlainObject(record.health)) return null
+  var h = record.health
+  return h.camera !== "" && h.camera === record.activeCamera ? h : null
+}
+
+// A suggestion's value as a value of its row: a switch "on"/"true" or
+// "off"/"false", an option of the row, an integer on its grid; null when it
+// is none of these.
+function suggestionValue(row, word) {
+  if (!row || typeof word !== "string") return null
+  if (row.type === "bool") {
+    if (word === "on" || word === "true") return true
+    if (word === "off" || word === "false") return false
+    return null
+  }
+  if (row.type === "int") return /^-?[0-9]{1,10}$/.test(word) ? snapSetting(row, Number(word)) : null
+  return rowValue(row, word)
+}
+
+// The button of a suggestion: Turn on, Turn off, Use <option>, Set to <n>.
+function suggestionAction(row, value) {
+  if (row.type === "bool") return value === true ? "Turn on" : "Turn off"
+  if (row.type === "enum") return "Use " + settingValueText(row, value)
+  return "Set to " + settingValueText(row, value)
+}
+
+// The Camera tab's health part, exactly as drawn:
+//   { visible, camera, delivers, warnings, suggestions, recommended,
+//     shownSuggestions, more, changes }
+// `delivers`: deliversText. `suggestions`: { setting, label, reason, action,
+// value } for each suggestion the panel can act on now: its setting is a
+// global row of the settings set, enabled, not at that value already, and
+// the value is one of the row's; any other is not shown (it would offer a
+// button that writes nothing). `recommended`: { setting, text } where text
+// is "Label: current → value" (the daemon's display texts). `camera`: the
+// raw id the recommended settings are for. Nothing at all unless the
+// daemon's health is the active camera's (shownHealth).
+// `open` is the panel's choice of the session: { camera, suggestions,
+// changes }, each list open (true) or folded; it holds only for the camera
+// it names, so another camera starts folded. Folded, `shownSuggestions`
+// (the suggestions drawn, and walked by the cursor) is
+// HEALTH_SUGGESTIONS_FOLDED. `more`: { visible, text, glyph }, the line that
+// opens and folds the suggestions ("+2 more", "Fewer suggestions"), shown
+// only while there are more than fold. `changes`: { open, text, glyph },
+// the line that opens and folds the recommended changes ("2 changes:
+// Sharpness, Anti-flicker"; "" while there are none).
+function healthView(record, open) {
+  var out = { visible: false, camera: "", delivers: "", warnings: [], suggestions: [], recommended: [], shownSuggestions: 0,
+              more: { visible: false, text: "", glyph: "" }, changes: { open: false, text: "", glyph: "" } }
+  var h = shownHealth(record)
+  if (!h) return out
+  out.camera = h.camera
+  out.delivers = deliversText(h)
+  out.warnings = h.warnings.slice(0, HEALTH_WARNINGS_CAP)
+  var supported = settingsSupported(record)
+  for (var i = 0; i < h.suggestions.length && i < HEALTH_SUGGESTIONS_CAP; i++) {
+    var s = h.suggestions[i]
+    var row = supported ? findSetting(record, s.setting) : null
+    if (!row || row.scope !== "global" || !row.enabled) continue
+    var v = suggestionValue(row, s.value)
+    if (v === null || v === row.value) continue
+    out.suggestions.push({ setting: row.id, label: row.label, reason: s.reason, action: suggestionAction(row, v), value: v })
+  }
+  for (var j = 0; j < h.recommended.length && j < HEALTH_RECOMMENDED_CAP; j++) {
+    var c = h.recommended[j]
+    out.recommended.push({ setting: c.setting, label: c.label, text: c.label + ": " + c.current + " → " + c.value })
+  }
+  var mine = isPlainObject(open) && open.camera === h.camera
+  var listOpen = mine && open.suggestions === true
+  var n = out.suggestions.length
+  out.shownSuggestions = listOpen ? n : Math.min(n, HEALTH_SUGGESTIONS_FOLDED)
+  if (n > HEALTH_SUGGESTIONS_FOLDED)
+    out.more = { visible: true, text: listOpen ? HEALTH_FEWER_TEXT : "+" + (n - HEALTH_SUGGESTIONS_FOLDED) + " more",
+                 glyph: listOpen ? GLYPH_EXPANDED : GLYPH_COLLAPSED }
+  if (out.recommended.length > 0) {
+    var changesOpen = mine && open.changes === true
+    var count = out.recommended.length + (out.recommended.length === 1 ? " change: " : " changes: ")
+    out.changes = { open: changesOpen, text: count + out.recommended.map(function(x) { return x.label }).join(", "),
+                    glyph: changesOpen ? GLYPH_EXPANDED : GLYPH_COLLAPSED }
+  }
+  out.visible = out.delivers !== "" || out.warnings.length > 0 || out.suggestions.length > 0
+  return out
+}
+
+// The panel's `open` after a click on the suggestions' ("suggestions") or
+// the changes' ("changes") line: that list flipped, for the camera shown;
+// the other kept only while it is the same camera's.
+function healthOpenAfter(open, view, which) {
+  var camera = isPlainObject(view) ? view.camera : ""
+  var mine = isPlainObject(open) && open.camera === camera
+  var next = { camera: camera, suggestions: mine && open.suggestions === true, changes: mine && open.changes === true }
+  if (which === "suggestions") next.suggestions = !next.suggestions
+  else if (which === "changes") next.changes = !next.changes
+  return next
+}
+
+// Whether "Use recommended settings" is offered: the active camera's health
+// lists changes.
+function recommendedShown(view) {
+  return isPlainObject(view) && Array.isArray(view.recommended) && view.recommended.length > 0
+}
+
+// `recommended apply` for the camera the panel showed the changes of
+// (`intent.camera`): only while that is still the active camera and the
+// daemon still lists changes for it. The CLI applies them to the active
+// camera (it names none), so the check is made when the intent runs.
+function recommendedArgv(cli, record, intent) {
+  if (!cliUsable(cli) || !isPlainObject(intent) || typeof intent.camera !== "string" || intent.camera === "") return null
+  var h = shownHealth(record)
+  if (!h || h.camera !== intent.camera || h.recommended.length === 0) return null
+  return [cli, "recommended", "apply"]
+}
+
 // ---------------------------------------------------------------- keyboard cursor
 
 // The panel's keyboard stops, top to bottom, as the panel lays them out: the
@@ -2837,7 +3067,11 @@ function micBlocked(running, queue) {
 //           header is a stop);
 //   camera  one per rendered camera row (`cameraCount` is the count the
 //           panel draws, so the cursor and the rows always agree), Next
-//           camera when it is shown, then from `settings` (the settingsView
+//           camera when it is shown, each suggestion's button drawn
+//           (`health.shownSuggestions`), the line that opens or folds the
+//           rest, Use recommended settings and the line that opens or folds
+//           its changes, while `health` (healthView) offers them,
+//           then from `settings` (the settingsView
 //           the panel draws, so collapsed groups and capped rows are no
 //           stops): Reset to defaults (on the settings' title line), each
 //           group header (index: its place in the view) and the rows of an
@@ -2848,7 +3082,7 @@ function micBlocked(running, queue) {
 // Nothing is a stop while the daemon is unavailable: no control is drawn. The
 // effect row is no stop either while it is not drawn (effectModeView: the
 // daemon predates module effects, or offers no background effect).
-function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings) {
+function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings, health) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (previewControls === true) {
@@ -2880,6 +3114,14 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
     var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
     for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
     if (canNext(record)) stops.push({ kind: "next", index: -1 })
+    var hints = isPlainObject(health) && Array.isArray(health.suggestions) ? health.suggestions : []
+    var drawn = isPlainObject(health) ? Math.min(Number(health.shownSuggestions) || 0, hints.length) : 0
+    for (var sg = 0; sg < drawn && sg < HEALTH_SUGGESTIONS_CAP; sg++) stops.push({ kind: "suggestion", index: sg })
+    if (drawn > 0 && isPlainObject(health.more) && health.more.visible === true) stops.push({ kind: "suggestions-more", index: -1 })
+    if (recommendedShown(health)) {
+      stops.push({ kind: "recommended", index: -1 })
+      stops.push({ kind: "recommended-changes", index: -1 })
+    }
     if (isPlainObject(settings) && settings.reset === true) stops.push({ kind: "reset", index: -1 })
     var groups = isPlainObject(settings) && Array.isArray(settings.groups) ? settings.groups : []
     for (var g = 0; g < groups.length && g < SETTINGS_GROUP_CAP; g++) {
@@ -2900,7 +3142,7 @@ function clampCursor(index, length) {
 // Rows that are one stop each (cameras, group headers, settings) are told
 // apart by index.
 function stopHasIndex(kind) {
-  return kind === "camera" || kind === "group" || kind === "setting"
+  return kind === "camera" || kind === "group" || kind === "setting" || kind === "suggestion"
 }
 
 function stopIndex(stops, kind, index) {
