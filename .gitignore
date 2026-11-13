@@ -20,5 +20,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# The CI harness work directory (tests/run-harness.sh --work harness-work)
+# A harness work directory kept in the checkout (tests/run-harness.sh --work harness-work)
 /harness-work/
