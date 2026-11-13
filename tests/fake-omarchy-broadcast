@@ -112,7 +112,11 @@
 # `media_item` lines, as the harness writes them; missing: a daemon that
 # predates it, as the setup reads above); `media import background PATH --select` and
 # `media remove PATH` (a usage check first, exit 2 for any other shape) then
-# delay, stderr and exit as the commands below. When a remove's status is 0
+# delay, stderr and exit as the commands below; an import sleeps
+# $FAKE_OB_DIR/import-delay seconds first if that file exists (a slow one:
+# converting an animated image or a video), the other commands not. The
+# items may be videos (`media_type` "video", a `duration_ms` and a
+# `poster`): the fake prints the lines as written. When a remove's status is 0
 # and $FAKE_OB_DIR/media-list-removed exists, it replaces media-list (the
 # gallery without the item). `effect replace --image PATH` is one of the
 # other commands.
@@ -416,6 +420,7 @@ if [ "${1:-}" = "media" ]; then
     "remove "?*) [ $# -eq 3 ] ;;
     *) false ;;
   esac || { echo "fake: usage: media list background|away --json | import background|away PATH --select | remove PATH" >&2; exit 2; }
+  [ "$2" = import ] && [ -f "$dir/import-delay" ] && sleep "$(cat "$dir/import-delay")"
   [ -f "$dir/delay" ] && sleep "$(cat "$dir/delay")"
   [ -f "$dir/stderr" ] && cat "$dir/stderr" >&2
   status=0

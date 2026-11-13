@@ -37,15 +37,23 @@ import "Model.js" as Model
 // panel's Gallery... and Add... run one flow at a time on one more child
 // (mediaProc), one step after another (Model.mediaStepArgv, mediaStepEnd):
 // the gallery's list, then the shell's image picker (omarchy-menu-images);
-// or the file chooser (omarchy-file-select). Each step's stdout is read in
+// or the file chooser (omarchy-file-select), then the import of the chosen
+// file (`media import background PATH --select`: converting an animated
+// image or a video may take a while, so it runs here, beside the command
+// queue, and an on/off never waits behind it). Each step's stdout is read in
 // line mode: the list's lines as a setup read's (LINE_CAP each, at most
-// Model.readLinesCap("media")), a picker's first line only (PATH_CAP). A
-// step still running after Model.MEDIA_WATCHDOG_MS is stopped (mediaWatchdog),
-// so a picker that never answers frees the two buttons. What a flow ends with
-// (selecting the picked image, importing the chosen file) is an intent of
-// the command queue, so its failure lands on the panel's failure line; the
-// panel the flow was started from (mediaOpener) is opened again at the end,
-// whatever the end (a cancel too), so the user is back where they were. The
+// Model.readLinesCap("media")), a picker's first line only (PATH_CAP), an
+// import's not at all. A step still running after Model.MEDIA_WATCHDOG_MS
+// (just over ten minutes) is stopped (mediaWatchdog), so a picker that never
+// answers, or an import that never ends, frees the two buttons. A selection
+// of the picked image is an intent of the command queue; its failure, and a
+// step's, lands on the panel's failure line. The panel the flow was started
+// from (mediaOpener) is opened again at the end, whatever the end (a cancel
+// too), or when the import starts (it says "Adding the background…"
+// meanwhile), so the user is back where they were. The last background
+// gallery read (a list step's, or the setup dialog's) is kept
+// (backgroundMedia): the panel's thumbnail finds the background in force
+// there (a video's poster). The
 // two tools are looked up on PATH (toolsProc, a fixed script as the
 // resolver's) when a widget attaches and whenever a panel opens.
 //
@@ -201,6 +209,14 @@ Singleton {
   // The flow running (Model.mediaStepEnd's `flow`), or null; one at a time.
   property var mediaFlow: null
   readonly property bool mediaBusy: mediaFlow !== null
+  // Add...'s import runs (the panel and the setup dialog say so).
+  readonly property bool mediaImporting: mediaFlow !== null && mediaFlow.step === "import"
+  // The last background gallery read that went through (Model.readMedia),
+  // or null: what the panel's thumbnail looks the background in force up in.
+  property var backgroundMedia: null
+  // Where the daemon keeps video posters (Model.posterDir): a poster
+  // anywhere else is not loaded.
+  readonly property string posterDir: Model.posterDir(Quickshell.env("XDG_CACHE_HOME"), Quickshell.env("HOME"))
   property bool mediaArmed: false
   property bool mediaStarted: false
   property bool mediaRejected: false
@@ -365,10 +381,11 @@ Singleton {
     var result
     if (!readStarted) result = Model.readFailed(Model.commandFailureText(-1, "", cliPath))
     else if (readRejected) result = Model.readFailed("omarchy-broadcast printed more than this plugin reads")
-    else result = Model.setupRead(kind, readLines, readExitCode, readStderr.text)
+    else result = Model.setupRead(kind, readLines, readExitCode, readStderr.text, posterDir)
     readLines = []
     readStarted = false
     if (setupHeld) setup = Model.withSetupRead(setup, kind, result)
+    if (kind === "media" && result && result.ok === true) backgroundMedia = result
     if (readAgain) {
       readAgain = false
       Qt.callLater(root.refreshSetup)
@@ -988,7 +1005,7 @@ Singleton {
   }
 
   function startMediaStep(flow) {
-    var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, Model.mediaCurrent(flow, record, setup.config))
+    var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, Model.mediaCurrent(flow, record, setup.config), record)
     if (!argv || mediaProc.running || mediaArmed) {
       mediaFlow = null
       return false
@@ -1013,10 +1030,12 @@ Singleton {
 
   // A list step keeps its lines, each up to Model.LINE_CAP and at most
   // Model.readLinesCap("media") of them; a picker step only its first line,
-  // up to Model.PATH_CAP. Past a cap the step is stopped.
+  // up to Model.PATH_CAP. Past a cap the step is stopped. An import's lines
+  // are counted only (never a reason to stop it half-way).
   function mediaLine(line) {
     if (mediaRejected) return
     mediaLines++
+    if (mediaFlow !== null && mediaFlow.step === "import") return
     var list = mediaFlow !== null && mediaFlow.step === "list"
     if (!list && mediaLines > 1) return
     var cap = list ? Model.LINE_CAP : Model.PATH_CAP
@@ -1030,7 +1049,8 @@ Singleton {
   }
 
   // The watchdog: a step that outlived Model.MEDIA_WATCHDOG_MS is stopped
-  // and the flow ends with Model.MEDIA_TIMEOUT_TEXT.
+  // and the flow ends with Model.MEDIA_TIMEOUT_TEXT (an import's:
+  // Model.MEDIA_IMPORT_TIMEOUT_TEXT).
   function mediaTimeout() {
     if (!mediaArmed || !mediaProc.running) return
     mediaTimedOut = true
@@ -1043,17 +1063,35 @@ Singleton {
     mediaWatchdog.stop()
     var end = Model.mediaStepEnd(flow, { started: mediaStarted, code: mediaExitCode, first: mediaFirst, lines: mediaLines,
                                          list: mediaList, rejected: mediaRejected, timedOut: mediaTimedOut,
-                                         stderr: mediaStderr.text })
+                                         stderr: mediaStderr.text, posterDir: posterDir })
     mediaFirst = ""
     mediaList = []
-    if (end.error !== "") mediaFailed(flow, end.error)
+    if (end.error !== "") {
+      mediaFailed(flow, end.error)
+      // A failed or stopped import may still have left a file in the
+      // gallery: a dialog showing it reads it again.
+      if (flow !== null && flow.step === "import") Qt.callLater(root.refreshSetup)
+    }
     if (end.flow !== null) {
+      if (end.flow.media && Model.flowGallery(end.flow) === Model.MEDIA_KIND) backgroundMedia = end.flow.media
       // The next step on the next turn, never a same-turn re-arm.
       mediaFlow = end.flow
       Qt.callLater(root.nextMediaStep)
+      // The import may take a while: the panel is back meanwhile, an
+      // earlier failure no longer on it.
+      if (end.flow.step === "import") {
+        commandError = ""
+        Qt.callLater(root.reopenMediaPanel)
+      }
       return
     }
     mediaFlow = null
+    if (end.imported) {
+      // As a command that went through: the failure line clears, and the
+      // gallery a dialog may be showing is read again.
+      commandError = ""
+      Qt.callLater(root.refreshSetup)
+    }
     if (end.intent !== null && !request(end.intent)) mediaFailed(flow, Model.commandFailureText(-1, "", cliPath))
     Qt.callLater(root.reopenMediaPanel)
   }
@@ -1062,8 +1100,9 @@ Singleton {
     if (mediaFlow === null || mediaArmed) return
     var flow = mediaFlow
     if (!startMediaStep(flow)) {
-      // The next step could not start (a tool gone meanwhile): the flow ends.
-      mediaFailed(flow, Model.GALLERY_FAILED_TEXT)
+      // The next step could not start (a tool gone, or the daemon,
+      // meanwhile): the flow ends.
+      mediaFailed(flow, flow.step === "import" ? Model.commandFailureText(-1, "", cliPath) : Model.GALLERY_FAILED_TEXT)
       Qt.callLater(root.reopenMediaPanel)
     }
   }

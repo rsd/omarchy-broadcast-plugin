@@ -20,7 +20,8 @@
 #   fake/      the fake's snapshot, feed, log and exit/stderr/delay files, and
 #              frames/0..3.jpg: four real 480x270 JPEGs (gst-launch-1.0
 #              videotestsrc ! jpegenc, else ImageMagick) the fake's `preview`
-#              mode copies into runtime/
+#              mode copies into runtime/; cache/omarchy-broadcast/posters/
+#              loop.jpg, a video background's poster (a copy of frame 1)
 #   runtime/   XDG_RUNTIME_DIR of the harness shell and the fake (0700): the
 #              fake's preview.jpg goes here, never the user's runtime dir
 #   sysbin/    mock only: symlinks to every executable in /usr/bin and /bin
@@ -227,6 +228,10 @@ for pattern in smpte smpte75 pinwheel ball; do
     echo "harness: could not make the JPEG frame $frame (needs gst-launch-1.0 with jpegenc, or ImageMagick)" >&2; exit 1; }
   i=$((i + 1))
 done
+# A video background's poster, where the daemon keeps them
+# (.../omarchy-broadcast/posters/): a copy of frame 1.
+mkdir -p "$work/fake/cache/omarchy-broadcast/posters"
+cp -- "$work/fake/frames/1.jpg" "$work/fake/cache/omarchy-broadcast/posters/loop.jpg"
 # A PATH entry whose name holds a newline, with a CLI in it.
 nl='
 '
@@ -299,7 +304,7 @@ log=$work/harness-$mode.log
   # fake first (mock: and no other omarchy-broadcast at all), so the "no
   # cliPath" case resolves the fake from PATH.
   unset WAYLAND_DISPLAY DISPLAY QT_QPA_PLATFORMTHEME
-  export QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime"
+  export QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime" XDG_CACHE_HOME="$work/fake/cache"
   export PATH="$run_path"
   export FAKE_OB_DIR="$work/fake"
   export OBH_MODE="$mode" OBH_PLUGIN="$work/plugin/br.com.dias.omarchy-broadcast" OBH_PLUGIN_COPY="$work/reload/br.com.dias.omarchy-broadcast" OBH_CLI="$cli" OBH_FAKE="$work/fake" \

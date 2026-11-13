@@ -530,14 +530,30 @@ _thumb = sources[PLUGIN / "MediaThumbnail.qml"]
 _at = _thumb.find("id: thumbImage")
 thumb_block = _thumb[_at:_thumb.find("}", _at)] if _at >= 0 else ""
 _dialog = sources[PLUGIN / "SetupDialog.qml"]
-check("the thumbnails (MediaThumbnail: the panel's Background row, the dialog's Away image row) read only the checked path's URL,"
-      " async, decoded at twice their size, only while shown",
+_dialog_thumbs = [block(_dialog[m.start():], "MediaThumbnail {") for m in re.finditer(r"(?<![\w.])MediaThumbnail\s*\{", _dialog)]
+check("the thumbnails (MediaThumbnail: the panel's Background row, the dialog's Backgrounds rows and Away image row) read only"
+      " the checked path's URL (a still's own, a video's poster from the cache), async, decoded at twice their size, only while shown",
       "source: root.source" in thumb_block
       and "asynchronous: true" in thumb_block and "sourceSize.width: root.width * 2" in thumb_block
       and "source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : \"\"" in block(_panel, "MediaThumbnail {")
-      and "source: root.shown && awayLine.visible && root.awayView.visible ? root.awayView.source : \"\"" in block(_dialog, "MediaThumbnail {")
-      and len(re.findall(r"(?<![\w.])MediaThumbnail\s*\{", _panel + _dialog)) == 2
-      and "out.source = mediaImageSource(record.backgroundImagePath)" in block(model, "function backgroundRowView")
+      and len(_dialog_thumbs) == 2
+      and "source: root.shown && root.section === \"backgrounds\" ? mediaRow.modelData.source : \"\"" in _dialog_thumbs[1]
+      and "source: root.shown && awayLine.visible && root.awayView.visible ? root.awayView.source : \"\"" in _dialog_thumbs[0]
+      and len(re.findall(r"(?<![\w.])MediaThumbnail\s*\{", _panel + _dialog)) == 3
+      and "var thumb = mediaThumb(record.backgroundImagePath, media)" in block(model, "function backgroundRowView")
+      and "out.source = thumb.source" in block(model, "function backgroundRowView")
+      and "var thumb = mediaItemThumb(byPath[it.path], media.posterDir)" in block(model, "function mediaSectionView")
+      and "if (out.rows.length >= MEDIA_ROW_CAP) continue" in block(model, "function mediaSectionView")
+      and "return mediaItemThumb(it, media.posterDir)" in block(model, "function mediaThumb")
+      and re.findall(r"source: (mediaImageSource\([^)]*\)+)", block(model, "function mediaThumb"))
+          == ["mediaImageSource(p)"]
+      and re.findall(r"source: (mediaImageSource\([^)]*\)+)", block(model, "function mediaItemThumb"))
+          == ["mediaImageSource(it.path)", "mediaImageSource(mediaPoster(it.poster, posterDir))"]
+      and 'if (root !== "") return parent === root ? p : ""' in block(model, "function mediaPoster")
+      and 'parent.slice(-POSTER_DIR_SUFFIX.length) === POSTER_DIR_SUFFIX ? p : ""' in block(model, "function mediaPoster")
+      and 'readonly property string posterDir: Model.posterDir(Quickshell.env("XDG_CACHE_HOME"), Quickshell.env("HOME"))' in sources[PLUGIN / "Daemon.qml"]
+      and 'if (p === "" || !/\\.jpe?g$/i.test(p)) return ""' in block(model, "function mediaPoster")
+      and 'var POSTER_DIR_SUFFIX = "/omarchy-broadcast/posters"' in model
       and "out.source = mediaImageSource(row.rawPath)" in block(model, "function awayImageView")
       and "if (s.type === \"path\") e.rawPath = mediaPath(s.value)" in block(model, "function configEntry")
       and 'return "file://" + p.split("/").map(function(seg) { return encodeURIComponent(seg) }).join("/")' in block(model, "function mediaImageSource"),
@@ -674,11 +690,15 @@ dialog_writes = re.findall(r"Daemon\.(setModuleEnabled|moveStage|resetOrder|setC
 check("the dialog writes only by ids (or gallery paths) of rows it was given",
       dialog_writes != [] and all(a in ("row.id", "configRow.row.id", "index", "", "row.path") for _, a in dialog_writes), str(dialog_writes))
 media_block = block(daemon, "property Process mediaProc")
-check("the gallery flows: one Process, argv of Model.mediaStepArgv only, stdout lines capped and counted, stderr chunked, a watchdog",
+check("the gallery flows: one Process, argv of Model.mediaStepArgv only, stdout lines capped and counted (an import's counted only),"
+      " stderr chunked, a watchdog (the import's too)",
       media_block != "" and re.search(r"stdout:\s*SplitParser\s*\{\s*onRead", media_block) is not None
       and re.search(r'stderr:\s*SplitParser\s*\{\s*splitMarker:\s*""', media_block) is not None
       and re.findall(r"mediaProc\.command\s*=\s*([^\n]*)", daemon) == ["argv"]
-      and "var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, Model.mediaCurrent(flow, record, setup.config))" in block(daemon, "function startMediaStep")
+      and "var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, Model.mediaCurrent(flow, record, setup.config), record)" in block(daemon, "function startMediaStep")
+      and 'if (mediaFlow !== null && mediaFlow.step === "import") return' in block(daemon, "function mediaLine")
+      and 'return flowGallery(flow) === MEDIA_KIND && backgroundRowShown(record) ? mediaImportArgv(cli, flow.path) : null' in block(model, "function mediaStepArgv")
+      and 'else out.flow = { kind: "add", step: "import", path: picked, gallery: gallery }' in block(model, "function mediaStepEnd")
       and "if (!list && mediaLines > 1) return" in block(daemon, "function mediaLine")
       and "var cap = list ? Model.LINE_CAP : Model.PATH_CAP" in block(daemon, "function mediaLine")
       and 'mediaLines > Model.readLinesCap("media")' in block(daemon, "function mediaLine")

@@ -113,7 +113,7 @@ Item {
   readonly property var effectRows: Model.effectRows(record)
   // The Background row (interface revision 15): the image in force and the
   // gallery's two actions, faded while their tool is not on PATH.
-  readonly property var backgroundRow: Model.backgroundRowView(record, Daemon.mediaTools, Daemon.mediaBusy)
+  readonly property var backgroundRow: Model.backgroundRowView(record, Daemon.mediaTools, Daemon.mediaBusy, Daemon.backgroundMedia)
   // The Away image row and its Setup... button (interface revision 17).
   readonly property bool awayShown: Model.placeholderSupported(record)
   readonly property var preview: Preview.placeholder
@@ -1049,9 +1049,11 @@ Item {
                 objectName: "background"
                 anchors.verticalCenter: parent.verticalCenter
                 name: "Background image: " + root.backgroundRow.label
-                // Only the checked path's URL (Model.mediaImageSource), and
+                // Only the checked path's URL (Model.mediaImageSource: the
+                // image, or a video's poster from the read gallery), and
                 // only while the panel is open.
                 source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : ""
+                video: root.backgroundRow.video
                 fill: root.hoverFill
                 faint: root.faint
                 fontFamily: root.fontFamily

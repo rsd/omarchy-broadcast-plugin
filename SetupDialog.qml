@@ -17,7 +17,8 @@ import "Model.js" as Model
 // Reset order), Backends (the backend profile and each stage's pin), Daemon
 // (the daemon's configuration, drawn from its schema by row type),
 // Backgrounds (from interface revision 15: how many backgrounds come
-// bundled, then the user's own, each with Remove, pressed twice to confirm)
+// bundled, then the user's own, each with its thumbnail (a video's poster
+// and badge) and Remove, pressed twice to confirm)
 // and Diagnostics (read-only). One section is shown at a time.
 //
 // From interface revision 17 the Daemon section draws the away image's row
@@ -114,7 +115,7 @@ Item {
   // button asks for the second press. Forgotten when the cursor or the
   // section moves.
   property string confirmRemove: ""
-  readonly property var mediaView: Model.mediaSectionView(Daemon.setup, record, confirmRemove)
+  readonly property var mediaView: Model.mediaSectionView(Daemon.setup, record, confirmRemove, Daemon.mediaImporting)
   readonly property var activeView: section === "modules" ? modulesView
     : (section === "order" ? orderView
       : (section === "backends" ? backendsView
@@ -151,8 +152,10 @@ Item {
   // The config key to put the cursor on once its row is drawn (an open()
   // payload's `focus`), else "".
   property string pendingFocus: ""
-  // A gallery flow runs: the overlay is hidden meanwhile.
-  readonly property bool suspended: Daemon.mediaBusy
+  // A gallery flow runs: the overlay is hidden meanwhile (not while the
+  // panel's Add... imports: no other window is up then, and the Backgrounds
+  // section says so).
+  readonly property bool suspended: Daemon.mediaBusy && !Daemon.mediaImporting
   onSuspendedChanged: if (!suspended && root.shown) Qt.callLater(function() { if (root.shown) catcher.forceActiveFocus() })
 
   readonly property color foreground: Commons.Color.menu.text
@@ -1377,7 +1380,8 @@ Item {
             }
 
             // ---- Backgrounds: how many come bundled, then the user's own
-            // (name, size), each with Remove
+            // (thumbnail, name, size: "video, M:SS" for a video), each with
+            // Remove
             Column {
               objectName: "backgroundsSection"
               width: parent.width
@@ -1385,6 +1389,8 @@ Item {
               visible: root.section === "backgrounds" && root.mediaView.bundledText !== ""
 
               Note { objectName: "backgroundsBundled"; text: root.mediaView.bundledText }
+              // The panel's Add... is importing a file (read again at its end).
+              Note { objectName: "backgroundsBusy"; text: root.mediaView.busyText; visible: text !== "" }
 
               Repeater {
                 id: mediaRepeater
@@ -1395,7 +1401,7 @@ Item {
                   required property int index
                   objectName: "mediaRow-" + index
                   width: parent ? parent.width : 0
-                  implicitHeight: Math.max(mediaText.implicitHeight, mediaRemove.implicitHeight) + Style.spacing.controlPaddingY * 2
+                  implicitHeight: Math.max(mediaThumb.height, mediaText.implicitHeight, mediaRemove.implicitHeight) + Style.spacing.controlPaddingY * 2
                   // The cursor is drawn on the button, not the row.
                   hasCursor: false
                   foreground: root.foreground
@@ -1409,11 +1415,26 @@ Item {
                     hoverEnabled: true
                     onEntered: root.setCursor("media-remove", mediaRow.index)
                   }
-                  Column {
-                    id: mediaText
+                  MediaThumbnail {
+                    id: mediaThumb
+                    objectName: "mediaThumb-" + mediaRow.index
                     x: Style.spacing.controlPaddingX
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - x * 2 - mediaRemove.width - Style.space(12)
+                    width: Style.space(48)
+                    name: mediaRow.modelData.label
+                    // Only a checked path's URL (the image, or a video's
+                    // poster), only while the section is drawn.
+                    source: root.shown && root.section === "backgrounds" ? mediaRow.modelData.source : ""
+                    video: mediaRow.modelData.video
+                    fill: root.hoverFill
+                    faint: root.dim
+                    fontFamily: root.fontFamily
+                  }
+                  Column {
+                    id: mediaText
+                    x: mediaThumb.x + mediaThumb.width + Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - x - Style.spacing.controlPaddingX - mediaRemove.width - Style.space(12)
                     spacing: Style.space(2)
                     Text {
                       objectName: "mediaLabel-" + mediaRow.index
@@ -1425,7 +1446,7 @@ Item {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                     }
-                    Note { text: mediaRow.modelData.sizeText; font.pixelSize: Style.font.caption }
+                    Note { objectName: "mediaSize-" + mediaRow.index; text: mediaRow.modelData.sizeText; font.pixelSize: Style.font.caption }
                   }
                   Button {
                     id: mediaRemove

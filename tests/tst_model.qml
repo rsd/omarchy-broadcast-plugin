@@ -4245,7 +4245,11 @@ TestCase {
             "a directory left out is not offered")
     compare(Model.galleryArgv("/t", readOk({ user_dir: "", bundled_dir: "", items: [] }), ""), null, "neither: nothing to pick from")
     compare(JSON.stringify(Model.fileSelectArgv("/usr/bin/omarchy-file-select")),
-            JSON.stringify(["/usr/bin/omarchy-file-select", "--title", "Add a background", "--extensions", "png jpg jpeg webp"]))
+            JSON.stringify(["/usr/bin/omarchy-file-select", "--title", "Add a background", "--extensions",
+                            "png jpg jpeg webp gif apng mp4 m4v mov mkv webm"]), "a background: stills, animated images and videos")
+    compare(JSON.stringify(Model.fileSelectArgv("/usr/bin/omarchy-file-select", "away")),
+            JSON.stringify(["/usr/bin/omarchy-file-select", "--title", "Add an away image", "--extensions", "png jpg jpeg webp"]),
+            "the away image: still images only")
     // the intents, re-checked when they run
     var r = rev15()
     compare(JSON.stringify(Model.intentArgv({ verb: "background", path: p }, cli, r)), JSON.stringify(Model.backgroundArgv(cli, p)))
@@ -4330,11 +4334,33 @@ TestCase {
     var tools = { known: true, gallery: "/t/omarchy-menu-images", chooser: "/t/omarchy-file-select" }
     var add = { kind: "add", step: "pick" }
     compare(JSON.stringify(Model.mediaStepArgv(add, cli, tools, "")),
-            JSON.stringify(["/t/omarchy-file-select", "--title", "Add a background", "--extensions", "png jpg jpeg webp"]))
+            JSON.stringify(["/t/omarchy-file-select", "--title", "Add a background", "--extensions", Model.MEDIA_EXTENSIONS]))
     compare(Model.mediaStepArgv(add, cli, { known: true, gallery: "/g", chooser: "" }, ""), null)
     var res = function(first, lines, code) { return { started: true, code: code, first: first, lines: lines, rejected: false, stderr: "" } }
+    // a chosen file: the import is the flow's next step (beside the queue)
     var ok = Model.mediaStepEnd(add, res("/home/u/Pictures/beach photo.jpg", 1, 0))
-    compare(JSON.stringify(ok.intent), JSON.stringify({ verb: "media-import", path: "/home/u/Pictures/beach photo.jpg" }))
+    compare(ok.intent, null, "no command of the queue")
+    compare(JSON.stringify(ok.flow), JSON.stringify({ kind: "add", step: "import", path: "/home/u/Pictures/beach photo.jpg", gallery: "background" }))
+    var imp = ok.flow
+    compare(JSON.stringify(Model.mediaStepArgv(imp, cli, tools, "", rev15())),
+            JSON.stringify([cli, "media", "import", "background", "/home/u/Pictures/beach photo.jpg", "--select"]))
+    compare(Model.mediaStepArgv(imp, cli, tools, "", rev15({ interface_revision: 14 })), null, "re-checked against the daemon")
+    compare(Model.mediaStepArgv(imp, cli, tools, "", null), null, "no record: nothing")
+    compare(Model.mediaStepArgv({ kind: "add", step: "import", path: "relative.gif" }, cli, tools, "", rev15()), null)
+    compare(Model.mediaStepArgv({ kind: "add", step: "import", path: "/a.png", gallery: "away" }, cli, tools, "", rev15()), null,
+            "the away image is imported through the queue, never as a step")
+    var done = Model.mediaStepEnd(imp, res("/home/u/.local/share/omarchy-broadcast/media/backgrounds/beach photo.webm", 1, 0))
+    verify(done.imported && done.error === "" && done.flow === null && done.intent === null, "imported")
+    var huge = Model.mediaStepEnd(imp, { started: true, code: 0, first: "", lines: 3, rejected: false, stderr: "" })
+    verify(huge.imported, "its stdout is not read")
+    compare(Model.mediaStepEnd(imp, { started: true, code: 1, lines: 0, stderr: "omarchy-broadcast: animated images need ffmpeg" }).error,
+            "The daemon refused the request: animated images need ffmpeg", "the daemon's reason")
+    compare(Model.mediaStepEnd(imp, { started: true, code: 1, lines: 0, stderr: "omarchy-broadcast: needs ffmpeg" }).imported, false)
+    compare(Model.mediaStepEnd(imp, { started: true, code: 4, lines: 0, stderr: "omarchy-broadcast: timed out" }).error, "D-Bus failure: timed out")
+    compare(Model.mediaStepEnd(imp, { started: false }).error, Model.CLI_MISSING_TEXT)
+    var slow = Model.mediaStepEnd(imp, { started: true, code: 143, timedOut: true })
+    compare(slow.error, Model.MEDIA_IMPORT_TIMEOUT_TEXT, "the watchdog bounds the import too")
+    compare(slow.imported, false)
     var none = Model.mediaStepEnd(add, res("", 0, 1))
     verify(none.intent === null && none.error === "", "exit 1: nothing picked, not an error")
     compare(Model.mediaStepEnd(add, res("", 0, 2)).error, "The file chooser could not open")
@@ -4345,6 +4371,7 @@ TestCase {
     compare(Model.mediaStepEnd(add, res("", 0, 0)).error, "", "nothing printed, status 0: nothing")
     compare(Model.mediaStepEnd(add, { started: true, code: 143, timedOut: true }).error, Model.MEDIA_TIMEOUT_TEXT, "the watchdog")
     verify(Model.MEDIA_WATCHDOG_MS > 600000, "past omarchy-file-select's own 600-second timeout")
+    verify(Model.MEDIA_WATCHDOG_MS <= 660000, "and still bounded: an import never holds the buttons past about ten minutes")
   }
 
   function test_background_row_view() {
@@ -4424,6 +4451,203 @@ TestCase {
     compare(Model.mediaUserItem(media, bundledDir + "/aurora.webp"), null, "a bundled one cannot be removed")
     compare(Model.mediaUserItem(media, "/etc/passwd"), null)
     compare(Model.mediaUserItem(null, p), null)
+  }
+
+
+  // ---- video backgrounds (media_type "video")
+
+  readonly property string posterDir: "/home/u/.cache/omarchy-broadcast/posters"
+  function videoItem(o) {
+    return merged({ path: userDir + "/loop.webm", label: "loop", bundled: false, media_type: "video", width: 1920, height: 1080,
+                    duration_ms: 12400, poster: posterDir + "/3f2a.jpg" }, o || {})
+  }
+
+  function test_media_video_items() {
+    var r = readOk({ items: [videoItem(), { path: bundledDir + "/aurora.webp", label: "Aurora", bundled: true, media_type: "image",
+                                            width: 3840, height: 2160, duration_ms: 0, poster: "" }] })
+    verify(r.ok)
+    var v = r.items[0]
+    compare(v.video, true)
+    compare(v.durationMs, 12400)
+    compare(v.poster, posterDir + "/3f2a.jpg")
+    compare(v.sizeText, "1920×1080, video, 0:12")
+    compare(r.items[1].video, false)
+    compare(r.items[1].poster, "", "a still has no poster")
+    compare(r.items[1].sizeText, "3840×2160")
+    // the length as M:SS
+    compare(Model.mediaDurationText(400), "0:01", "at least a second")
+    compare(Model.mediaDurationText(59600), "1:00")
+    compare(Model.mediaDurationText(605000), "10:05")
+    compare(Model.mediaDurationText(3723000), "62:03", "minutes are not wrapped into hours")
+    var badDur = [0, -1, 1.5, "1000", null, Model.MEDIA_DURATION_MAX_MS + 1, Infinity, NaN]
+    for (var i = 0; i < badDur.length; i++) compare(Model.mediaDurationText(badDur[i]), "", String(badDur[i]))
+    compare(readOk({ items: [videoItem({ duration_ms: 0 })] }).items[0].sizeText, "1920×1080, video", "no length: just the word")
+    compare(readOk({ items: [videoItem({ duration_ms: "12" , width: 0 })] }).items[0].sizeText, "video")
+    compare(readOk({ items: [videoItem({ duration_ms: 5000, media_type: "image" })] }).items[0].sizeText, "1920×1080",
+            "a still's length is never shown")
+    // only "video" is a video: an unknown type reads as a still
+    compare(readOk({ items: [videoItem({ media_type: "hologram" })] }).items[0].video, false)
+    compare(readOk({ items: [videoItem({ media_type: "VIDEO" })] }).items[0].video, false)
+    compare(readOk({ items: [videoItem({ media_type: "hologram" })] }).items[0].poster, "", "nor its poster")
+    // the poster: a JPEG directly in the daemon's poster cache, else none
+    compare(Model.mediaPoster(posterDir + "/a.jpg"), posterDir + "/a.jpg")
+    compare(Model.mediaPoster(posterDir + "/a.JPEG"), posterDir + "/a.JPEG")
+    compare(Model.mediaPoster("/usr/share/omarchy-broadcast/posters/loop.jpg"), "/usr/share/omarchy-broadcast/posters/loop.jpg",
+            "shipped posters of the same directory name")
+    var badPosters = ["", "relative/omarchy-broadcast/posters/a.jpg", posterDir + "/a.png", posterDir + "/a.jpg.svg", posterDir + "/sub/a.jpg",
+                      posterDir + "/../../../.ssh/id.jpg", "/etc/a.jpg", "/omarchy-broadcast/posters/a.jpg", posterDir + "x/a.jpg",
+                      "/home/u/x-omarchy-broadcast/posters/a.jpg", posterDir + "/a\n.jpg", "…/omarchy-broadcast/posters/a.jpg",
+                      posterDir + "/", 42, null]
+    for (var k = 0; k < badPosters.length; k++) compare(Model.mediaPoster(badPosters[k]), "", JSON.stringify(badPosters[k]))
+    compare(readOk({ items: [videoItem({ poster: "" })] }).items[0].poster, "", "not made yet")
+    compare(readOk({ items: [videoItem({ poster: "/etc/shadow" })] }).items[0].poster, "", "never another file")
+    compare(readOk({ items: [videoItem({ poster: "/etc/shadow" })] }).items.length, 1, "the item itself stays")
+    // a video name
+    var names = ["/a/b.mp4", "/a/b.M4V", "/a/b.mov", "/a/b.mkv", "/a/b.WebM"]
+    for (var n = 0; n < names.length; n++) verify(Model.mediaVideoName(names[n]), names[n])
+    var stills = ["/a/b.gif", "/a/b.png", "/a/.mp4", "/a/mp4", "/a.mp4/b.png", "", null]
+    for (var m = 0; m < stills.length; m++) verify(!Model.mediaVideoName(stills[m]), String(stills[m]))
+    // the extensions offered
+    compare(Model.MEDIA_EXTENSIONS, "png jpg jpeg webp gif apng mp4 m4v mov mkv webm")
+    compare(Model.AWAY_EXTENSIONS, "png jpg jpeg webp")
+    compare(JSON.stringify(Model.MEDIA_VIDEO_EXTENSIONS), JSON.stringify(["mp4", "m4v", "mov", "mkv", "webm"]))
+    verify(Model.MEDIA_VIDEO_EXTENSIONS.every(function(x) { return Model.MEDIA_EXTENSIONS.split(" ").indexOf(x) >= 0 }), "every video name is offered")
+    compare(Model.GLYPH_FILE_VIDEO, String.fromCodePoint(0xF022B))
+  }
+
+  function test_media_thumb() {
+    var media = readOk({ items: [videoItem(), videoItem({ path: userDir + "/raw.mp4", poster: "" }),
+                                 videoItem({ path: userDir + "/evil.mkv", poster: "/etc/passwd" }),
+                                 { path: userDir + "/office.png", label: "office", bundled: false, media_type: "image", width: 1, height: 1 }] })
+    // listed: the gallery decides
+    compare(JSON.stringify(Model.mediaThumb(userDir + "/loop.webm", media)),
+            JSON.stringify({ source: "file://" + posterDir + "/3f2a.jpg", video: true }), "a listed video: its poster, badged")
+    compare(JSON.stringify(Model.mediaThumb(userDir + "/raw.mp4", media)), JSON.stringify({ source: "", video: true }),
+            "no poster yet: the placeholder, badged")
+    compare(JSON.stringify(Model.mediaThumb(userDir + "/evil.mkv", media)), JSON.stringify({ source: "", video: true }),
+            "a poster outside the cache is never loaded")
+    compare(JSON.stringify(Model.mediaThumb(userDir + "/office.png", media)),
+            JSON.stringify({ source: "file://" + userDir + "/office.png", video: false }))
+    // not listed (or no gallery read): by the file's name, no poster known
+    compare(JSON.stringify(Model.mediaThumb("/home/u/Videos/other.mp4", media)), JSON.stringify({ source: "", video: true }))
+    compare(JSON.stringify(Model.mediaThumb(userDir + "/loop.webm", null)), JSON.stringify({ source: "", video: true }))
+    compare(JSON.stringify(Model.mediaThumb(userDir + "/loop.webm", { ok: false })), JSON.stringify({ source: "", video: true }))
+    compare(JSON.stringify(Model.mediaThumb("/a/b.jpg", null)), JSON.stringify({ source: "file:///a/b.jpg", video: false }))
+    compare(JSON.stringify(Model.mediaThumb("", media)), JSON.stringify({ source: "", video: false }))
+    compare(JSON.stringify(Model.mediaThumb("…/x.mp4", media)), JSON.stringify({ source: "", video: false }), "a clipped path is no path")
+    // a forged item handed in directly is checked again
+    var forged = { ok: true, items: [{ path: "/a/v.webm", video: true, poster: "/etc/passwd" }] }
+    compare(Model.mediaThumb("/a/v.webm", forged).source, "")
+    // the Background row
+    var tools = { known: true, gallery: "/t/g", chooser: "/t/c" }
+    var row = Model.backgroundRowView(rev15({ background_image: userDir + "/loop.webm" }), tools, false, media)
+    compare(row.video, true)
+    compare(row.source, "file://" + posterDir + "/3f2a.jpg")
+    compare(row.label, "loop")
+    var unread = Model.backgroundRowView(rev15({ background_image: userDir + "/loop.webm" }), tools, false)
+    verify(unread.video && unread.source === "", "no gallery read yet: badged by its name, the placeholder")
+    var still = Model.backgroundRowView(rev15({ background_image: userDir + "/office.png" }), tools, false, media)
+    verify(!still.video && still.source === "file://" + userDir + "/office.png")
+    compare(Model.backgroundRowView(rev15(), tools, false, media).video, false, "no image: no badge")
+    // the dialog's rows
+    var setup = Model.withSetupRead(Model.emptySetup(), "media", media)
+    var sec = Model.mediaSectionView(setup, rev15(), "", false)
+    compare(sec.rows.length, 4)
+    compare(sec.rows[0].sizeText, "1920×1080, video, 0:12")
+    compare(sec.rows[0].video, true)
+    compare(sec.rows[0].source, "file://" + posterDir + "/3f2a.jpg")
+    compare(sec.rows[1].source, "")
+    compare(sec.rows[3].video, false)
+    compare(sec.rows[3].source, "file://" + userDir + "/office.png")
+    compare(sec.busyText, "")
+    compare(Model.mediaSectionView(setup, rev15(), "", true).busyText, Model.MEDIA_IMPORTING_TEXT, "the panel's Add... imports")
+    compare(Model.mediaSectionView(Model.emptySetup(), rev15(), "", true).busyText, "", "only once the section shows")
+    // Remove works the same for a video
+    var p = userDir + "/loop.webm"
+    verify(Model.mediaUserItem(media, p) !== null)
+    compare(JSON.stringify(Model.intentArgv({ verb: "setup", op: "media-remove", path: p }, cli, rev15())), JSON.stringify([cli, "media", "remove", p]))
+    // a video picked from the gallery is selected as any item
+    var pick = { kind: "gallery", step: "pick", media: media }
+    compare(JSON.stringify(Model.mediaStepEnd(pick, { started: true, code: 0, first: p, lines: 1, rejected: false, stderr: "" }).intent),
+            JSON.stringify({ verb: "background", path: p }))
+  }
+
+  function test_media_poster_dir() {
+    // the daemon's own derivation: $XDG_CACHE_HOME, else $HOME/.cache
+    compare(Model.posterDir("/c", "/home/u"), "/c/omarchy-broadcast/posters")
+    compare(Model.posterDir("/c/", "/home/u"), "/c/omarchy-broadcast/posters", "a trailing slash dropped")
+    compare(Model.posterDir("", "/home/u"), posterDir)
+    compare(Model.posterDir(undefined, "/home/u"), posterDir, "unset")
+    compare(Model.posterDir("relative/cache", "/home/u"), posterDir, "a relative XDG_CACHE_HOME is ignored")
+    compare(Model.posterDir("/", "/home/u"), posterDir, "the root is no cache")
+    compare(Model.posterDir("", ""), "", "neither: the suffix rule")
+    compare(Model.posterDir(undefined, "relative"), "")
+    // anchored: exactly <cache>/omarchy-broadcast/posters
+    compare(Model.mediaPoster(posterDir + "/a.jpg", posterDir), posterDir + "/a.jpg")
+    compare(Model.mediaPoster(posterDir + "/a.jpg", posterDir + "/"), posterDir + "/a.jpg")
+    var anchoredBad = ["/usr/share/omarchy-broadcast/posters/loop.jpg", "/tmp/omarchy-broadcast/posters/a.jpg",
+                       "/home/v/.cache/omarchy-broadcast/posters/a.jpg", posterDir + "/sub/a.jpg", posterDir + "/a.png",
+                       "/home/u/.cache/omarchy-broadcast/posters2/a.jpg", "/x" + posterDir + "/a.jpg"]
+    for (var i = 0; i < anchoredBad.length; i++) compare(Model.mediaPoster(anchoredBad[i], posterDir), "", anchoredBad[i])
+    compare(Model.mediaPoster("/tmp/omarchy-broadcast/posters/a.jpg", ""), "/tmp/omarchy-broadcast/posters/a.jpg", "no root known: the suffix rule")
+    compare(Model.mediaPoster("/tmp/omarchy-broadcast/posters/a.jpg", "relative"), "/tmp/omarchy-broadcast/posters/a.jpg")
+    // carried by the read, and used by the thumbnail
+    var lines = mediaLines({ items: [videoItem(), videoItem({ path: userDir + "/b.webm", poster: "/tmp/omarchy-broadcast/posters/b.jpg" })] })
+    var media = Model.readMedia(lines, 0, "", "background", posterDir)
+    compare(media.posterDir, posterDir)
+    compare(media.items[0].poster, posterDir + "/3f2a.jpg")
+    compare(media.items[1].poster, "", "another cache's posters directory is not the daemon's")
+    compare(Model.mediaThumb(userDir + "/loop.webm", media).source, "file://" + posterDir + "/3f2a.jpg")
+    var forged = { ok: true, posterDir: posterDir, items: [{ path: "/a/v.webm", video: true, poster: "/tmp/omarchy-broadcast/posters/b.jpg" }] }
+    compare(Model.mediaThumb("/a/v.webm", forged).source, "", "checked again against the root")
+    compare(Model.setupRead("media", lines, 0, "", "/elsewhere/omarchy-broadcast/posters").items[0].poster, "", "setupRead passes it on")
+    compare(Model.readMedia(lines, 0, "").items[1].poster, "/tmp/omarchy-broadcast/posters/b.jpg", "none given: the suffix rule")
+    var list = { kind: "gallery", step: "list" }
+    var end = Model.mediaStepEnd(list, { started: true, code: 0, list: lines, lines: lines.length, rejected: false, stderr: "", posterDir: posterDir })
+    compare(end.flow.media.items[1].poster, "", "a gallery step reads with it too")
+  }
+
+  function test_backgrounds_row_cap() {
+    compare(Model.MEDIA_ROW_CAP, 64)
+    var items = []
+    for (var i = 0; i < 70; i++) items.push(videoItem({ path: userDir + "/v" + i + ".webm", label: "v" + i, poster: posterDir + "/p" + i + ".jpg" }))
+    items.push(videoItem({ path: userDir + "/v0.webm", label: "dup", poster: posterDir + "/other.jpg" }))
+    var setup = Model.withSetupRead(Model.emptySetup(), "media", readOk({ items: items }))
+    var v = Model.mediaSectionView(setup, rev15(), "", false)
+    compare(v.rows.length, 64, "only the cap's rows are rendered")
+    compare(v.rows[63].label, "v63")
+    compare(v.rows[63].index, 63)
+    compare(v.rows[5].source, "file://" + posterDir + "/p5.jpg")
+    compare(v.truncation, "Showing 64 of 71 backgrounds")
+    var few = Model.mediaSectionView(Model.withSetupRead(Model.emptySetup(), "media", readOk({ items: items.slice(0, 64) })), rev15(), "", false)
+    compare(few.rows.length, 64)
+    compare(few.truncation, "", "all shown")
+    var both = Model.mediaSectionView(Model.withSetupRead(Model.emptySetup(), "media", readOk({ items: items, items_truncated: true })), rev15(), "", false)
+    compare(both.truncation, "Showing 64 of 71 backgrounds. The daemon lists more backgrounds than are shown.")
+    // a repeated path: its first item is what the row's thumbnail shows, as mediaThumb would
+    var dup = Model.mediaSectionView(Model.withSetupRead(Model.emptySetup(), "media",
+                                     readOk({ items: [items[0], items[70]] })), rev15(), "", false)
+    compare(dup.rows[1].source, "file://" + posterDir + "/p0.jpg")
+    compare(dup.rows[1].label, "dup")
+  }
+
+  function test_video_warning_clauses() {
+    // the daemon's Warning clauses of a video background: shown whole, as any warning
+    var clauses = ["The video background is being prepared for playback on the CPU; a still is shown until it is ready",
+                   "The video background is shown as a still: ffmpeg is not installed",
+                   "The video background is shown as a still: preparing it for playback on the CPU failed"]
+    for (var i = 0; i < clauses.length; i++) compare(snap({ warning: clauses[i] }).warning, clauses[i])
+    var both = clauses[0] + "; " + "maxine shows the video background as a still"
+    compare(snap({ warning: both }).warning, both)
+  }
+
+  function test_import_hint() {
+    var tools = { known: true, gallery: "/t/g", chooser: "/t/c" }
+    var busy = Model.backgroundRowView(rev15(), tools, true)
+    compare(Model.backgroundHint(busy, { kind: "add", step: "import", path: "/a.gif" }), Model.MEDIA_IMPORTING_TEXT)
+    compare(Model.MEDIA_IMPORTING_TEXT, "Adding the background…")
+    compare(Model.backgroundHint(busy, { kind: "add", step: "pick" }), Model.CHOOSER_WAITING_TEXT, "the chooser still waits for a pick")
+    verify(!busy.buttons[0].enabled && !busy.buttons[1].enabled, "both faded while it imports")
   }
 
 
