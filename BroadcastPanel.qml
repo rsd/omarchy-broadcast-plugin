@@ -13,7 +13,9 @@ import "Model.js" as Model
 //           offers them (the options of its mode setting; none named here),
 //           the background image it holds (from interface revision 15 the
 //           Background row: a thumbnail, the image's name, Gallery... and
-//           Add...; before it a read-only row), then the daemon's other global
+//           Add...; before it a read-only row), from revision 17 an Away
+//           image... button that opens the setup dialog at the away image's
+//           row, then the daemon's other global
 //           settings (strength, noise removal, ...) drawn generically, or
 //           the hint that replaces them (a daemon below revision 9);
 //   Camera  the camera list and Next camera, then the camera's settings as
@@ -91,6 +93,8 @@ Item {
   // { previewFps } or { panelTab }. Only togglePreview, chooseFps and
   // chooseTab emit it.
   signal settingsRequested(var values)
+  // The setup dialog, opened at the config row of key `focus`.
+  signal setupRequested(string focus)
 
   readonly property Item keyCatcher: catcher
   readonly property var record: Daemon.record
@@ -110,6 +114,8 @@ Item {
   // The Background row (interface revision 15): the image in force and the
   // gallery's two actions, faded while their tool is not on PATH.
   readonly property var backgroundRow: Model.backgroundRowView(record, Daemon.mediaTools, Daemon.mediaBusy)
+  // The Away image row and its Setup... button (interface revision 17).
+  readonly property bool awayShown: Model.placeholderSupported(record)
   readonly property var preview: Preview.placeholder
   readonly property bool previewControls: Model.previewControlsShown(record, Preview.pathReason)
   readonly property var fpsOptions: Model.fpsOptions(Preview.fps)
@@ -323,6 +329,14 @@ Item {
     return index === 0 ? Daemon.openGallery() : Daemon.addBackground()
   }
 
+  // Setup... on the Away image row: the setup dialog, at that row (the panel
+  // closes, as for the right click).
+  function openAwayImage() {
+    if (!root.awayShown || !root.available) return false
+    root.setupRequested(Model.AWAY_IMAGE_KEY)
+    return true
+  }
+
   // Left/Right on a setting: a row of buttons walks its chip cursor (no
   // write), a slider moves (nudgeSetting).
   function moveSettingH(stop, dx) {
@@ -412,6 +426,7 @@ Item {
     else if (stop.kind === "tabs") chooseTab(tabCursor)
     else if (stop.kind === "effect") chooseEffect(effectCursor)
     else if (stop.kind === "background") activateBackground(backgroundCursor)
+    else if (stop.kind === "away") openAwayImage()
     else if (stop.kind === "reset") resetSettings()
     else if (stop.kind === "group") setGroupOpen(stop.index, !(root.settingsView.groups[stop.index] || {}).expanded)
     else if (stop.kind === "setting") activateSetting(stop.index)
@@ -456,6 +471,7 @@ Item {
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "background") scrollItemIntoView(backgroundLine)
+    else if (stop.kind === "away") scrollItemIntoView(awayLine)
     else if (stop.kind === "mic-host") scrollItemIntoView(micHostLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
@@ -1028,44 +1044,17 @@ Item {
               implicitHeight: visible ? Math.max(backgroundThumb.height, backgroundButtons.implicitHeight, backgroundText.implicitHeight) : 0
               height: implicitHeight
 
-              Rectangle {
+              MediaThumbnail {
                 id: backgroundThumb
-                objectName: "backgroundThumb"
-                width: Style.space(64)
-                height: Math.round(width * 9 / 16)
+                objectName: "background"
                 anchors.verticalCenter: parent.verticalCenter
-                color: root.hoverFill
-                border.width: 1
-                border.color: root.faint
-                clip: true
-                Accessible.role: Accessible.Graphic
-                Accessible.name: "Background image: " + root.backgroundRow.label
-
-                // Only the checked path's URL (Model.mediaImageSource); off
-                // the UI thread, and only while the panel is open.
-                Image {
-                  id: backgroundImage
-                  objectName: "backgroundImage"
-                  anchors.fill: parent
-                  anchors.margins: 1
-                  fillMode: Image.PreserveAspectCrop
-                  asynchronous: true
-                  sourceSize.width: backgroundThumb.width * 2
-                  sourceSize.height: backgroundThumb.height * 2
-                  visible: status === Image.Ready
-                  source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : ""
-                }
-                // No image, or one that did not load (or not yet).
-                Text {
-                  objectName: "backgroundPlaceholder"
-                  anchors.centerIn: parent
-                  visible: backgroundImage.status !== Image.Ready
-                  textFormat: Text.PlainText
-                  text: Model.GLYPH_IMAGE
-                  color: root.faint
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
-                }
+                name: "Background image: " + root.backgroundRow.label
+                // Only the checked path's URL (Model.mediaImageSource), and
+                // only while the panel is open.
+                source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : ""
+                fill: root.hoverFill
+                faint: root.faint
+                fontFamily: root.fontFamily
               }
 
               Column {
@@ -1144,6 +1133,53 @@ Item {
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
+            }
+
+            // ---- the Away image row (interface revision 17): its label,
+            // then Setup... on the right. The watch's snapshot carries no
+            // config value (no file name here), so the button opens the
+            // setup dialog at the Away image row, where it is chosen.
+            Item {
+              id: awayLine
+              objectName: "awayLine"
+              width: parent.width
+              visible: root.awayShown
+              implicitHeight: visible ? Math.max(awayButton.implicitHeight, awayLabel.implicitHeight) : 0
+              height: implicitHeight
+
+              Text {
+                id: awayLabel
+                objectName: "awayLabel"
+                textFormat: Text.PlainText
+                anchors.left: parent.left
+                anchors.right: awayButton.left
+                anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideRight
+                text: Model.AWAY_ROW_LABEL
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+
+              Button {
+                id: awayButton
+                objectName: "awayButton"
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: Model.AWAY_BUTTON_LABEL
+                tooltipText: Model.AWAY_BUTTON_TOOLTIP
+                hasCursor: root.hasCursor("away", -1)
+                bordered: true
+                foreground: root.foreground
+                background: Commons.Color.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                Accessible.name: Model.AWAY_ROW_LABEL + ": " + Model.AWAY_BUTTON_LABEL
+                Accessible.description: Model.AWAY_BUTTON_TOOLTIP
+                onHovered: function(on) { if (on) root.setCursor("away", -1) }
+                onClicked: root.openAwayImage()
+              }
             }
 
             Repeater {

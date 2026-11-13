@@ -48,6 +48,13 @@ import "Model.js" as Model
 // whatever the end (a cancel too), so the user is back where they were. The
 // two tools are looked up on PATH (toolsProc, a fixed script as the
 // resolver's) when a widget attaches and whenever a panel opens.
+//
+// The away image (interface revision Model.PLACEHOLDER_REVISION): the setup
+// dialog's Choose... and Add... run the same flows over the `away` gallery
+// (a flow's `gallery`); what they end with are setup intents (the image
+// set, or imported and set), so their failure, and a step's, lands on the
+// dialog's status line. The dialog hides while a flow runs (mediaBusy) and
+// shows again at its end.
 Singleton {
   id: root
 
@@ -920,6 +927,41 @@ Singleton {
     return beginMediaFlow({ kind: "add", step: "pick" })
   }
 
+  // ---- the away image: the setup dialog's Choose..., Add... and Clear ------------
+
+  // The dialog's Away image row as drawn (Model.awayImageView), from the
+  // read configuration.
+  function awayImageView() {
+    return Model.awayImageView(setup.config, record, mediaTools, mediaBusy || setupBusy)
+  }
+
+  // Choose...: the away gallery is listed, then the picker runs over it.
+  function chooseAwayImage() {
+    var view = awayImageView()
+    if (!view.visible || !view.buttons[0].enabled) return false
+    return beginMediaFlow({ kind: "gallery", step: "list", gallery: Model.AWAY_KIND })
+  }
+
+  // Add...: the file chooser, then the import into the away gallery.
+  function addAwayImage() {
+    var view = awayImageView()
+    if (!view.visible || !view.buttons[1].enabled) return false
+    return beginMediaFlow({ kind: "add", step: "pick", gallery: Model.AWAY_KIND })
+  }
+
+  // Clear: no away image (black wherever it would show).
+  function clearAwayImage() {
+    var view = awayImageView()
+    if (!view.visible || !view.buttons[2].enabled) return false
+    return request({ verb: "setup", op: "away-image", path: "" })
+  }
+
+  // A flow's failure line: the dialog's for the away image, else the panel's.
+  function mediaFailed(flow, text) {
+    if (Model.flowGallery(flow) === Model.AWAY_KIND) setupError = text
+    else commandError = text
+  }
+
   // The open panel is remembered (the first open one: a flow is started from
   // a panel), then every panel closes and the flow's first step runs.
   function beginMediaFlow(flow) {
@@ -946,7 +988,7 @@ Singleton {
   }
 
   function startMediaStep(flow) {
-    var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, record.backgroundImagePath)
+    var argv = Model.mediaStepArgv(flow, cliPath, mediaTools, Model.mediaCurrent(flow, record, setup.config))
     if (!argv || mediaProc.running || mediaArmed) {
       mediaFlow = null
       return false
@@ -1004,7 +1046,7 @@ Singleton {
                                          stderr: mediaStderr.text })
     mediaFirst = ""
     mediaList = []
-    if (end.error !== "") commandError = end.error
+    if (end.error !== "") mediaFailed(flow, end.error)
     if (end.flow !== null) {
       // The next step on the next turn, never a same-turn re-arm.
       mediaFlow = end.flow
@@ -1012,15 +1054,16 @@ Singleton {
       return
     }
     mediaFlow = null
-    if (end.intent !== null && !request(end.intent)) commandError = Model.commandFailureText(-1, "", cliPath)
+    if (end.intent !== null && !request(end.intent)) mediaFailed(flow, Model.commandFailureText(-1, "", cliPath))
     Qt.callLater(root.reopenMediaPanel)
   }
 
   function nextMediaStep() {
     if (mediaFlow === null || mediaArmed) return
-    if (!startMediaStep(mediaFlow)) {
+    var flow = mediaFlow
+    if (!startMediaStep(flow)) {
       // The next step could not start (a tool gone meanwhile): the flow ends.
-      commandError = Model.GALLERY_FAILED_TEXT
+      mediaFailed(flow, Model.GALLERY_FAILED_TEXT)
       Qt.callLater(root.reopenMediaPanel)
     }
   }

@@ -86,6 +86,12 @@ var NO_BACKGROUND_TEXT = "No effect module provides a background effect. Right c
 // tab's Background row and the setup dialog's Backgrounds section. Below it
 // the tab keeps the read-only image row.
 var MEDIA_REVISION = 15
+// The interface revision of the away image (obc-ipc INTERFACE_REVISION 17:
+// `output.placeholder`, an editable `effect.fallback_image` and the `away`
+// gallery of `media list|import`): the setup dialog's Away image row and the
+// Effect tab's Away image row (its Setup... button). Below it the dialog
+// keeps the read-only image row and the tab has no such row.
+var PLACEHOLDER_REVISION = 17
 // The largest interface revision the producer can print (a u32).
 var REVISION_MAX = 4294967295
 
@@ -2849,6 +2855,7 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
   if (shown === "effect") {
     if (effectModeShown(record)) stops.push({ kind: "effect", index: -1 })
     if (backgroundRowShown(record)) stops.push({ kind: "background", index: -1 })
+    if (placeholderSupported(record)) stops.push({ kind: "away", index: -1 })
     if (effectSettingsShown(effectSettings)) {
       // The generic rows' stops number from 0 in this tab's view, as the
       // camera's do in theirs (the two are never shown together).
@@ -3086,27 +3093,37 @@ var FILE_STATUSES = ["loaded", "absent", "error"]
 
 // ---- payload and the panel it forwards to
 
-// The overlay's open() payload -> { view, cliSetting }: "setup" only for an
-// object whose `view` is "setup" (the right click's); anything else, the
-// empty payload of the panel hotkey and the shell's "{}" included, is the
-// bar panel ("panel"). `cliSetting` is the clicked widget's cliPath setting
-// as given (a string within PATH_CAP), else null.
+// The overlay's open() payload -> { view, cliSetting, focus }: "setup" only
+// for an object whose `view` is "setup" (the right click's); anything else,
+// the empty payload of the panel hotkey and the shell's "{}" included, is
+// the bar panel ("panel"). `cliSetting` is the clicked widget's cliPath
+// setting as given (a string within PATH_CAP), else null; `focus` the key
+// of the config row the dialog opens at (the panel's Away image row),
+// a key of the grammar, else "".
 function setupPayload(json) {
   var p = null
   if (typeof json === "string" && json !== "" && json.length <= SETUP_PAYLOAD_CAP) {
     try { p = JSON.parse(json) } catch (e) { p = null }
   }
-  if (!isPlainObject(p) || p.view !== "setup") return { view: "panel", cliSetting: null }
+  if (!isPlainObject(p) || p.view !== "setup") return { view: "panel", cliSetting: null, focus: "" }
   var cli = p.cliPath
-  return { view: "setup", cliSetting: typeof cli === "string" && cli.length <= PATH_CAP ? cli : null }
+  return { view: "setup", cliSetting: typeof cli === "string" && cli.length <= PATH_CAP ? cli : null, focus: configKeyOf(p.focus) }
 }
 
-// The right click's payload: the view, and the widget's cliPath setting
-// when it has one.
-function setupPayloadJson(cliSetting) {
+// The right click's payload: the view, the widget's cliPath setting when it
+// has one, and the config row to open at when one is asked for (a key of
+// the grammar).
+function setupPayloadJson(cliSetting, focus) {
   var p = { view: "setup" }
   if (typeof cliSetting === "string" && cliSetting.length <= PATH_CAP) p.cliPath = cliSetting
+  if (configKeyOf(focus) !== "") p.focus = focus
   return JSON.stringify(p)
+}
+
+// The section that draws config key `key`: Backends for its profile and
+// pins, else Daemon.
+function configKeySection(key) {
+  return backendKey(typeof key === "string" ? key : "") ? "backends" : "daemon"
 }
 
 // Which bar widget's panel a forwarded hotkey opens: `candidates` are
@@ -3386,7 +3403,11 @@ function configEntry(s) {
     unit: settingText(s.unit, SETTING_UNIT_CAP), options: [], optionsTotal: 0, itemsTotal: 0,
     editable: s.editable === true, source: fileText(s.source), overriddenBy: fileText(s.overridden_by),
     apply: CONFIG_APPLY.indexOf(s.apply) >= 0 ? s.apply : "live",
-    enabled: enabled, reason: enabled ? "" : settingText(s.disabled_reason, CONFIG_REASON_CAP)
+    enabled: enabled, reason: enabled ? "" : settingText(s.disabled_reason, CONFIG_REASON_CAP),
+    // A path row's raw value, kept only when it is a usable absolute path
+    // (mediaPath): a thumbnail's source and a picker's --selected, never
+    // shown. "" otherwise.
+    rawPath: ""
   }
   if (s.type === "bool") {
     if (typeof s.value !== "boolean") return null
@@ -3419,6 +3440,7 @@ function configEntry(s) {
   } else if (s.type === "string" || s.type === "path") {
     if (typeof s.value !== "string") return null
     e.value = sanitize(s.value, CONFIG_VALUE_CAP)
+    if (s.type === "path") e.rawPath = mediaPath(s.value)
   } else {
     if (!Array.isArray(s.value)) return null
     var items = []
@@ -3687,6 +3709,8 @@ function setupIntentArgv(cli, record, intent) {
   case "order-reset": return orderResetArgv(cli)
   case "config": return record.interfaceRevision >= CONFIG_REVISION ? configSetArgv(cli, intent.id, intent.word) : null
   case "media-remove": return mediaSupported(record) ? mediaRemoveArgv(cli, intent.path) : null
+  case "away-image": return placeholderSupported(record) ? awayImageArgv(cli, intent.path) : null
+  case "away-import": return placeholderSupported(record) ? mediaImportArgv(cli, intent.path, AWAY_KIND) : null
   default: return null
   }
 }
@@ -3881,12 +3905,15 @@ function configValueText(row, value) {
 
 // The widget a config row gets: "switch" (bool), "choices" (enum: a row of
 // buttons, while fitsSegmented; "dropdown" for an enum of many or long
-// choices, such as output.mode), "stepper" (a bounded number: - and +), or
-// "text" (the value,
-// read-only): every row the daemon does not take a write for now
-// (configWord's rule), and every string, path or list.
-function configWidget(row) {
+// choices, such as output.mode), "stepper" (a bounded number: - and +),
+// "away" (the away image's path row, while `away`: the daemon is at
+// PLACEHOLDER_REVISION; a thumbnail, its name, Choose..., Add... and
+// Clear), or "text" (the value, read-only): every row the daemon does not
+// take a write for now (configWord's rule), and every other string, path or
+// list.
+function configWidget(row, away) {
   if (!isPlainObject(row) || !row.editable || !row.enabled || row.overriddenBy !== "") return "text"
+  if (row.type === "path" && row.id === AWAY_IMAGE_KEY) return away === true ? "away" : "text"
   if (row.type === "bool") return "switch"
   if (row.type === "enum") return fitsSegmented(row.options) ? "choices" : "dropdown"
   if ((row.type === "int" || row.type === "float") && row.bounded) return "stepper"
@@ -3898,8 +3925,9 @@ function configWidget(row) {
 // by <file>" for a row a later file sets, else the daemon's reason for a
 // greyed one; `applyText` says when a change takes effect (not for a live
 // one); `stop` is the keyboard stop of an interactive row, -1 for text.
-function configRowView(row, stop) {
-  var widget = configWidget(row)
+// `away` as for configWidget.
+function configRowView(row, stop, away) {
+  var widget = configWidget(row, away)
   var options = []
   for (var i = 0; row.type === "enum" && i < row.options.length && i < CONFIG_OPTION_CAP; i++)
     options.push({ value: row.options[i].value, label: row.options[i].label, selected: row.options[i].value === row.value })
@@ -3919,21 +3947,52 @@ function backendKey(id) {
   return id === "modules.profile" || id.indexOf("modules.pin.") === 0
 }
 
+// Rows drawn directly under another, out of their own group: the key of
+// the follower, the key of the row it follows. The away image's picker sits
+// under the switch that shows it when there is no camera picture.
+var CONFIG_ROW_FOLLOWS = { "effect.fallback_image": "output.placeholder" }
+
 // The rows of the read configuration that `pick(group, row)` keeps, as
-// groups of configRowView rows numbered for the keyboard from 0.
-function configGroupsView(config, pick) {
-  var groups = []
-  var stop = 0
+// groups of configRowView rows numbered for the keyboard from 0, top to
+// bottom (`away` as for configWidget). A row of CONFIG_ROW_FOLLOWS is moved
+// directly under the row it follows while that one is kept; else it stays
+// in its own group. A group left with no row is not drawn.
+function configGroupsView(config, pick, away) {
+  var picked = []
+  var kept = {}
   for (var g = 0; g < config.groups.length && g < CONFIG_GROUP_CAP; g++) {
     var group = config.groups[g]
     var rows = []
     for (var r = 0; r < group.rows.length && r < CONFIG_GROUP_ROW_CAP; r++) {
       if (!pick(group, group.rows[r])) continue
-      var view = configRowView(group.rows[r], stop)
-      if (view.stop >= 0) stop++
-      rows.push(view)
+      rows.push(group.rows[r])
+      kept[group.rows[r].id] = true
     }
-    if (rows.length > 0) groups.push({ id: group.id, label: group.label, rows: rows })
+    picked.push({ group: group, rows: rows })
+  }
+  var moved = function(row) {
+    return Object.prototype.hasOwnProperty.call(CONFIG_ROW_FOLLOWS, row.id) && kept[CONFIG_ROW_FOLLOWS[row.id]] === true
+  }
+  var followers = {}
+  for (var p = 0; p < picked.length; p++)
+    for (var f = 0; f < picked[p].rows.length; f++)
+      if (moved(picked[p].rows[f])) followers[CONFIG_ROW_FOLLOWS[picked[p].rows[f].id]] = picked[p].rows[f]
+  var groups = []
+  var stop = 0
+  var add = function(list, row) {
+    var view = configRowView(row, stop, away)
+    if (view.stop >= 0) stop++
+    list.push(view)
+  }
+  for (var q = 0; q < picked.length; q++) {
+    var views = []
+    for (var i = 0; i < picked[q].rows.length; i++) {
+      var row = picked[q].rows[i]
+      if (moved(row)) continue
+      add(views, row)
+      if (Object.prototype.hasOwnProperty.call(followers, row.id)) add(views, followers[row.id])
+    }
+    if (views.length > 0) groups.push({ id: picked[q].group.id, label: picked[q].group.label, rows: views })
   }
   return { groups: groups, stops: stop }
 }
@@ -3965,7 +4024,7 @@ function daemonSectionView(setup, record) {
   var config = isPlainObject(setup) ? setup.config : null
   out.hint = readHint(config)
   if (out.hint !== "") return out
-  var v = configGroupsView(config, function(group) { return group.id !== "modules" })
+  var v = configGroupsView(config, function(group) { return group.id !== "modules" }, placeholderSupported(record))
   out.groups = v.groups
   out.stops = v.stops
   if (v.groups.length === 0) out.hint = "The daemon reports no configuration."
@@ -4100,6 +4159,9 @@ function stageButtonAfter(row, current, direction) {
 // elements; everything shown is a sanitised display copy.
 
 var MEDIA_KIND = "background"
+// The gallery of the away image (PLACEHOLDER_REVISION): the same lines and
+// commands, its own two directories; what it selects is `effect.fallback_image`.
+var AWAY_KIND = "away"
 // The effect option the gallery's image is for: the row is offered only
 // while the daemon's background mode setting has this option.
 var BACKGROUND_REPLACE = "replace"
@@ -4125,6 +4187,7 @@ var CHOOSER_FAILED_TEXT = "The file chooser could not open"
 var GALLERY_REFUSED_TEXT = "That file is not in the gallery; nothing was changed"
 var GALLERY_NO_FOLDER_TEXT = "The gallery has no folder this plugin can use"
 var MEDIA_INCOMPLETE_TEXT = "omarchy-broadcast printed an incomplete background gallery"
+var AWAY_INCOMPLETE_TEXT = "omarchy-broadcast printed an incomplete away image gallery"
 var CHOOSER_PATH_TEXT = "The file chooser returned a path this plugin cannot use"
 var MEDIA_OVERLONG_TEXT = "omarchy-broadcast printed more than this plugin reads"
 // A step still running after MEDIA_WATCHDOG_MS is stopped: just over
@@ -4220,7 +4283,13 @@ function mediaItem(o, bundledDir, userDir) {
            sizeText: w > 0 && hgt > 0 ? w + "\u00d7" + hgt : "" }
 }
 
-// One stdout line of `media list background --json` -> { kind, ... }:
+// A gallery kind: AWAY_KIND, else MEDIA_KIND (the background gallery, the
+// default of every function that takes one).
+function mediaKindOf(kind) {
+  return kind === AWAY_KIND ? AWAY_KIND : MEDIA_KIND
+}
+
+// One stdout line of `media list <kind> --json` (`kind`: mediaKindOf) -> { kind, ... }:
 //   media        { header: { bundledDir, userDir, count, truncated } }: the
 //                header; a directory is "" when the producer left it out
 //                (too long) or it is unusable, and `count` is the number of
@@ -4232,7 +4301,7 @@ function mediaItem(o, bundledDir, userDir) {
 //   invalid      anything else (not JSON, another v, type or kind, a count
 //                that is no integer or over MEDIA_ITEM_CAP, a line over
 //                LINE_CAP)
-function parseMediaLine(text) {
+function parseMediaLine(text, kind) {
   if (typeof text !== "string" || text.length > LINE_CAP || text.trim() === "") return { kind: "invalid" }
   var m
   try { m = JSON.parse(text) } catch (e) { return { kind: "invalid" } }
@@ -4243,7 +4312,7 @@ function parseMediaLine(text) {
     return { kind: "invalid" }
   }
   if (m.type === "error") return { kind: "error", error: setupErrorText(m) }
-  if (m.kind !== MEDIA_KIND) return { kind: "invalid" }
+  if (m.kind !== mediaKindOf(kind)) return { kind: "invalid" }
   if (m.type === "media_item") return { kind: "item", item: m }
   if (m.type !== "media") return { kind: "invalid" }
   var n = m.items
@@ -4254,7 +4323,7 @@ function parseMediaLine(text) {
 }
 
 // The gallery read (SETUP_READS "media", and the Gallery... flow's first
-// step): { ok: true, bundledDir, userDir, items, bundledCount, truncated },
+// step; `kind` the gallery's, mediaKindOf): { ok: true, bundledDir, userDir, items, bundledCount, truncated },
 // or readFailed with the error line, the exit status or a fallback. The
 // header comes first and exactly as many item lines as it counts follow it,
 // nothing else: an item line before it, a second header, a line of another
@@ -4262,26 +4331,28 @@ function parseMediaLine(text) {
 // incomplete (MEDIA_INCOMPLETE_TEXT). An item outside its own directory
 // (mediaItem; every item of a directory that is "") is dropped, and counts
 // as truncation.
-function readMedia(lines, code, stderrText) {
+function readMedia(lines, code, stderrText, kind) {
+  var away = mediaKindOf(kind) === AWAY_KIND
+  var incomplete = away ? AWAY_INCOMPLETE_TEXT : MEDIA_INCOMPLETE_TEXT
   var src = Array.isArray(lines) ? lines : []
   var error = ""
   var header = null
   var raw = []
   for (var i = 0; i < src.length && i < MEDIA_ITEM_CAP + 2; i++) {
-    var p = parseMediaLine(src[i])
+    var p = parseMediaLine(src[i], kind)
     if (p.kind === "unsupported") return readFailed(p.error)
     if (header === null) {
       if (p.kind === "error") error = p.error
       else if (p.kind === "media") header = p.header
-      else if (p.kind === "item") return readFailed(MEDIA_INCOMPLETE_TEXT)
+      else if (p.kind === "item") return readFailed(incomplete)
       continue
     }
     if (p.kind === "error") return readFailed(p.error)
-    if (p.kind !== "item" || raw.length >= header.count) return readFailed(MEDIA_INCOMPLETE_TEXT)
+    if (p.kind !== "item" || raw.length >= header.count) return readFailed(incomplete)
     raw.push(p.item)
   }
-  if (header === null) return readFailure({ error: error }, code, stderrText, "omarchy-broadcast printed no background gallery")
-  if (src.length > MEDIA_ITEM_CAP + 2 || raw.length !== header.count) return readFailed(MEDIA_INCOMPLETE_TEXT)
+  if (header === null) return readFailure({ error: error }, code, stderrText, away ? "omarchy-broadcast printed no away image gallery" : "omarchy-broadcast printed no background gallery")
+  if (src.length > MEDIA_ITEM_CAP + 2 || raw.length !== header.count) return readFailed(incomplete)
   var out = { ok: true, bundledDir: header.bundledDir, userDir: header.userDir, items: [], bundledCount: 0, truncated: header.truncated }
   for (var k = 0; k < raw.length; k++) {
     var it = mediaItem(raw[k], header.bundledDir, header.userDir)
@@ -4294,8 +4365,8 @@ function readMedia(lines, code, stderrText) {
 
 // ---- argv (fixed words; each path checked again with mediaPath)
 
-function mediaListArgv(cli) {
-  return cliUsable(cli) ? [cli, "media", "list", MEDIA_KIND, "--json"] : null
+function mediaListArgv(cli, kind) {
+  return cliUsable(cli) ? [cli, "media", "list", mediaKindOf(kind), "--json"] : null
 }
 
 // Selects `path` as the replacement background (and the effect with it).
@@ -4304,10 +4375,19 @@ function backgroundArgv(cli, path) {
   return cliUsable(cli) && p !== "" ? [cli, "effect", BACKGROUND_REPLACE, "--image", p] : null
 }
 
-// Copies `path` into the user's gallery, checks it and selects it.
-function mediaImportArgv(cli, path) {
+// Copies `path` into the user's gallery of `kind` (mediaKindOf), checks it
+// and selects it (the background; the away image: `effect.fallback_image`).
+function mediaImportArgv(cli, path, kind) {
   var p = mediaPath(path)
-  return cliUsable(cli) && p !== "" ? [cli, "media", "import", MEDIA_KIND, p, "--select"] : null
+  return cliUsable(cli) && p !== "" ? [cli, "media", "import", mediaKindOf(kind), p, "--select"] : null
+}
+
+// The away image set to `path` (a checked path), or cleared ("": the
+// daemon's empty value); after `--`, as every config write.
+function awayImageArgv(cli, path) {
+  if (!cliUsable(cli) || typeof path !== "string") return null
+  var p = path === "" ? "" : mediaPath(path)
+  return path === "" || p !== "" ? [cli, "config", "set", "--", AWAY_IMAGE_KEY, p] : null
 }
 
 function mediaRemoveArgv(cli, path) {
@@ -4330,8 +4410,9 @@ function galleryArgv(tool, media, current) {
   return argv.concat(dirs)
 }
 
-function fileSelectArgv(tool) {
-  return cliUsable(tool) ? [tool, "--title", MEDIA_ADD_TITLE, "--extensions", MEDIA_EXTENSIONS] : null
+function fileSelectArgv(tool, kind) {
+  var title = mediaKindOf(kind) === AWAY_KIND ? AWAY_ADD_TITLE : MEDIA_ADD_TITLE
+  return cliUsable(tool) ? [tool, "--title", title, "--extensions", MEDIA_EXTENSIONS] : null
 }
 
 // ---- the two tools, looked up on PATH (as the resolver looks up the CLI)
@@ -4374,20 +4455,36 @@ function toolsFromLines(lines) {
 
 // ---- the Gallery... and Add... flows, one step at a time
 //
-// A flow is { kind: "gallery" | "add", step, media }: "gallery" first lists
-// the gallery (step "list", the CLI), then runs the picker over its two
-// directories (step "pick"); "add" runs the file chooser (step "pick"). A
+// A flow is { kind: "gallery" | "add", step, media, gallery }: "gallery"
+// first lists the gallery (step "list", the CLI), then runs the picker over
+// its two directories (step "pick"); "add" runs the file chooser (step
+// "pick"). `gallery` is the gallery's kind (mediaKindOf: the background's
+// when absent, the panel's; AWAY_KIND for the setup dialog's away image). A
 // step's end gives { flow, intent, error }: the next step, else the command
-// intent to queue (a background selection or an import), else the error
-// line for the panel ("" for none: a cancel).
+// intent to queue (a background selection or an import; for the away image
+// setup intents: `away-image` and `away-import`, the dialog's writes), else
+// the error line ("" for none: a cancel), the panel's or, for the away
+// image, the dialog's.
+
+// The gallery kind of a flow (mediaKindOf of its `gallery`).
+function flowGallery(flow) {
+  return isPlainObject(flow) ? mediaKindOf(flow.gallery) : MEDIA_KIND
+}
+
+// The image in force a flow's picker preselects: the background's raw path,
+// or the away image's (the read configuration's row).
+function mediaCurrent(flow, record, config) {
+  if (flowGallery(flow) === AWAY_KIND) return awayImagePath(config)
+  return isPlainObject(record) && typeof record.backgroundImagePath === "string" ? record.backgroundImagePath : ""
+}
 
 // The argv of a flow's current step, or null.
 function mediaStepArgv(flow, cli, tools, current) {
   if (!isPlainObject(flow)) return null
   var t = isPlainObject(tools) ? tools : emptyTools()
-  if (flow.kind === "gallery" && flow.step === "list") return t.gallery !== "" ? mediaListArgv(cli) : null
+  if (flow.kind === "gallery" && flow.step === "list") return t.gallery !== "" ? mediaListArgv(cli, flowGallery(flow)) : null
   if (flow.kind === "gallery" && flow.step === "pick") return galleryArgv(t.gallery, flow.media, current)
-  if (flow.kind === "add" && flow.step === "pick") return fileSelectArgv(t.chooser)
+  if (flow.kind === "add" && flow.step === "pick") return fileSelectArgv(t.chooser, flowGallery(flow))
   return null
 }
 
@@ -4415,14 +4512,16 @@ function mediaStepEnd(flow, result) {
   var lines = typeof r.lines === "number" ? r.lines : 0
   var first = typeof r.first === "string" ? r.first : ""
   var detail = sanitize(typeof r.stderr === "string" ? r.stderr.slice(0, STDERR_CAP) : "", DETAIL_CAP)
+  var gallery = flowGallery(flow)
+  var away = gallery === AWAY_KIND
   if (r.timedOut === true) { out.error = MEDIA_TIMEOUT_TEXT; return out }
   if (flow.kind === "gallery" && flow.step === "list") {
     if (r.started !== true) { out.error = CLI_MISSING_TEXT; return out }
     if (r.rejected === true) { out.error = MEDIA_OVERLONG_TEXT; return out }
-    var media = readMedia(Array.isArray(r.list) ? r.list : [], r.code, r.stderr)
+    var media = readMedia(Array.isArray(r.list) ? r.list : [], r.code, r.stderr, gallery)
     if (media.ok !== true) { out.error = media.error; return out }
     if (mediaDir(media.bundledDir) === "" && mediaDir(media.userDir) === "") { out.error = GALLERY_NO_FOLDER_TEXT; return out }
-    out.flow = { kind: "gallery", step: "pick", media: media }
+    out.flow = { kind: "gallery", step: "pick", media: media, gallery: gallery }
     return out
   }
   if (flow.kind === "gallery" && flow.step === "pick") {
@@ -4434,7 +4533,7 @@ function mediaStepEnd(flow, result) {
     if (r.rejected !== true && (lines === 0 || (lines === 1 && first === ""))) return out
     var chosen = r.rejected === true ? "" : galleryChoice(first, lines, flow.media)
     if (chosen === "") { out.error = GALLERY_REFUSED_TEXT; return out }
-    out.intent = { verb: "background", path: chosen }
+    out.intent = away ? { verb: "setup", op: "away-image", path: chosen } : { verb: "background", path: chosen }
     return out
   }
   if (flow.kind === "add" && flow.step === "pick") {
@@ -4444,7 +4543,7 @@ function mediaStepEnd(flow, result) {
     if (r.started !== true || r.code !== 0) { out.error = CHOOSER_FAILED_TEXT; return out }
     var picked = lines === 1 && r.rejected !== true ? mediaPath(first) : ""
     if (picked === "") { out.error = lines === 0 ? "" : CHOOSER_PATH_TEXT; return out }
-    out.intent = { verb: "media-import", path: picked }
+    out.intent = away ? { verb: "setup", op: "away-import", path: picked } : { verb: "media-import", path: picked }
     return out
   }
   return out
@@ -4546,4 +4645,118 @@ function mediaUserItem(media, path) {
     if (it.path === path && !it.bundled && mediaInDir(it.path, media.userDir)) return it
   }
   return null
+}
+
+// ---------------------------------------------------------------- the away image
+//
+// Interface revision PLACEHOLDER_REVISION. One image, two switches: the
+// image (`effect.fallback_image`, the "Away image" path row of the read
+// configuration) hides the camera when an effect cannot run
+// (`effect.on_failure`) and, with `output.placeholder` on "Away image",
+// stands in for every frame without a camera picture (off, starting, an
+// error, a stall). Both switches are enum rows the setup dialog draws
+// generically; the image's row is drawn as a picker: its thumbnail, its
+// name, Choose... (the shell's image picker over the `away` gallery's two
+// directories; the pick must be an item of the gallery just read, then
+// `config set -- effect.fallback_image PATH`), Add... (the file chooser,
+// then `media import away PATH --select`) and Clear (`config set --
+// effect.fallback_image ""`). The panel's watch snapshot carries no config
+// value, so the Effect tab's Away image row offers one Setup... button
+// that opens the dialog at that row. The setup dialog draws the picker row
+// directly under `output.placeholder` (CONFIG_ROW_FOLLOWS).
+
+var AWAY_IMAGE_KEY = "effect.fallback_image"
+var AWAY_ADD_TITLE = "Add an away image"
+var AWAY_NONE_TEXT = "No away image"
+var CHOOSE_LABEL = "Choose…"
+var CLEAR_LABEL = "Clear"
+var AWAY_CHOOSE_TOOLTIP = "Choose the away image from the gallery"
+var AWAY_ADD_TOOLTIP = "Add an image to your away images and use it"
+var AWAY_CLEAR_TOOLTIP = "Use no away image: black instead"
+var AWAY_CHOOSER_MISSING_TEXT = CHOOSER_TOOL + " is not on PATH: update Omarchy to add an away image."
+var AWAY_ROW_LABEL = "Away image"
+var AWAY_BUTTON_LABEL = "Setup…"
+var AWAY_BUTTON_TOOLTIP = "The image shown instead of the camera: choose it in the setup"
+var AWAY_UNSET_TEXT = "No away image chosen: black is shown"
+// The two switches that show the away image, and their value for it.
+var PLACEHOLDER_KEY = "output.placeholder"
+var ON_FAILURE_KEY = "effect.on_failure"
+var AWAY_SWITCH_VALUE = "image"
+
+// The daemon has the away image: available, at PLACEHOLDER_REVISION or
+// later. An unknown revision counts as no.
+function placeholderSupported(record) {
+  return available(record) && record.interfaceRevision >= PLACEHOLDER_REVISION
+}
+
+// The away image's raw path in the read configuration (the row's rawPath),
+// else "".
+function awayImagePath(config) {
+  var row = findConfigRow(config, AWAY_IMAGE_KEY)
+  return row && row.type === "path" ? row.rawPath : ""
+}
+
+// The dialog's Away image row, exactly as drawn:
+//   { visible, source, label, set, note, buttons: [{ label, enabled, tooltip, missing }] }
+// visible only while the daemon is at PLACEHOLDER_REVISION and its row is
+// one it takes a write for (configWidget "away"; an overridden or greyed
+// row stays read-only text with its reason). `source` is the thumbnail's
+// (mediaImageSource of the raw path, "" for the placeholder glyph), `label`
+// the image's file stem (or the display copy's), else AWAY_NONE_TEXT;
+// `set` whether an image is set; `note` AWAY_UNSET_TEXT while none is and
+// a switch that shows it (`output.placeholder` or `effect.on_failure`) is
+// on "image" (the daemon shows black then), else "". Choose... is button 0, Add... 1, Clear 2;
+// Choose... and Add... are disabled, the tooltip saying why, while their
+// tool is not on PATH (`tools`), Clear while no image is set, and all three
+// while `busy` (a flow runs or a setup write is in flight).
+function awayImageView(config, record, tools, busy) {
+  var out = { visible: false, source: "", label: "", set: false, note: "", buttons: [] }
+  var row = placeholderSupported(record) ? findConfigRow(config, AWAY_IMAGE_KEY) : null
+  if (!row || configWidget(row, true) !== "away") return out
+  var t = isPlainObject(tools) ? tools : emptyTools()
+  out.visible = true
+  out.set = typeof row.value === "string" && row.value !== ""
+  out.source = mediaImageSource(row.rawPath)
+  var label = row.rawPath !== "" ? mediaStem(row.rawPath) : (out.set ? mediaStem(row.value) : "")
+  out.label = label !== "" ? label : AWAY_NONE_TEXT
+  if (!out.set && (awaySwitchOn(config, PLACEHOLDER_KEY) || awaySwitchOn(config, ON_FAILURE_KEY))) out.note = AWAY_UNSET_TEXT
+  var gallery = t.gallery !== ""
+  var chooser = t.chooser !== ""
+  out.buttons.push({ label: CHOOSE_LABEL, enabled: gallery && busy !== true,
+                     tooltip: gallery || !t.known ? AWAY_CHOOSE_TOOLTIP : GALLERY_MISSING_TEXT, missing: t.known && !gallery })
+  out.buttons.push({ label: ADD_LABEL, enabled: chooser && busy !== true,
+                     tooltip: chooser || !t.known ? AWAY_ADD_TOOLTIP : AWAY_CHOOSER_MISSING_TEXT, missing: t.known && !chooser })
+  out.buttons.push({ label: CLEAR_LABEL, enabled: out.set && busy !== true, tooltip: AWAY_CLEAR_TOOLTIP, missing: false })
+  return out
+}
+
+// Whether the enum row `id` of the read configuration is on the away image.
+function awaySwitchOn(config, id) {
+  var row = findConfigRow(config, id)
+  return row !== null && row.type === "enum" && row.value === AWAY_SWITCH_VALUE
+}
+
+// The button of the Away image row a Left/Right press lands on, from
+// `current`: the nearest enabled one that way (`direction` 0: `current`
+// while enabled, else the first enabled one); -1 when there is none.
+function awayButtonAfter(view, current, direction) {
+  var buttons = isPlainObject(view) && Array.isArray(view.buttons) ? view.buttons : []
+  var on = function(i) { return i >= 0 && i < buttons.length && isPlainObject(buttons[i]) && buttons[i].enabled === true }
+  if (direction > 0 || direction < 0) {
+    var step = direction > 0 ? 1 : -1
+    for (var i = current + step; i >= 0 && i < buttons.length; i += step) if (on(i)) return i
+    return -1
+  }
+  if (on(current)) return current
+  for (var j = 0; j < buttons.length; j++) if (on(j)) return j
+  return -1
+}
+
+// The hint under the dialog's Away image row: which tool is not on PATH,
+// else "" (the dialog is hidden while a flow runs).
+function awayImageHint(view) {
+  if (!isPlainObject(view) || !view.visible) return ""
+  var out = []
+  for (var i = 0; i < view.buttons.length; i++) if (view.buttons[i].missing) out.push(view.buttons[i].tooltip)
+  return out.join(" ")
 }

@@ -4281,6 +4281,8 @@ ShellRoot {
       h.eq("no dialog error", S().setupError, "")
     })
 
+    awayCases(D, dfind, rev, args, has, idle)
+
     // a revision-14 daemon: no Background row, no section, the old row back
     h.step("media: revision 14", function() {
       h.feed([snapshotLine(rev(14))])
@@ -4313,6 +4315,279 @@ ShellRoot {
       h.removeFile("gallery-delay")
       h.feed([snapshotLine({})])
     }, function() { return S().record.link === "ok" && S().record.interfaceRevision === 4 && h.writerIdle() })
+  }
+
+  // ---- the away image (mock, interface revision 17) ------------------------------
+  //
+  // Inside the media scenario, with its dialog open: the away gallery's two
+  // directories (the bundled one holds the preview's real JPEGs, so the
+  // thumbnail loads), the configuration rows of a revision-17 daemon
+  // (`output.placeholder`, an editable `effect.fallback_image`), and those
+  // of a revision-16 one (the read-only row).
+  function awayBundledDir() { return shellRoot.fakeDir + "/frames" }
+  readonly property string awayUserDir: "/home/u/.local/share/omarchy-broadcast/media/away"
+  function awayListLines() {
+    var items = [
+      { path: awayBundledDir() + "/0.jpg", label: "Be right back", bundled: true, media_type: "image", width: 480, height: 270, duration_ms: 0, poster: "" },
+      { path: awayUserDir + "/me.png", label: "me", bundled: false, media_type: "image", width: 1280, height: 720, duration_ms: 0, poster: "" }
+    ]
+    var out = [JSON.stringify({ v: 1, type: "media", kind: "away", serial: 1, bundled_dir: awayBundledDir(), user_dir: awayUserDir,
+                                items: items.length, items_truncated: false })]
+    for (var i = 0; i < items.length; i++) {
+      var it = { v: 1, type: "media_item", kind: "away" }
+      for (var k in items[i]) it[k] = items[i][k]
+      out.push(JSON.stringify(it))
+    }
+    return out
+  }
+  // `editable`: revision 17's rows; else revision 16's (no placeholder row,
+  // the image read-only). `o`: more fields of the image's row.
+  function awayConfigLines(editable, image, o) {
+    var imageRow = editable
+      ? cfg("effect.fallback_image", "path", image, { label: "Away image", description: "The image that stands in for the camera" })
+      : cfg("effect.fallback_image", "path", image, { label: "Fallback image", editable: false, description: "Set it in the configuration file." })
+    for (var k in o) imageRow[k] = o[k]
+    var output = [cfg("output.format", "enum", "nv12", { label: "Format", options: [{ value: "nv12", label: "NV12" }, { value: "yuyv", label: "YUYV" }] })]
+    if (editable) output.push(cfg("output.placeholder", "enum", "black", { label: "When there is no camera picture", "default": "black",
+                                   options: [{ value: "black", label: "Black" }, { value: "image", label: "Away image" }] }))
+    var groups = [
+      { id: "output", label: "Output", settings: output },
+      { id: "effect", label: "Effect", settings: [
+        cfg("effect.on_failure", "enum", "black", { label: "When an effect can't run",
+            options: [{ value: "black", label: "Hide the camera: black" }, { value: "show", label: "Show the camera" }] }),
+        imageRow] }
+    ]
+    var raw = []
+    for (var g = 0; g < groups.length; g++)
+      raw.push({ v: 1, type: "config_group", schema: 1, serial: 9, part: 1, parts: 1, group: groups[g] })
+    for (var i = 0; i < raw.length; i++) { raw[i].index = i; raw[i].count = raw.length }
+    return raw.map(function(x) { return JSON.stringify(x) })
+  }
+
+  function awayCases(D, dfind, rev, args, has, idle) {
+    var A = function() { return h.widgetA }
+    var S = function() { return h.widgetA.service }
+    var C = function() { return h.content(A()) }
+    var row = function() { return h.model.findConfigRow(S().setup.config, h.model.AWAY_IMAGE_KEY) }
+    var stopOf = function(id) {
+      var groups = D().daemonView.groups
+      for (var g = 0; g < groups.length; g++)
+        for (var r = 0; r < groups[g].rows.length; r++) if (groups[g].rows[r].id === id) return groups[g].rows[r].stop
+      return -2
+    }
+    var settled = function() { return idle() && !S().setupBusy && !S().readArmed && S().readQueue.length === 0 && h.writerIdle() }
+    var brb = awayBundledDir() + "/0.jpg"
+
+    h.step("away: a revision-17 daemon, no away image yet", function() {
+      h.writeFile("config-show", awayConfigLines(true, ""))
+      h.writeFile("media-list-away", awayListLines())
+      h.writeFile("setup-serial", ["1"])
+      h.removeFile("gallery-pick")
+      h.removeFile("file-pick")
+      h.removeFile("file-exit")
+      h.feed([snapshotLine(rev(17))])
+    }, function() { return S().record.interfaceRevision === 17 && row() !== null && settled() }, 8000)
+    h.step("away: the Daemon section draws the image's row as a picker", function() {
+      h.key("4")
+      h.eq("shown", D().section, "daemon")
+      h.eq("the row", dfind("awayLine").visible, true)
+      h.eq("its widget", h.model.configViewRow(D().daemonView, stopOf("effect.fallback_image")).widget, "away")
+      h.eq("no image", dfind("awayName").text, h.model.AWAY_NONE_TEXT)
+      h.eq("the glyph", dfind("awayPlaceholder").visible, true)
+      h.eq("Choose…", dfind("awayButton-0").text, "Choose…")
+      h.eq("Add…", dfind("awayButton-1").text, "Add…")
+      h.eq("Clear", dfind("awayButton-2").text, "Clear")
+      h.eq("Clear faded: nothing to clear", dfind("awayButton-2").opacity < 1, true)
+      h.eq("Choose… offered", dfind("awayButton-0").opacity, 1)
+      h.eq("no text value", dfind("configValue-effect.fallback_image").visible, false)
+      h.eq("the placeholder switch: the generic chips", dfind("configChoices-output.placeholder").visible, true)
+      h.eq("its two choices", dfind("configChoice-output.placeholder-1").text, "Away image")
+      h.eq("the picker the next stop after the switch", stopOf("effect.fallback_image"), stopOf("output.placeholder") + 1)
+      h.eq("in the Output group", D().daemonView.groups[0].rows.map(function(r) { return r.id }).join(","),
+           "output.format,output.placeholder,effect.fallback_image")
+      var chips = dfind("configChoices-output.placeholder")
+      var line = dfind("awayLine")
+      var gap = line.mapToItem(null, 0, 0).y - chips.mapToItem(null, 0, chips.height).y
+      h.check("drawn directly under the chips (" + gap + " px)", gap >= 0 && gap < 80)
+      h.eq("no note: the switch is on Black", dfind("awayNote").visible, false)
+    })
+    h.step("away: Left/Right skip the faded Clear", function() {
+      D().setCursor("config", stopOf("effect.fallback_image"))
+      h.eq("landed on Choose…", D().awayCursor, 0)
+      h.key(Qt.Key_Right)
+      h.eq("Add…", D().awayCursor, 1)
+      h.key(Qt.Key_Right)
+      h.eq("still Add…: Clear is faded", D().awayCursor, 1)
+      h.eq("the cursor drawn on Add…", dfind("awayButton-1").hasCursor, true)
+      h.eq("not on Clear", dfind("awayButton-2").hasCursor, false)
+      h.key(Qt.Key_Left)
+      h.eq("back to Choose…", D().awayCursor, 0)
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "a1-setup-away-row.png")
+
+    h.step("away: Choose… picks a bundled away image (the picker open a second)", function() {
+      h.writeFile("gallery-pick", [brb])
+      h.writeFile("gallery-delay", ["1"])
+    }, function() { return h.writerIdle() })
+    h.step("away: Enter on Choose…", function() {
+      h.markLog()
+      D().setCursor("config", stopOf("effect.fallback_image"))
+      h.eq("the cursor on Choose…", dfind("awayButton-0").hasCursor, true)
+      h.key(Qt.Key_Return)
+    }, function() { return S().mediaBusy && S().mediaFlow.step === "pick" }, 6000)
+    h.step("away: the dialog is hidden while the picker runs", function() {
+      h.eq("suspended", D().suspended, true)
+      h.eq("still open for the shell", D().opened, true)
+      h.eq("the flow's gallery", S().mediaFlow.gallery, "away")
+    })
+    h.step("away: the picker answers", function() {}, function() {
+      return has("config set -- effect.fallback_image " + brb) && settled() && row().rawPath === brb
+    }, 8000)
+    h.step("away: listed, picked, set, and the dialog back", function() {
+      h.eq("the three commands, in order", JSON.stringify(args().filter(function(a) { return a.indexOf("--json") < 0 || a === "media list away --json" })), JSON.stringify([
+        "media list away --json",
+        "omarchy-menu-images --show-labels " + awayBundledDir() + " " + awayUserDir,
+        "config set -- effect.fallback_image " + brb]))
+      h.eq("shown again", D().suspended, false)
+      h.eq("no dialog error", S().setupError, "")
+      h.eq("no panel error", S().commandError, "")
+      h.eq("the image's name", dfind("awayName").text, "0")
+      h.eq("Clear offered", dfind("awayButton-2").opacity, 1)
+      h.removeFile("gallery-delay")
+    }, function() { return dfind("awayImage").status === Image.Ready }, 4000)
+    h.step("away: the thumbnail", function() {
+      h.eq("its source", String(dfind("awayImage").source), "file://" + brb)
+      h.eq("no glyph", dfind("awayPlaceholder").visible, false)
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "a2-setup-away-chosen.png")
+
+    h.step("away: the picker returns a file the gallery did not list", function() {
+      h.writeFile("gallery-pick", [awayUserDir + "/clip.gif"])
+    }, function() { return h.writerIdle() })
+    h.step("away: Choose…", function() {
+      h.markLog()
+      h.notes.steps = S().mediaSteps
+      h.check("started", D().activateAway(0))
+    }, function() { return S().mediaSteps === h.notes.steps + 2 && settled() }, 6000)
+    h.step("away: refused, said on the dialog's status line", function() {
+      h.eq("nothing set", args().filter(function(a) { return a.indexOf("config set") === 0 }).length, 0)
+      h.eq("the dialog's error", S().setupError, h.model.GALLERY_REFUSED_TEXT)
+      h.eq("not the panel's", S().commandError, "")
+      h.eq("shown", D().statusText, h.model.GALLERY_REFUSED_TEXT)
+      h.eq("still the image", row().rawPath, brb)
+      h.removeFile("gallery-pick")
+    })
+
+    h.step("away: Add… picks a file", function() {
+      h.writeFile("file-pick", ["/home/u/Pictures/me at desk.png"])
+      h.writeFile("file-exit", ["0"])
+    }, function() { return h.writerIdle() })
+    h.step("away: Add…", function() {
+      h.markLog()
+      h.check("started", S().addAwayImage())
+    }, function() { return has("media import away /home/u/Pictures/me at desk.png --select") && settled()
+                            && row().rawPath === shellRoot.fakeDir + "/away-user/me at desk.png" }, 8000)
+    h.step("away: chosen, imported and set", function() {
+      h.eq("the two commands", JSON.stringify(args().filter(function(a) { return a.indexOf("--json") < 0 })), JSON.stringify([
+        "omarchy-file-select --title Add an away image --extensions png jpg jpeg webp",
+        "media import away /home/u/Pictures/me at desk.png --select"]))
+      h.eq("no error", S().setupError, "")
+      h.eq("the stored file's name", dfind("awayName").text, "me at desk")
+      h.removeFile("file-pick")
+      h.removeFile("file-exit")
+    })
+
+    h.step("away: Clear", function() {
+      h.markLog()
+      h.check("cleared", D().activateAway(2))
+    }, function() { return args().indexOf("config set -- effect.fallback_image ") >= 0 && settled() && row().value === "" }, 6000)
+    h.step("away: no away image again", function() {
+      h.eq("the empty value", JSON.stringify(h.newLogArgs().filter(function(a) { return a[0] === "config" && a[1] === "set" })),
+           JSON.stringify([["config", "set", "--", "effect.fallback_image", ""]]))
+      h.eq("no image", dfind("awayName").text, h.model.AWAY_NONE_TEXT)
+      h.check("Clear refused now", !S().clearAwayImage())
+    })
+    h.step("away: Away image when there is no camera picture", function() {
+      h.markLog()
+      D().setCursor("config", stopOf("output.placeholder"))
+      h.check("chosen", D().chooseConfig(h.model.configViewRow(D().daemonView, stopOf("output.placeholder")), 1))
+    }, function() { return has("config set -- output.placeholder image") && settled()
+                            && h.model.findConfigRow(S().setup.config, "output.placeholder").value === "image" }, 6000)
+    h.step("away: no image while the switch shows it: the note says black", function() {
+      h.eq("shown", dfind("awayNote").visible, true)
+      h.eq("its words", dfind("awayNote").text, h.model.AWAY_UNSET_TEXT)
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "a1b-setup-away-unset.png")
+
+    // the panel's Away image row: Setup… opens the dialog at the picker
+    h.step("away: the panel's Away image row", function() {
+      D().close()
+      h.dialog = D()
+      fakeShell.toggles = []
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened && !D().shown })
+    h.wait(300)
+    h.step("away: shown under the Background row, a stop of its own", function() {
+      h.eq("the row", h.find(A(), "awayLine").visible, true)
+      h.eq("its label", h.find(A(), "awayLabel").text, "Away image")
+      h.eq("the button", h.find(A(), "awayButton").visible, true)
+      h.eq("its text", h.find(A(), "awayButton").text, "Setup…")
+      h.eq("its tooltip", h.find(A(), "awayButton").tooltipText, "The image shown instead of the camera: choose it in the setup")
+      h.check("the button on the right", h.find(A(), "awayButton").x > h.find(A(), "awayLabel").x)
+      h.check("after the Background row", h.find(A(), "awayLine").y > h.find(A(), "backgroundLine").y)
+    })
+    h.grabStep(function() { return A().popup }, "a2b-panel-away-row.png")
+    h.step("away: Enter on Setup…", function() {
+      h.check("a stop", C().stops.map(function(st) { return st.kind }).join(",").indexOf("background,away") >= 0)
+      C().setCursor("away", -1)
+      h.key(Qt.Key_Return)
+    }, function() { return D().shown && !A().opened && D().currentStop !== null && D().currentStop.kind === "config" && settled() }, 8000)
+    h.step("away: the dialog opens at the away image's row", function() {
+      h.eq("one toggle, with the row's key", JSON.parse(fakeShell.toggles[0].payload).focus, "effect.fallback_image")
+      h.eq("the Daemon section", D().section, "daemon")
+      h.eq("the cursor on the row", D().currentStop.index, stopOf("effect.fallback_image"))
+      h.eq("on Choose…", dfind("awayButton-0").hasCursor, true)
+      h.eq("the focus asked for is done", D().pendingFocus, "")
+      h.dialog = null
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "a3-setup-away-focus.png")
+
+    // revision 16: the old read-only row, no button
+    h.step("away: revision 16", function() {
+      h.writeFile("config-show", awayConfigLines(false, "/home/u/Pictures/away.png"))
+      h.feed([snapshotLine(rev(16))])
+    }, function() { return S().record.interfaceRevision === 16 && row() !== null && row().label === "Fallback image" && settled() }, 8000)
+    h.step("away: the read-only image row stays", function() {
+      h.eq("no picker", dfind("awayLine"), null)
+      h.eq("the text value", dfind("configValue-effect.fallback_image").visible, true)
+      h.eq("its path", dfind("configValue-effect.fallback_image").text, "/home/u/Pictures/away.png")
+      h.eq("no stop", stopOf("effect.fallback_image"), -1)
+      h.eq("no placeholder row", stopOf("output.placeholder"), -2)
+      h.check("Choose… refused", !S().chooseAwayImage())
+      h.check("Add… refused", !S().addAwayImage())
+      h.check("Clear refused", !S().clearAwayImage())
+      D().close()
+      A().open()
+      h.tab(A(), "effect")
+    }, function() { return A().opened })
+    h.wait(300)
+    h.step("away: no button in the panel", function() {
+      h.eq("hidden", h.find(A(), "awayLine").visible, false)
+      h.check("no stop", C().stops.map(function(st) { return st.kind }).indexOf("away") < 0)
+      h.check("pressing does nothing", !C().openAwayImage())
+      A().close()
+      h.markLog()
+      D().open(h.model.setupPayloadJson(shellRoot.cli))
+    }, function() { return D().shown && settled() }, 8000)
+    h.step("away: back to Backgrounds, as the steps after these expect", function() {
+      h.key("5")
+      h.eq("shown", D().section, "backgrounds")
+      h.removeFile("config-show")
+      h.removeFile("media-list-away")
+      h.removeFile("setup-serial")
+      h.feed([snapshotLine(rev(15))])
+    }, function() { return S().record.interfaceRevision === 15 && settled() }, 8000)
   }
 
   // ---- live scenario (real daemon, real CLI) --------------------------------------
