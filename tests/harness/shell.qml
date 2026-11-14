@@ -5182,11 +5182,15 @@ ShellRoot {
   // whose description ends with "Now: ..."), the panel's switch on the Effect
   // tab (revision gate, writes, the remembered mode, greyed while the
   // memory is not automatic) and the daemon's notice in the panel and in the
-  // dialog. Ends as it began.
+  // dialog, and the Mode dropdown under the switch (three modes at revision
+  // 22, four with `auto` at 23, a mode it cannot offer shown read-only).
+  // Ends as it began.
   readonly property string batteryNow: "Now: on battery, the camera runs without the NVIDIA GPU"
-  function batteryConfigLines(mode) {
+  // `auto`: the row of a revision-23 daemon, whose options include `auto`.
+  function batteryConfigLines(mode, auto) {
     var modes = [{ value: "off", label: "Off" }, { value: "on_battery", label: "On battery" },
                  { value: "power_profile", label: "Follow the power profile" }, { value: "always", label: "Always" }]
+    if (auto === true) modes.splice(1, 0, { value: "auto", label: "On battery or power-saver" })
     var memory = cfg("video.memory", "enum", "auto", { label: "Video processing", "default": "auto", apply: "reload",
                      options: [{ value: "auto", label: "Automatic" }, { value: "gpu", label: "GPU memory" }, { value: "host", label: "System memory" }] })
     var saver = cfg("video.battery_saver", "enum", mode, { label: "Battery saver", "default": "on_battery", apply: "reload",
@@ -5277,6 +5281,174 @@ ShellRoot {
       h.eq("one write", writesOf("video.battery_saver"), JSON.stringify(["power_profile"]))
     })
 
+    // the Mode dropdown: three modes at revision 22, the daemon's mode while on
+    var dd = function() { return h.find(A(), "batteryModeDropdown") }
+    var calls = 0
+    h.step("battery: the Mode row under the switch, three modes at revision 22", function() {
+      h.eq("its label", h.find(A(), "batteryModeLabel").text, "Mode")
+      h.eq("shown", h.find(A(), "batteryModeRow").visible, true)
+      h.check("under the switch", h.find(A(), "batteryModeRow").y > h.find(A(), "batteryRow").y)
+      h.check("above the Now line", h.find(A(), "batteryModeRow").y < h.find(A(), "batteryNow").y)
+      h.eq("three", JSON.stringify(dd().options.map(function(o) { return o.value })), JSON.stringify(["on_battery", "power_profile", "always"]))
+      h.eq("the plugin's labels", JSON.stringify(dd().options.map(function(o) { return o.label })), JSON.stringify(["On battery", "Follow the power profile", "Always"]))
+      h.eq("the daemon's mode", dd().value, "power_profile")
+      h.eq("live", dd().enabled, true)
+      h.eq("a stop right after the switch", kinds()[kinds().indexOf("battery") + 1], "battery-mode")
+    })
+    h.step("battery: Enter on the Mode stop opens the list (Left/Right do nothing)", function() {
+      h.markLog()
+      calls = fakeShell.calls.length
+      C().setCursor("battery-mode", -1)
+      h.key(Qt.Key_Right)
+      h.key(Qt.Key_Left)
+      h.eq("the box draws the cursor", dd().hasCursor, true)
+      keys.mouseMove(h.find(A(), "batteryLabel"), 1, 1)
+      h.key(Qt.Key_Return)
+    }, function() { return dd().popupOpen }, 3000)
+    h.step("battery: Down, Enter: Always, while on", function() {
+      h.eq("nothing written by opening it", writesOf("video.battery_saver"), "[]")
+      h.key(Qt.Key_Down)
+      h.key(Qt.Key_Return)
+    }, function() { return has("config set -- video.battery_saver always") && settled() && row().value === "always" && !dd().popupOpen }, 8000)
+    h.step("battery: one write, the mode stored, the keyboard the panel's again", function() {
+      h.eq("one write", writesOf("video.battery_saver"), JSON.stringify(["always"]))
+      h.eq("stored", A().settings.batterySaverMode, "always")
+      h.eq("one settings write", fakeShell.calls.length, calls + 1)
+      h.eq("the box shows the daemon's word", dd().value, "always")
+      h.eq("still on", h.find(A(), "batterySwitch").checked, true)
+      h.check("the keyboard is the panel's again", h.catcher(A()).activeFocus)
+    })
+    h.step("battery: the Mode dropdown is a combo box named for the setting", function() {
+      h.eq("role", dd().Accessible.role, Accessible.ComboBox)
+      h.eq("name", dd().Accessible.name, "Battery saver mode")
+    })
+
+    // Enter opens the list, Escape closes it: nothing chosen, nothing written
+    h.step("battery: Enter opens the Mode list again", function() {
+      h.markLog()
+      calls = fakeShell.calls.length
+      C().setCursor("battery-mode", -1)
+      h.key(Qt.Key_Return)
+    }, function() { return dd().popupOpen }, 3000)
+    h.step("battery: Escape closes it", function() {
+      h.key(Qt.Key_Down)
+      h.key(Qt.Key_Escape)
+    }, function() { return !dd().popupOpen }, 3000)
+    h.wait(300)
+    h.step("battery: closed with no choice: no write, the keyboard the panel's again", function() {
+      h.eq("no write", writesOf("video.battery_saver"), "[]")
+      h.eq("no settings write", fakeShell.calls.length, calls)
+      h.eq("the mode as it was", dd().value, "always")
+      h.eq("the panel still open", A().opened, true)
+      h.check("the keyboard is the panel's again", h.catcher(A()).activeFocus)
+    })
+
+    // a setup write running: the dropdown takes no choice, none is dropped silently
+    h.step("battery: a slow CLI", function() { h.writeFile("delay", ["0.8"]) }, function() { return settled() })
+    h.step("battery: while the switch's write runs, the dropdown takes no choice", function() {
+      h.markLog()
+      calls = fakeShell.calls.length
+      h.find(A(), "batterySwitch").toggled()
+      h.check("busy", S().setupBusy)
+      h.eq("not interactive while busy", dd().enabled, false)
+      h.check("a choice is refused", !C().chooseBatteryMode("on_battery"))
+      dd().changed("on_battery")
+      h.check("the list does not open", !C().openBatteryModes())
+    }, function() { return has("config set -- video.battery_saver off") && settled() && row().value === "off" }, 8000)
+    h.step("battery: only the switch's write, the remembered mode unchanged", function() {
+      h.removeFile("delay")
+      h.eq("one write", writesOf("video.battery_saver"), JSON.stringify(["off"]))
+      h.eq("still remembered", A().settings.batterySaverMode, "always")
+      h.eq("shown", dd().value, "always")
+      h.eq("interactive again", dd().enabled, true)
+    })
+    h.step("battery: turned on again, Always", function() {
+      h.markLog()
+      h.find(A(), "batterySwitch").toggled()
+    }, function() { return has("config set -- video.battery_saver always") && settled() && row().value === "always" }, 8000)
+
+    // revision 23: four modes, auto first
+    h.step("battery: a revision-23 daemon whose row offers auto", function() {
+      h.writeFile("config-show", batteryConfigLines("always", true))
+      h.writeFile("setup-serial", ["900"])
+      h.feed([snapshotLine(rev(23)), '{"v":1,"type":"config_changed","serial":900}'])
+    }, function() { return S().record.interfaceRevision === 23 && settled() && row() !== null && h.model.configOptionIndex(row().options, "auto") >= 0 }, 8000)
+    h.wait(300)
+    h.step("battery: four modes, the one in force shown", function() {
+      h.eq("four", JSON.stringify(dd().options.map(function(o) { return o.value })), JSON.stringify(["auto", "on_battery", "power_profile", "always"]))
+      h.eq("auto's label", dd().options[0].label, "On battery or power saver")
+      h.eq("the daemon's mode", dd().value, "always")
+    })
+    h.grabStep(function() { return A().popup }, "b1b-panel-battery-saver-mode.png")
+    h.step("battery: turned off, at revision 23", function() {
+      h.markLog()
+      h.find(A(), "batterySwitch").toggled()
+    }, function() { return has("config set -- video.battery_saver off") && settled() && row().value === "off" }, 8000)
+    h.step("battery: off, the dropdown shows the remembered mode; choose auto", function() {
+      h.eq("the remembered mode", dd().value, "always")
+      h.eq("live while off", dd().enabled, true)
+      calls = fakeShell.calls.length
+      h.markLog()
+      dd().changed("auto")
+    })
+    h.wait(400)
+    h.step("battery: no daemon write while off, auto stored and shown", function() {
+      h.eq("no write", writesOf("video.battery_saver"), "[]")
+      h.eq("stored", A().settings.batterySaverMode, "auto")
+      h.eq("the widget reads it as auto", A().storedBatteryMode, "auto")
+      h.eq("one settings write", fakeShell.calls.length, calls + 1)
+      h.eq("shown", dd().value, "auto")
+      h.eq("still off", h.find(A(), "batterySwitch").checked, false)
+    })
+    h.step("battery: turned on, it writes the mode chosen", function() {
+      h.markLog()
+      h.find(A(), "batterySwitch").toggled()
+    }, function() { return has("config set -- video.battery_saver auto") && settled() && row().value === "auto" }, 8000)
+    h.step("battery: auto written once", function() {
+      h.eq("one write", writesOf("video.battery_saver"), JSON.stringify(["auto"]))
+      h.eq("shown", dd().value, "auto")
+    })
+
+    // auto seen from a revision-22 view: read-only, the daemon's label
+    h.step("battery: the daemon at revision 22 again, its mode auto", function() {
+      h.writeFile("setup-serial", ["910"])
+      h.feed([snapshotLine(rev(22)), '{"v":1,"type":"config_changed","serial":910}'])
+    }, function() { return S().record.interfaceRevision === 22 && settled() && row().value === "auto" }, 8000)
+    h.wait(300)
+    h.step("battery: the mode in force shown read-only, nothing chosen", function() {
+      h.eq("the daemon's label", dd().options.length === 1 ? dd().options[0].label : JSON.stringify(dd().options), "On battery or power-saver")
+      h.eq("its word", dd().value, "auto")
+      h.eq("not interactive", dd().enabled, false)
+      h.eq("not faded", dd().opacity, 1.0)
+      h.eq("the switch on", h.find(A(), "batterySwitch").checked, true)
+      h.eq("the widget reads auto as on_battery", A().storedBatteryMode, "on_battery")
+      h.markLog()
+      calls = fakeShell.calls.length
+      h.check("refused", !C().chooseBatteryMode("always"))
+      dd().changed("always")
+      C().setCursor("battery-mode", -1)
+      h.key(Qt.Key_Return)
+    })
+    h.wait(300)
+    h.step("battery: no list, no write, nothing stored", function() {
+      h.eq("no list", dd().popupOpen, false)
+      h.eq("no write", writesOf("video.battery_saver"), "[]")
+      h.eq("no settings write", fakeShell.calls.length, calls)
+    })
+    h.step("battery: the switch still turns it off", function() {
+      h.markLog()
+      h.find(A(), "batterySwitch").toggled()
+    }, function() { return has("config set -- video.battery_saver off") && settled() && row().value === "off" }, 8000)
+    h.step("battery: off, remembering nothing", function() {
+      h.eq("no settings write", fakeShell.calls.length, calls)
+      h.eq("the session's auto reads as on_battery here", dd().value, "on_battery")
+    })
+    h.step("battery: back to Follow the power profile, on, at revision 22", function() {
+      h.writeFile("config-show", batteryConfigLines("power_profile"))
+      h.writeFile("setup-serial", ["920"])
+      h.feed(['{"v":1,"type":"config_changed","serial":920}'])
+    }, function() { return settled() && row().value === "power_profile" && h.model.configOptionIndex(row().options, "auto") < 0 }, 8000)
+
     // the daemon's notice, under the switch (and later in the dialog)
     h.step("battery: a mode written during a camera session brings the daemon's notice", function() {
       h.writeFile("battery-notice", ["Applies when the camera restarts"])
@@ -5344,13 +5516,23 @@ ShellRoot {
       h.eq("still on", h.find(A(), "batterySwitch").checked, true)
       h.eq("still has its Now", h.find(A(), "batteryNow").text, shellRoot.batteryNow)
       h.check("refused", !C().toggleBatterySaver())
+      h.eq("the Mode dropdown greyed too", h.find(A(), "batteryModeDropdown").enabled, false)
+      h.eq("faded", h.find(A(), "batteryModeDropdown").opacity, C().greyedOpacity)
+      h.eq("its label dim", String(h.find(A(), "batteryModeLabel").color), String(C().dim))
+      h.check("no choice", !C().chooseBatteryMode("on_battery"))
       h.markLog()
+      calls = fakeShell.calls.length
+      h.find(A(), "batteryModeDropdown").changed("on_battery")
       C().setCursor("battery", -1)
+      h.key(Qt.Key_Return)
+      C().setCursor("battery-mode", -1)
       h.key(Qt.Key_Return)
     })
     h.wait(300)
     h.step("battery: the keyboard wrote nothing either", function() {
       h.eq("no write", writesOf("video.battery_saver"), "[]")
+      h.eq("no list", h.find(A(), "batteryModeDropdown").popupOpen, false)
+      h.eq("nothing stored", fakeShell.calls.length, calls)
     })
     h.grabStep(function() { return A().popup }, "b5-panel-battery-saver-greyed.png")
     h.step("battery: video processing automatic again, the switch is live", function() {
@@ -5363,9 +5545,13 @@ ShellRoot {
     })
 
     // a failed write shows under the switch
-    h.step("battery: a write the CLI refuses", function() {
+    // the refusal is in place before the write runs (the files are written
+    // by the harness's queue, not at once)
+    h.step("battery: the CLI set to refuse", function() {
       h.writeFile("stderr", ["fake: refused"])
       h.writeFile("exit", ["1"])
+    }, function() { return h.writerIdle() }, 3000)
+    h.step("battery: a write the CLI refuses", function() {
       h.markLog()
       h.find(A(), "batterySwitch").toggled()
     }, function() { return has("config set -- video.battery_saver off") && settled() }, 8000)

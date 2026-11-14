@@ -3409,20 +3409,21 @@ TestCase {
     compare(Model.batterySaverView(r, batteryConfig("off"), 7).mode, "on_battery")
     compare(Model.batterySaverView(r, batteryConfig("always"), "").on, true, "any mode but off is on")
     compare(Model.batterySaverView(r, batteryConfig("power_profile"), "").mode, "off")
-    // a mode the daemon does not offer is not written
+    // a mode the daemon does not offer is not written: the switch turns on
+    // on_battery when offered, else the first mode it offers
     var fewer = Model.readConfig(configLines([{ id: "video", label: "V", settings: [
       batteryRow("off", { options: [{ value: "off", label: "Off" }, { value: "always", label: "Always" }] })] }]), 0, "")
-    compare(Model.batterySaverView(r, fewer, "power_profile").mode, null, "the remembered mode is not one of its options")
+    compare(Model.batterySaverView(r, fewer, "power_profile").mode, "always", "the remembered mode is not one of its options: the first")
     compare(Model.batterySaverView(r, fewer, "always").mode, "always")
     // memory: what a turn off remembers
-    compare(Model.batterySaverMemory(batteryConfig("power_profile")), "power_profile")
-    compare(Model.batterySaverMemory(batteryConfig("off")), null)
-    compare(Model.batterySaverMemory(null), null)
-    compare(Model.batterySaverModeValue("always"), "always")
-    compare(Model.batterySaverModeValue("off"), "on_battery", "off is not a mode to remember")
-    compare(Model.batterySaverModeValue("Always"), "on_battery")
-    compare(Model.batterySaverModeValue(undefined), "on_battery")
-    compare(Model.batterySaverModeValue(["always"]), "on_battery")
+    compare(Model.batterySaverMemory(batteryConfig("power_profile"), r), "power_profile")
+    compare(Model.batterySaverMemory(batteryConfig("off"), r), null)
+    compare(Model.batterySaverMemory(null, r), null)
+    compare(Model.batterySaverModeValue("always", r), "always")
+    compare(Model.batterySaverModeValue("off", r), "on_battery", "off is not a mode to remember")
+    compare(Model.batterySaverModeValue("Always", r), "on_battery")
+    compare(Model.batterySaverModeValue(undefined, r), "on_battery")
+    compare(Model.batterySaverModeValue(["always"], r), "on_battery")
     // the write goes through the one config path, as the row's own word
     compare(Model.configWord(Model.batterySaverRow(batteryConfig("off")), "power_profile"), "power_profile")
     compare(Model.configWord(Model.batterySaverRow(batteryConfig("off")), "sometimes"), null)
@@ -3455,6 +3456,145 @@ TestCase {
     compare(kindsOf(Model.cursorStops(r, 1, false, "camera", null, null, null, null, v)).indexOf("battery"), -1)
     compare(kindsOf(Model.cursorStops(r, 1, false, "effect")).indexOf("battery"), -1, "no view: no stop")
     compare(kindsOf(Model.cursorStops(r, 1, false, "effect", null, null, null, null, Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), ""))).indexOf("battery"), -1)
+  }
+
+  // ---- the Mode dropdown (interface revision 22; `auto` from 23)
+
+  function batteryModesAuto() {
+    return [{ value: "off", label: "Off" }, { value: "auto", label: "On battery or power-saver" }, { value: "on_battery", label: "On battery" },
+            { value: "power_profile", label: "Follow the power profile" }, { value: "always", label: "Always" }]
+  }
+  function values(options) { return JSON.stringify(options.map(function(o) { return o.value })) }
+
+  function test_battery_saver_mode_constants() {
+    compare(Model.BATTERY_SAVER_AUTO_REVISION, 23)
+    compare(JSON.stringify(Model.BATTERY_SAVER_MODES), JSON.stringify(["auto", "on_battery", "power_profile", "always"]))
+    compare(Model.BATTERY_SAVER_MODE_DEFAULT, "auto")
+    compare(Model.BATTERY_SAVER_MODE_LABELS.auto, "On battery or power saver")
+    compare(Model.BATTERY_SAVER_MODE_LABELS.on_battery, "On battery")
+    compare(Model.BATTERY_SAVER_MODE_LABELS.power_profile, "Follow the power profile")
+    compare(Model.BATTERY_SAVER_MODE_LABELS.always, "Always")
+  }
+
+  function test_battery_saver_mode_options_per_revision() {
+    var rev = function(n) { return snap({ interface_revision: n }) }
+    var cfg = batteryConfig("off", { options: batteryModesAuto() })
+    compare(Model.batterySaverView(rev(21), cfg, null).visible, false, "below 22: the whole block is hidden")
+    compare(values(Model.batterySaverView(rev(21), cfg, null).modes), "[]")
+    compare(values(Model.batterySaverView(rev(22), cfg, null).modes), JSON.stringify(["on_battery", "power_profile", "always"]),
+            "22: three, auto not offered even when the daemon lists it")
+    var v23 = Model.batterySaverView(rev(23), cfg, null)
+    compare(values(v23.modes), JSON.stringify(["auto", "on_battery", "power_profile", "always"]), "23: four, in order")
+    compare(JSON.stringify(v23.modes.map(function(o) { return o.label })),
+            JSON.stringify(["On battery or power saver", "On battery", "Follow the power profile", "Always"]), "the plugin's labels")
+    compare(values(Model.batterySaverView(rev(24), cfg, null).modes).indexOf("auto") >= 0, true)
+    // only the modes the daemon's row lists
+    compare(values(Model.batterySaverView(rev(23), batteryConfig("off"), null).modes), JSON.stringify(["on_battery", "power_profile", "always"]),
+            "a row without auto offers no auto")
+    var noAuto = Model.batterySaverView(rev(23), batteryConfig("off"), null)
+    compare(noAuto.mode, "on_battery", "nothing stored, no auto in the row: the switch turns on on_battery")
+    compare(noAuto.modeValue, "on_battery", "and the dropdown shows it, never the raw word")
+    compare(noAuto.modeLabel, "On battery")
+    compare(Model.batterySaverView(rev(23), batteryConfig("off"), "auto").modeValue, "on_battery", "auto stored, not offered")
+    var onlyAlways = batteryConfig("off", { options: [{ value: "off", label: "Off" }, { value: "always", label: "Always" }] })
+    compare(Model.batterySaverView(rev(23), onlyAlways, null).mode, "always", "no on_battery either: the first choice")
+    compare(Model.batterySaverView(rev(23), onlyAlways, "power_profile").modeValue, "always")
+    var fewer = batteryConfig("off", { options: [{ value: "off", label: "Off" }, { value: "auto", label: "Auto" }, { value: "always", label: "Always" }] })
+    compare(values(Model.batterySaverView(rev(23), fewer, null).modes), JSON.stringify(["auto", "always"]))
+    compare(values(Model.batterySaverModeOptions(rev(23), null)), "[]")
+  }
+
+  function test_battery_saver_mode_value() {
+    var r22 = snap({ interface_revision: 22 })
+    var r23 = snap({ interface_revision: 23 })
+    compare(Model.batterySaverModeValue("auto", r22), "on_battery", "auto from a revision-22 daemon")
+    compare(Model.batterySaverModeValue("auto", r23), "auto")
+    compare(Model.batterySaverModeValue(null, r22), "on_battery", "nothing stored, revision 22")
+    compare(Model.batterySaverModeValue(null, r23), "auto", "nothing stored, revision 23")
+    compare(Model.batterySaverModeValue(undefined, r23), "auto")
+    compare(Model.batterySaverModeValue("auto", Model.withLink("not-running")), "on_battery", "an unknown revision is not 23")
+    compare(Model.batterySaverModeValue("power_profile", r23), "power_profile")
+    compare(Model.batterySaverModeValue("garbage", r23), "on_battery", "anything else")
+    compare(Model.batterySaverModeValue("garbage", r22), "on_battery")
+    compare(Model.batterySaverModeValue("off", r23), "on_battery")
+    compare(Model.batterySaverModeValue("", r23), "on_battery")
+    compare(Model.batterySaverModeValue(5, r23), "on_battery")
+    // the switch turns on the remembered mode, read the same way
+    var cfg = batteryConfig("off", { options: batteryModesAuto() })
+    compare(Model.batterySaverView(r23, cfg, null).mode, "auto")
+    compare(Model.batterySaverView(r23, cfg, "auto").mode, "auto")
+    compare(Model.batterySaverView(r22, cfg, "auto").mode, "on_battery", "auto stored, revision 22: on_battery")
+    // the stored word: settingsEntry takes every mode, auto included
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: "auto" }).batterySaverMode, "auto")
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: "on_battery" }).batterySaverMode, "on_battery")
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: "off" }), null)
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: "sometimes" }), null)
+  }
+
+  function test_battery_saver_mode_shown() {
+    var r23 = snap({ interface_revision: 23 })
+    var r22 = snap({ interface_revision: 22 })
+    var on = Model.batterySaverView(r23, batteryConfig("power_profile", { options: batteryModesAuto() }), "always")
+    compare(on.modeValue, "power_profile", "on: the daemon's mode, not the remembered one")
+    compare(on.modeLabel, "Follow the power profile")
+    compare(on.modeReadOnly, false)
+    compare(on.modeEnabled, true)
+    var off = Model.batterySaverView(r23, batteryConfig("off", { options: batteryModesAuto() }), "always")
+    compare(off.modeValue, "always", "off: the remembered mode")
+    compare(off.modeLabel, "Always")
+    compare(off.modeEnabled, true)
+    var unset = Model.batterySaverView(r23, batteryConfig("off", { options: batteryModesAuto() }), null)
+    compare(unset.modeValue, "auto")
+    compare(unset.modeLabel, "On battery or power saver")
+    compare(Model.batterySaverView(r22, batteryConfig("off"), "auto").modeValue, "on_battery")
+    // a mode in force the plugin cannot offer: read-only, the daemon's label
+    var foreign = Model.batterySaverView(r22, batteryConfig("auto", { options: batteryModesAuto() }), "always")
+    compare(foreign.on, true, "the switch still reads on")
+    compare(foreign.modeValue, "auto")
+    compare(foreign.modeReadOnly, true)
+    compare(foreign.modeLabel, "On battery or power-saver", "the daemon's label for it")
+    compare(foreign.modeEnabled, false)
+    compare(foreign.mode, "off", "the switch still turns it off")
+    compare(Model.batterySaverMemory(batteryConfig("auto", { options: batteryModesAuto() }), r22), null, "and remembers nothing")
+    compare(Model.batterySaverMemory(batteryConfig("auto", { options: batteryModesAuto() }), r23), "auto")
+    var later = batteryModesAuto().concat([{ value: "smart", label: "" }])
+    var future = Model.batterySaverView(r23, batteryConfig("smart", { options: later }), null)
+    compare(future.modeReadOnly, true, "a later word")
+    compare(future.modeLabel, "smart", "no daemon label: the raw word")
+    compare(Model.batterySaverModeChoice(future, "always"), null, "nothing chosen from a read-only view")
+    compare(Model.batterySaverMemory(batteryConfig("smart", { options: later }), r23), null)
+    // greyed: no choice
+    var grey = Model.batterySaverView(r23, batteryConfig("on_battery", { options: batteryModesAuto(), enabled: false, disabled_reason: "Set video processing to automatic to use this" }), null)
+    compare(grey.modeEnabled, false)
+    compare(grey.modeValue, "on_battery", "the value still shows")
+    compare(Model.batterySaverModeChoice(grey, "always"), null)
+    // a choice
+    compare(Model.batterySaverModeChoice(on, "always"), "always")
+    compare(Model.batterySaverModeChoice(on, "power_profile"), null, "the one shown: nothing to do")
+    compare(Model.batterySaverModeChoice(on, "off"), null, "off is never a mode")
+    compare(Model.batterySaverModeChoice(on, "--flag"), null)
+    compare(Model.batterySaverModeChoice(on, 3), null)
+    compare(Model.batterySaverModeChoice(Model.batterySaverView(r22, batteryConfig("off", { options: batteryModesAuto() }), null), "auto"), null,
+            "auto from a revision-22 view is no choice")
+    compare(Model.batterySaverModeChoice(off, "auto"), "auto")
+    compare(Model.batterySaverModeChoice(null, "auto"), null)
+    compare(Model.batterySaverModeChoice(Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), null), "always"), null)
+  }
+
+  function test_battery_saver_mode_stop() {
+    var r = snap({ interface_revision: 23 })
+    var v = Model.batterySaverView(r, batteryConfig("off", { options: batteryModesAuto() }), null)
+    var stops = Model.cursorStops(r, 1, false, "effect", null, null, null, null, v).map(function(s) { return s.kind })
+    var at = stops.indexOf("battery")
+    compare(at >= 0, true)
+    compare(stops[at + 1], "battery-mode", "right after the switch")
+    compare(Model.stopHasIndex("battery-mode"), false)
+    compare(Model.cursorStops(r, 1, false, "camera", null, null, null, null, v).map(function(s) { return s.kind }).indexOf("battery-mode"), -1)
+    var hidden = Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), null)
+    compare(Model.cursorStops(r, 1, false, "effect", null, null, null, null, hidden).map(function(s) { return s.kind }).indexOf("battery-mode"), -1, "hidden: no stop")
+    var grey = Model.batterySaverView(r, batteryConfig("off", { enabled: false, disabled_reason: "x" }), null)
+    compare(Model.cursorStops(r, 1, false, "effect", null, null, null, null, grey).map(function(s) { return s.kind }).indexOf("battery-mode") >= 0, true,
+            "greyed: still a stop, as the switch is")
   }
 
   function test_config_notice_in_rows() {

@@ -134,7 +134,9 @@
 # daemon does (reason: Turn on "Hide the camera when an effect can't run" to change this).
 #
 # The battery saver (interface revision 22): the harness's config-show has the
-# row `video.battery_saver` (an enum, its `notice` field "") and `video.memory`.
+# row `video.battery_saver` (an enum, its `notice` field "") and `video.memory`;
+# for a revision-23 daemon the harness writes the row with `auto` among its
+# options, and any listed mode, `auto` included, is set as any other value.
 # `config set -- video.memory VALUE` greys the saver's row with the reason
 # (Set video processing to automatic to use this) unless the value is auto, as
 # the daemon does; `config set -- video.battery_saver MODE` sets the row's

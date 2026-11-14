@@ -3069,7 +3069,9 @@ function recommendedArgv(cli, record, intent) {
 //           Left/Right walk its choices, as in the shell's button groups),
 //           the Background row while backgroundRowShown (one stop;
 //           Left/Right walk Gallery... and Add...), the Away image button,
-//           the Battery saver switch while `batterySaver` (batterySaverView)
+//           the Battery saver switch and its Mode dropdown (one stop each;
+//           Enter opens the list, Left/Right do nothing) while
+//           `batterySaver` (batterySaverView)
 //           is visible, then the rows of `effectSettings` (effectSettingsView: the
 //           daemon's other global settings, drawn generically, no group
 //           header is a stop);
@@ -3103,7 +3105,10 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
     if (effectModeShown(record)) stops.push({ kind: "effect", index: -1 })
     if (backgroundRowShown(record)) stops.push({ kind: "background", index: -1 })
     if (placeholderSupported(record)) stops.push({ kind: "away", index: -1 })
-    if (isPlainObject(batterySaver) && batterySaver.visible === true) stops.push({ kind: "battery", index: -1 })
+    if (isPlainObject(batterySaver) && batterySaver.visible === true) {
+      stops.push({ kind: "battery", index: -1 })
+      stops.push({ kind: "battery-mode", index: -1 })
+    }
     if (effectSettingsShown(effectSettings)) {
       // The generic rows' stops number from 0 in this tab's view, as the
       // camera's do in theirs (the two are never shown together).
@@ -4254,23 +4259,52 @@ function configGroupsView(config, pick, away) {
 // The daemon runs the video effects without the NVIDIA GPU, in system memory,
 // when the mode says so: `off` never, `on_battery` while the machine runs on
 // its battery, `power_profile` while the power profile is power-saver,
-// `always`. The setup dialog draws the mode as any enum; the panel has a
-// switch for it, which writes `off` or the last mode that was not `off`.
+// `always`, and from interface revision 23 `auto` (on battery or while the
+// power profile is power-saver; that daemon's default). The setup dialog
+// draws the mode as any enum; the panel has a switch for it, which writes
+// `off` or the last mode that was not `off`, and under it a Mode dropdown
+// that chooses that mode.
 var BATTERY_SAVER_REVISION = 22
+// The revision whose daemon knows the mode `auto`.
+var BATTERY_SAVER_AUTO_REVISION = 23
 var BATTERY_SAVER_KEY = "video.battery_saver"
 var BATTERY_SAVER_OFF = "off"
-// The modes the switch turns on, and the first (the default): the words
-// of the daemon's enum other than `off`; the manifest's `batterySaverMode`
-// has the same options.
-var BATTERY_SAVER_MODES = ["on_battery", "power_profile", "always"]
-var BATTERY_SAVER_MODE_DEFAULT = "on_battery"
+var BATTERY_SAVER_AUTO = "auto"
+// The modes the switch turns on, in the dropdown's order, and the first (the
+// default): the words of the daemon's enum other than `off`; the manifest's
+// `batterySaverMode` has the same options and default. `auto` only from
+// BATTERY_SAVER_AUTO_REVISION; below it the fallback is the default.
+var BATTERY_SAVER_MODES = ["auto", "on_battery", "power_profile", "always"]
+var BATTERY_SAVER_MODE_DEFAULT = "auto"
+var BATTERY_SAVER_MODE_FALLBACK = "on_battery"
+// The dropdown's labels by mode: the daemon's own labels for the same words
+// (its setup dialog's), so one setting has one name.
+var BATTERY_SAVER_MODE_LABELS = {
+  auto: "On battery or power saver",
+  on_battery: "On battery",
+  power_profile: "Follow the power profile",
+  always: "Always"
+}
 var BATTERY_SAVER_LABEL = "Battery saver"
+var BATTERY_SAVER_MODE_ROW_LABEL = "Mode"
+var BATTERY_SAVER_MODE_NAME = "Battery saver mode"
 var BATTERY_SAVER_NOW_MARK = "Now: "
 
-// The remembered mode, read back: a word of BATTERY_SAVER_MODES exactly,
-// else the default.
-function batterySaverModeValue(value) {
-  return typeof value === "string" && BATTERY_SAVER_MODES.indexOf(value) >= 0 ? value : BATTERY_SAVER_MODE_DEFAULT
+// The daemon knows `auto`: one of BATTERY_SAVER_AUTO_REVISION or later (an
+// unknown revision is not one).
+function batterySaverAutoSupported(record) {
+  return available(record) && record.interfaceRevision >= BATTERY_SAVER_AUTO_REVISION
+}
+
+// The remembered mode, read back against `record`: a word of
+// BATTERY_SAVER_MODES exactly, `auto` only from a daemon that knows it.
+// Nothing stored (null or undefined) reads as `auto` from such a daemon;
+// `auto` from an older one, and anything else, as on_battery.
+function batterySaverModeValue(value, record) {
+  var auto = batterySaverAutoSupported(record)
+  if (value === null || value === undefined || value === BATTERY_SAVER_AUTO)
+    return auto ? BATTERY_SAVER_AUTO : BATTERY_SAVER_MODE_FALLBACK
+  return typeof value === "string" && BATTERY_SAVER_MODES.indexOf(value) >= 0 ? value : BATTERY_SAVER_MODE_FALLBACK
 }
 
 // The panel's switch is offered by a daemon of BATTERY_SAVER_REVISION or
@@ -4301,19 +4335,54 @@ function batterySaverNow(description) {
   return at >= 0 ? description.slice(at).trim() : ""
 }
 
-// The switch as drawn: { visible, on, enabled, reason, now, notice, mode }.
+// The Mode dropdown's choices, [{ value, label }] in BATTERY_SAVER_MODES'
+// order with BATTERY_SAVER_MODE_LABELS: `auto` only against a daemon that knows it,
+// and only the modes the daemon's row lists among its options.
+function batterySaverModeOptions(record, row) {
+  var out = []
+  if (!isPlainObject(row)) return out
+  var auto = batterySaverAutoSupported(record)
+  for (var i = 0; i < BATTERY_SAVER_MODES.length; i++) {
+    var word = BATTERY_SAVER_MODES[i]
+    if (word === BATTERY_SAVER_AUTO && !auto) continue
+    if (configOptionIndex(row.options, word) < 0) continue
+    out.push({ value: word, label: BATTERY_SAVER_MODE_LABELS[word] })
+  }
+  return out
+}
+
+// The switch and the Mode dropdown as drawn: { visible, on, enabled, reason,
+// now, notice, mode, modes, modeValue, modeLabel, modeReadOnly, modeEnabled }.
 // Visible only against a daemon of BATTERY_SAVER_REVISION or later that
 // published the row. `on`: the mode is not `off`. `enabled` and `reason`:
 // the daemon's (the row is greyed while video.memory is not automatic, and
-// its write refused). `mode`: the word a click writes: `off` while on, else
-// the remembered mode (`stored`, through batterySaverModeValue); null when
-// nothing can be written now (hidden, greyed, or the word is not one of the
-// daemon's options).
+// its write refused). `mode`: the word a click on the switch writes: `off`
+// while on, else the remembered mode (`stored`, through
+// batterySaverModeValue; one the dropdown does not offer reads as on_battery
+// when offered, else as its first choice); null when nothing can be written now (hidden,
+// greyed, or the word is not one of the daemon's options).
+// The dropdown: `modes` its choices (batterySaverModeOptions); `modeValue`
+// the word it shows, the daemon's mode while the saver is on, else the
+// remembered one, and `modeLabel` that word's label. A mode in force that
+// the plugin does not offer (`auto` against a revision-22 view, a later
+// word) is `modeReadOnly`: shown with the daemon's label for it (the raw
+// word without one), never chosen nor written. `modeEnabled`: a choice can
+// be made (the row is live, the value not read-only, there are choices).
 function batterySaverView(record, config, stored) {
-  var out = { visible: false, on: false, enabled: false, reason: "", now: "", notice: "", mode: null }
+  var out = { visible: false, on: false, enabled: false, reason: "", now: "", notice: "", mode: null,
+              modes: [], modeValue: "", modeLabel: "", modeReadOnly: false, modeEnabled: false }
   if (!batterySaverSupported(record)) return out
   var row = batterySaverRow(config)
   if (row === null) return out
+  out.modes = batterySaverModeOptions(record, row)
+  var remembered = batterySaverModeValue(stored, record)
+  // A remembered mode the dropdown does not offer (a row without `auto`):
+  // on_battery when offered, else the first choice, so the switch can still
+  // turn on and the dropdown never shows a raw word.
+  if (out.modes.length > 0 && configOptionIndex(out.modes, remembered) < 0) {
+    remembered = configOptionIndex(out.modes, BATTERY_SAVER_MODE_FALLBACK) >= 0
+      ? BATTERY_SAVER_MODE_FALLBACK : out.modes[0].value
+  }
   out.visible = true
   out.on = row.value !== null && row.value !== BATTERY_SAVER_OFF
   out.enabled = row.enabled && row.editable && row.overriddenBy === ""
@@ -4321,18 +4390,43 @@ function batterySaverView(record, config, stored) {
   out.now = batterySaverNow(row.description)
   out.notice = row.notice
   if (out.enabled) {
-    var word = out.on ? BATTERY_SAVER_OFF : batterySaverModeValue(stored)
+    var word = out.on ? BATTERY_SAVER_OFF : remembered
     if (configOptionIndex(row.options, word) >= 0) out.mode = word
   }
+  out.modeValue = out.on ? String(row.value) : remembered
+  var offered = configOptionIndex(out.modes, out.modeValue)
+  if (offered >= 0) {
+    out.modeLabel = out.modes[offered].label
+  } else if (out.on) {
+    out.modeReadOnly = true
+    var daemon = configOptionIndex(row.options, out.modeValue)
+    out.modeLabel = daemon >= 0 && row.options[daemon].label !== "" ? row.options[daemon].label : out.modeValue
+  } else {
+    out.modeLabel = BATTERY_SAVER_MODE_LABELS[out.modeValue] || out.modeValue
+  }
+  out.modeEnabled = out.enabled && !out.modeReadOnly && out.modes.length > 0
   return out
 }
 
+// A choice of the Mode dropdown, checked against the view: the word, when it
+// is one of its choices and differs from the one shown, while the dropdown
+// takes a choice (batterySaverView's modeEnabled); else null (nothing to do).
+// The panel writes it to the daemon while the saver is on, and remembers it.
+function batterySaverModeChoice(view, value) {
+  if (!isPlainObject(view) || view.visible !== true || view.modeEnabled !== true || typeof value !== "string") return null
+  if (value === view.modeValue || configOptionIndex(view.modes, value) < 0) return null
+  return BATTERY_SAVER_MODES.indexOf(value) >= 0 ? value : null
+}
+
 // The mode to remember when the switch turns the saver off: the row's mode
-// in force, when it is one the switch turns on, else null (nothing to
-// remember: the mode is off already, or unknown).
-function batterySaverMemory(config) {
+// in force, when it is one the Mode dropdown offers against `record`
+// (batterySaverModeOptions), else null (nothing to remember: the mode is
+// off already, unknown, or `auto` from a daemon below
+// BATTERY_SAVER_AUTO_REVISION).
+function batterySaverMemory(config, record) {
   var row = batterySaverRow(config)
-  return row !== null && BATTERY_SAVER_MODES.indexOf(row.value) >= 0 ? row.value : null
+  if (row === null || typeof row.value !== "string") return null
+  return configOptionIndex(batterySaverModeOptions(record, row), row.value) >= 0 ? row.value : null
 }
 
 // The Backends section: { hint, groups, stops }: the modules group's profile

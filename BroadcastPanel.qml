@@ -15,7 +15,9 @@ import "Model.js" as Model
 //           Background row: a thumbnail, the image's name, Gallery... and
 //           Add...; before it a read-only row), from revision 17 an Away
 //           image... button that opens the setup dialog at the away image's
-//           row, then the daemon's other global
+//           row, from revision 22 the Battery saver switch and under it
+//           its Mode dropdown (the mode the switch turns on), then the
+//           daemon's other global
 //           settings (strength, noise removal, ...) drawn generically, or
 //           the hint that replaces them (a daemon below revision 9);
 //   Camera  the camera list and Next camera, then from interface revision
@@ -83,7 +85,8 @@ Item {
   // shell could not store.
   property string storedTab: Model.PANEL_TAB_DEFAULT
   // The Battery saver mode the settings hold (Model.batterySaverModeValue):
-  // what the switch turns on, the last mode that was not `off`.
+  // what the switch turns on, the last mode that was not `off` or the last
+  // one chosen in the Mode dropdown.
   property string storedBatteryMode: Model.BATTERY_SAVER_MODE_DEFAULT
   // A tab asked for this opening only (the bar's microphone glyph asks for
   // "mic"): shown without being stored; "" once the panel closes, which
@@ -100,7 +103,7 @@ Item {
   signal switchRequested(int direction)
   // A user's change of a panel preference: { previewEnabled },
   // { previewFps }, { panelTab } or { batterySaverMode }. Only togglePreview,
-  // chooseFps, chooseTab and toggleBatterySaver emit it.
+  // chooseFps, chooseTab, toggleBatterySaver and chooseBatteryMode emit it.
   signal settingsRequested(var values)
   // The setup dialog, opened at the config row of key `focus`.
   signal setupRequested(string focus)
@@ -139,9 +142,10 @@ Item {
   readonly property bool genericEffect: Model.effectSettingsShown(effectSettings)
   // The Battery saver switch (interface revision 22), from the daemon's
   // config row (the panel holds the configuration read while it is open,
-  // Daemon.holdConfig). `batteryMode` is the mode this session last turned
-  // off, which the switch turns on again; "" until one was, when the stored
-  // mode (storedBatteryMode) is the one.
+  // Daemon.holdConfig), and its Mode dropdown. `batteryMode` is the mode
+  // this session last turned off or chose in the dropdown, which the switch
+  // turns on again (and the dropdown shows while the saver is off); "" until
+  // one was, when the stored mode (storedBatteryMode) is the one.
   property string batteryMode: ""
   readonly property var batterySaver: Model.batterySaverView(record, Daemon.setup.config,
     batteryMode !== "" ? batteryMode : storedBatteryMode)
@@ -474,13 +478,44 @@ Item {
   function toggleBatterySaver() {
     var view = root.batterySaver
     if (!root.available || !view.visible || view.mode === null) return false
-    var memory = view.on ? Model.batterySaverMemory(Daemon.setup.config) : null
+    var memory = view.on ? Model.batterySaverMemory(Daemon.setup.config, root.record) : null
     if (!Daemon.setConfig(Model.BATTERY_SAVER_KEY, view.mode)) return false
     root.batteryWritten = true
     if (memory !== null) {
       root.batteryMode = memory
       if (memory !== root.storedBatteryMode) root.settingsRequested({ batterySaverMode: memory })
     }
+    return true
+  }
+
+  // A choice of the Mode dropdown (Model.batterySaverModeChoice: one of its
+  // choices, not the one shown, while it takes one). While the saver is on
+  // it is written to the daemon at once (`config set -- video.battery_saver
+  // MODE`, through the daemon's setup writes); either way it becomes the
+  // remembered mode, the one the switch turns on next, stored in the
+  // settings when it differs from the stored one. Nothing while the row is
+  // greyed, the mode in force is read-only, or a setup write is running.
+  function chooseBatteryMode(value) {
+    var view = root.batterySaver
+    var word = Model.batterySaverModeChoice(view, value)
+    if (!root.available || word === null || Daemon.setupBusy) return false
+    if (view.on) {
+      if (!Daemon.setConfig(Model.BATTERY_SAVER_KEY, word)) return false
+      root.batteryWritten = true
+    }
+    root.batteryMode = word
+    if (word !== root.storedBatteryMode) root.settingsRequested({ batterySaverMode: word })
+    return true
+  }
+
+  // Enter or Space on the Mode dropdown: its list opens and takes the
+  // keyboard (the shell Dropdown's own keys: Up/Down or j/k walk, Enter
+  // chooses, Escape closes); the key catcher gets it back on close. Nothing
+  // while it takes no choice (greyed, a read-only mode in force, or a setup
+  // write running).
+  function openBatteryModes() {
+    if (!root.available || !root.batterySaver.visible || !batteryModeBox.takesChoice) return false
+    batteryModeList.open()
     return true
   }
 
@@ -496,6 +531,7 @@ Item {
     if (stop.kind === "switch") toggleSwitch()
     else if (stop.kind === "mic-host") toggleMic()
     else if (stop.kind === "battery") toggleBatterySaver()
+    else if (stop.kind === "battery-mode") openBatteryModes()
     else if (stop.kind === "preview") togglePreview()
     else if (stop.kind === "fps") chooseFps(fpsCursor)
     else if (stop.kind === "tabs") chooseTab(tabCursor)
@@ -556,6 +592,7 @@ Item {
     else if (stop.kind === "background") scrollItemIntoView(backgroundLine)
     else if (stop.kind === "away") scrollItemIntoView(awayLine)
     else if (stop.kind === "battery") scrollItemIntoView(batteryBlock)
+    else if (stop.kind === "battery-mode") scrollItemIntoView(batteryModeLine)
     else if (stop.kind === "mic-host") scrollItemIntoView(micHostLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
@@ -1280,10 +1317,13 @@ Item {
 
             // ---- the Battery saver switch (interface revision 22): the
             // daemon's `video.battery_saver`, on while its mode is not off.
-            // Under it what is in force now (the end of the daemon's
-            // description), why it is greyed, and the daemon's notice when
-            // the running camera does not match yet. The mode itself is
-            // chosen in the setup dialog.
+            // Under it the Mode row: "Mode" and a dropdown of the modes the
+            // switch turns on (Model.batterySaverView's `modes`), showing
+            // the daemon's mode while on and the remembered one while off
+            // (a mode the plugin does not offer is shown read-only). Then
+            // what is in force now (the end of the daemon's description),
+            // why it is greyed, and the daemon's notice when the running
+            // camera does not match yet.
             Column {
               id: batteryBlock
               objectName: "batteryBlock"
@@ -1337,6 +1377,117 @@ Item {
                     text: root.batterySaver.reason !== "" ? root.batterySaver.reason
                       : (root.batterySaver.on ? "Turn the battery saver off" : "Turn the battery saver on")
                     fontFamily: root.fontFamily
+                  }
+                }
+              }
+              // The Mode row, laid out as the settings' dropdown rows
+              // (SettingsView): the label on the left, the shell's Dropdown
+              // on the right, as wide as its longest label. Greyed with the
+              // switch; a read-only mode is shown at full strength but takes
+              // no choice. The Dropdown sets its own value on a choice: it
+              // is bound to the view's again, so what the daemon (or the
+              // remembered mode) says is what shows.
+              Item {
+                id: batteryModeLine
+                objectName: "batteryModeRow"
+                width: parent.width
+                implicitHeight: Math.max(batteryModeLabel.implicitHeight, batteryModeBox.implicitHeight)
+                height: implicitHeight
+
+                Text {
+                  id: batteryModeLabel
+                  objectName: "batteryModeLabel"
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  anchors.right: batteryModeBox.left
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  elide: Text.ElideRight
+                  text: Model.BATTERY_SAVER_MODE_ROW_LABEL
+                  color: root.batterySaver.enabled ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                Item {
+                  id: batteryModeBox
+                  // The dropdown takes a choice: the view says so and no
+                  // setup write is running (as the switch shows busy), so a
+                  // choice is never dropped silently.
+                  readonly property bool takesChoice: root.batterySaver.modeEnabled && !Daemon.setupBusy
+                  readonly property var options: root.batterySaver.modeReadOnly
+                    ? [{ value: root.batterySaver.modeValue, label: root.batterySaver.modeLabel }] : root.batterySaver.modes
+                  // Wide enough for the longest label, never less than 220,
+                  // held within the line (as SettingsView's dropdown).
+                  readonly property real labelsWidth: widestLabel()
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  implicitWidth: Math.max(Style.space(220), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
+                  implicitHeight: batteryModeList.implicitHeight
+                  width: Math.min(implicitWidth, parent.width - Style.space(72))
+                  height: implicitHeight
+
+                  // Measured without writing to the metrics (a TextMetrics'
+                  // text set inside this binding would loop).
+                  FontMetrics {
+                    id: batteryModeProbe
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+
+                  function widestLabel() {
+                    var widest = 0
+                    for (var i = 0; i < options.length; i++)
+                      widest = Math.max(widest, batteryModeProbe.advanceWidth(options[i].label))
+                    return widest
+                  }
+
+                  // The Dropdown takes no input while it takes no choice:
+                  // hovering it then moves the cursor from here.
+                  HoverHandler {
+                    enabled: !batteryModeBox.takesChoice
+                    onHoveredChanged: if (hovered) root.setCursor("battery-mode", -1)
+                  }
+
+                  // A list open when the dropdown stops taking a choice
+                  // (greyed, read-only, hidden, a setup write running)
+                  // closes, choosing nothing.
+                  Connections {
+                    target: root
+                    function onBatterySaverChanged() { batteryModeBox.closeIfIdle() }
+                  }
+                  Connections {
+                    target: Daemon
+                    function onSetupBusyChanged() { batteryModeBox.closeIfIdle() }
+                  }
+                  function closeIfIdle() {
+                    if (batteryModeList.popupOpen && (!root.batterySaver.visible || !takesChoice)) batteryModeList.close()
+                  }
+
+                  Dropdown {
+                    id: batteryModeList
+                    objectName: "batteryModeDropdown"
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    enabled: batteryModeBox.takesChoice
+                    opacity: root.batterySaver.enabled ? 1.0 : root.greyedOpacity
+                    showLabel: false
+                    options: batteryModeBox.options
+                    value: root.batterySaver.modeValue
+                    hasCursor: root.hasCursor("battery-mode", -1)
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.role: Accessible.ComboBox
+                    Accessible.name: Model.BATTERY_SAVER_MODE_NAME
+                    Accessible.description: root.batterySaver.reason !== "" ? root.batterySaver.reason : root.batterySaver.modeLabel
+                    onHovered: function(isHovered) { if (isHovered) root.setCursor("battery-mode", -1) }
+                    onChanged: function(value) {
+                      batteryModeList.value = Qt.binding(function() { return root.batterySaver.modeValue })
+                      root.chooseBatteryMode(value)
+                    }
+                    onPopupOpenChanged: if (!popupOpen) catcher.forceActiveFocus()
                   }
                 }
               }
