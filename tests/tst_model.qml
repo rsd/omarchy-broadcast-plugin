@@ -4776,14 +4776,34 @@ TestCase {
       { id: "effect", label: "Effect", settings: [
         cfgRow("effect.on_failure", "enum", { label: "When an effect can't run", value: "black", "default": "black",
                options: [{ value: "black", label: "Hide the camera: black" }, { value: "image", label: "Hide the camera: image" },
-                         { value: "show", label: "Show the camera" }] }),
+                         { value: "none", label: "Show the camera" }] }),
         cfgRow("effect.fallback_image", "path", merged({ label: "Away image", value: image }, o || {}))] }
     ]
+  }
+  // The rows of a revision-21 daemon: `effect.on_failure` is replaced by the
+  // switch `effect.privacy` and its enum `effect.privacy_mode` (greyed with a reason
+  // while the switch is off; "Away image" offered only with
+  // an image, or while it is the value in force).
+  function privacyGroups(image, privacy, mode, o) {
+    var modes = [{ value: "black", label: "Black" }]
+    if (image !== "" || mode === "away") modes.push({ value: "away", label: "Away image" })
+    modes.push({ value: "freeze", label: "Last frame" })
+    var groups = awayGroups(image, o)
+    groups[1].settings.splice(0, 1,
+      cfgRow("effect.privacy", "bool", { label: "Hide the camera when an effect can't run", value: privacy, "default": false }),
+      cfgRow("effect.privacy_mode", "enum", merged({ label: "Show instead of the camera", value: mode, "default": "black", options: modes },
+             privacy ? {} : { enabled: false, disabled_reason: "Turn on \"Hide the camera when an effect can't run\" to change this" })))
+    return groups
+  }
+  function privacyConfig(image, privacy, mode, o) {
+    return Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(privacyGroups(image, privacy, mode, o)), 0, "")).config
   }
   function awaySetup(image, o) {
     return Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(awayGroups(image, o)), 0, ""))
   }
   readonly property var awayTools: ({ known: true, gallery: "/t/omarchy-menu-images", chooser: "/t/omarchy-file-select" })
+
+  function rev21(o) { return rev17(merged({ interface_revision: 21 }, o || {})) }
 
   function test_away_revision_gate() {
     compare(Model.PLACEHOLDER_REVISION, 17)
@@ -4877,6 +4897,117 @@ TestCase {
     compare(Model.awayImageView(withValues(image, "image", "image"), rev17(), awayTools, false).note, "", "an image set")
     compare(Model.AWAY_UNSET_TEXT, "No away image chosen: black is shown")
     compare(Model.awayImageView(null, rev17(), awayTools, false).note, "")
+  }
+
+  // Revision 21: the note follows `effect.privacy` and `effect.privacy_mode`
+  // (the old key is not read); below it, the old key as before.
+  function test_away_unset_note_privacy() {
+    var image = awayUser + "/me.jpg"
+    var note = function(config, record) { return Model.awayImageView(config, record, awayTools, false).note }
+    compare(Model.PRIVACY_REVISION, 21)
+    compare(note(privacyConfig("", false, "black"), rev21()), "", "privacy off, black")
+    compare(note(privacyConfig("", true, "black"), rev21()), "", "privacy on, black: nothing to say")
+    compare(note(privacyConfig("", true, "freeze"), rev21()), "", "privacy on, last frame")
+    compare(note(privacyConfig("", false, "away"), rev21()), "", "privacy off: no away image is shown")
+    compare(note(privacyConfig("", true, "away"), rev21()), Model.AWAY_UNSET_TEXT, "on and away, no image")
+    compare(note(privacyConfig(image, true, "away"), rev21()), "", "an image set")
+    // the placeholder switch still counts
+    var groups = privacyGroups("", false, "black")
+    groups[0].settings[0].value = "image"
+    var c = Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(groups), 0, "")).config
+    compare(note(c, rev21()), Model.AWAY_UNSET_TEXT, "output.placeholder on the image")
+    // a revision-20 daemon reads the old key only, a revision-21 one never does
+    var old = awayGroups("")
+    old[1].settings[0].value = "image"
+    var oldConfig = Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(old), 0, "")).config
+    compare(note(oldConfig, rev17({ interface_revision: 20 })), Model.AWAY_UNSET_TEXT, "revision 20: effect.on_failure")
+    compare(note(oldConfig, rev21()), "", "revision 21: effect.on_failure is not read")
+    verify(Model.privacySupported(rev21()))
+    verify(!Model.privacySupported(rev17({ interface_revision: 20 })))
+    verify(!Model.privacySupported(Model.emptyRecord("not-running")))
+  }
+
+  // Revision 21's two rows as the setup dialog draws them: a switch followed
+  // by its enum, which is greyed (read-only text with the reason) while the
+  // switch is off, and offers "Away image" only with an image.
+  function test_privacy_rows() {
+    var image = awayUser + "/me.jpg"
+    var ids = function(v) { return v.groups.map(function(g) { return g.rows.map(function(r) { return r.id + ":" + r.widget + ":" + r.stop }).join(",") }) }
+    var section = function(config, record) {
+      return Model.daemonSectionView(Model.withSetupRead(fullSetup(), "config", Model.readConfig(configLines(config), 0, "")), record)
+    }
+    // privacy on: a switch, then chips of its own
+    var on = section(privacyGroups(image, true, "freeze"), rev21())
+    compare(JSON.stringify(ids(on)), JSON.stringify(["output.placeholder:choices:0,effect.fallback_image:away:1",
+                                                    "effect.privacy:switch:2,effect.privacy_mode:choices:3"]))
+    var sw = on.groups[1].rows[0]
+    compare(sw.label, "Hide the camera when an effect can't run")
+    compare(sw.value, true)
+    compare(sw.applyText, "", "live")
+    var mode = on.groups[1].rows[1]
+    compare(mode.label, "Show instead of the camera")
+    compare(JSON.stringify(mode.options.map(function(o) { return o.label })), JSON.stringify(["Black", "Away image", "Last frame"]))
+    compare(JSON.stringify(mode.options.map(function(o) { return o.selected })), JSON.stringify([false, false, true]))
+    compare(mode.greyed, false)
+    compare(mode.note, "")
+    compare(on.stops, 4)
+    // privacy off: the mode greyed, shown as text with the daemon's reason, no stop
+    var off = section(privacyGroups(image, false, "black"), rev21())
+    compare(JSON.stringify(ids(off)), JSON.stringify(["output.placeholder:choices:0,effect.fallback_image:away:1",
+                                                     "effect.privacy:switch:2,effect.privacy_mode:text:-1"]))
+    var grey = off.groups[1].rows[1]
+    compare(grey.greyed, true)
+    compare(grey.note, "Turn on \"Hide the camera when an effect can't run\" to change this")
+    compare(grey.valueText, "Black", "the value in force still reads")
+    compare(grey.stop, -1)
+    compare(off.stops, 3)
+    verify(!off.groups[1].rows[0].greyed, "the switch itself stays live")
+    // "Away image" only with an image set (or in force)
+    var noImage = section(privacyGroups("", true, "black"), rev21())
+    compare(JSON.stringify(noImage.groups[1].rows[1].options.map(function(o) { return o.value })), JSON.stringify(["black", "freeze"]),
+            "no image: no Away image choice")
+    var forced = section(privacyGroups("", true, "away"), rev21())
+    compare(JSON.stringify(forced.groups[1].rows[1].options.map(function(o) { return o.value })), JSON.stringify(["black", "away", "freeze"]),
+            "the value in force stays offered")
+    compare(forced.groups[1].rows[1].valueText, "Away image")
+    // the old rows are gone from a revision-21 schema: nothing draws effect.on_failure
+    verify(JSON.stringify(ids(on)).indexOf("on_failure") < 0)
+    // a revision below 21 keeps its dropdown row
+    var old = section(awayGroups(image), rev17({ interface_revision: 20 }))
+    compare(JSON.stringify(ids(old)), JSON.stringify(["output.placeholder:choices:0,effect.fallback_image:away:1", "effect.on_failure:dropdown:2"]))
+    compare(JSON.stringify(old.groups[1].rows[0].options.map(function(o) { return o.value })), JSON.stringify(["black", "image", "none"]),
+            "the daemon's word for \"Show the camera\" is none")
+  }
+
+  // The writes: a switch and a choice of the revision-21 rows go to the new
+  // keys (as the words the daemon takes); a greyed row, or a choice it does
+  // not offer, writes nothing.
+  function test_privacy_writes() {
+    var cli = "/usr/bin/omarchy-broadcast"
+    var image = awayUser + "/me.jpg"
+    var on = privacyConfig(image, true, "black")
+    var write = function(config, id, value, record) {
+      var row = Model.findConfigRow(config, id)
+      var word = row ? Model.configWord(row, value) : null
+      return word === null ? null : Model.intentArgv({ verb: "setup", op: "config", id: row.id, word: word }, cli, record)
+    }
+    compare(JSON.stringify(write(on, "effect.privacy", false, rev21())), JSON.stringify([cli, "config", "set", "--", "effect.privacy", "false"]))
+    compare(JSON.stringify(write(on, "effect.privacy_mode", "freeze", rev21())),
+            JSON.stringify([cli, "config", "set", "--", "effect.privacy_mode", "freeze"]))
+    compare(JSON.stringify(write(on, "effect.privacy_mode", "away", rev21())),
+            JSON.stringify([cli, "config", "set", "--", "effect.privacy_mode", "away"]), "with an image: Away image is a choice")
+    var off = privacyConfig(image, false, "black")
+    compare(JSON.stringify(write(off, "effect.privacy", true, rev21())), JSON.stringify([cli, "config", "set", "--", "effect.privacy", "true"]))
+    compare(write(off, "effect.privacy_mode", "freeze", rev21()), null, "greyed while privacy is off: no write")
+    compare(write(privacyConfig("", true, "black"), "effect.privacy_mode", "away", rev21()), null, "no image: Away image is not offered")
+    compare(write(on, "effect.on_failure", "black", rev21()), null, "a revision-21 schema has no effect.on_failure")
+    // a revision-20 daemon: the old key
+    var old = awaySetup(image).config
+    compare(JSON.stringify(write(old, "effect.on_failure", "image", rev17({ interface_revision: 20 }))),
+            JSON.stringify([cli, "config", "set", "--", "effect.on_failure", "image"]))
+    compare(write(old, "effect.on_failure", "show", rev17({ interface_revision: 20 })), null, "the daemon's word is none, not show")
+    compare(JSON.stringify(write(old, "effect.on_failure", "none", rev17({ interface_revision: 20 }))),
+            JSON.stringify([cli, "config", "set", "--", "effect.on_failure", "none"]))
   }
 
   // Left/Right over the Away image row's buttons skip the faded ones.

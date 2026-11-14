@@ -129,6 +129,9 @@
 # config-show becomes $FAKE_OB_DIR/away-user/<the file's name>, and a
 # `config_changed` line is appended to the feed. The away image itself is
 # set and cleared with `config set -- effect.fallback_image PATH` (or "").
+# `config set -- effect.privacy true|false` (interface revision 21) also
+# enables or greys the row `effect.privacy_mode` of config-show, as the
+# daemon does (reason: Turn on "Hide the camera when an effect can't run" to change this).
 #
 # The camera's health (interface revision 20): the harness puts
 # `camera_health` in its snapshot lines and writes `camera_health` lines to
@@ -423,6 +426,25 @@ set_config_value() {
   }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
 }
 
+# config-show with the "enabled" and "disabled_reason" of the row that starts
+# {"id":"KEY","value":... set to ENABLED (true or false) and REASON (plain
+# text; quotes are escaped). The daemon greys `effect.privacy_mode` with the reason
+# (Turn on "Hide the camera when an effect can't run" to change this) while `effect.privacy` is off (interface revision 21).
+set_config_enabled() {
+  awk -v key="$1" -v enabled="$2" -v reason="$3" 'BEGIN { gsub(/"/, "\\\"", reason) }
+  {
+    head = "{\"id\":\"" key "\",\"value\":"
+    at = index($0, head)
+    if (at > 0) {
+      before = substr($0, 1, at - 1 + length(head))
+      rest = substr($0, at + length(head))
+      if (match(rest, /"enabled":(true|false),"disabled_reason":"([^"\\]|\\.)*"/))
+        $0 = before substr(rest, 1, RSTART - 1) "\"enabled\":" enabled ",\"disabled_reason\":\"" reason "\"" substr(rest, RSTART + RLENGTH)
+    }
+    print
+  }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
+}
+
 if [ "${1:-}" = "media" ]; then
   case "${2:-} ${3:-}" in
     "list background") [ $# -eq 4 ] && [ "$4" = "--json" ] && setup_read media-list ;;
@@ -497,7 +519,14 @@ case ${1:-} in
           true | false) value=$5 ;;
           *) if printf '%s' "$5" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; then value=$5; else value="\"$5\""; fi ;;
         esac
-        [ -f "$dir/config-show" ] && set_config_value "$4" "$value"
+        if [ -f "$dir/config-show" ]; then
+          set_config_value "$4" "$value"
+          # the mode of the privacy rule follows its switch
+          if [ "$4" = effect.privacy ]; then
+            if [ "$value" = true ]; then set_config_enabled effect.privacy_mode true ""
+            else set_config_enabled effect.privacy_mode false "Turn on \"Hide the camera when an effect can't run\" to change this"; fi
+          fi
+        fi
         setup_changed config_changed ;;
       config-reset) setup_changed config_changed ;;
     esac
