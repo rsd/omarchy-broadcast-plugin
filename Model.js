@@ -5184,7 +5184,9 @@ function mediaUserItem(media, path) {
 // Interface revision PLACEHOLDER_REVISION. One image, two switches: the
 // image (`effect.fallback_image`, the "Away image" path row of the read
 // configuration) hides the camera when an effect cannot run
-// (`effect.on_failure`) and, with `output.placeholder` on "Away image",
+// (`effect.on_failure`; from PRIVACY_REVISION the two rows `effect.privacy`
+// and `effect.privacy_mode`, with "Away image" as one of its modes) and,
+// with `output.placeholder` on "Away image",
 // stands in for every frame without a camera picture (off, starting, an
 // error, a stall). Both switches are enum rows the setup dialog draws
 // generically; the image's row is drawn as a picker: its thumbnail, its
@@ -5214,6 +5216,16 @@ var AWAY_UNSET_TEXT = "No away image chosen: black is shown"
 var PLACEHOLDER_KEY = "output.placeholder"
 var ON_FAILURE_KEY = "effect.on_failure"
 var AWAY_SWITCH_VALUE = "image"
+// From PRIVACY_REVISION (obc-ipc INTERFACE_REVISION 21) `effect.on_failure`
+// is replaced in the schema by a switch and its mode: `effect.privacy` (hide
+// the camera when an effect cannot run) and `effect.privacy_mode` (black,
+// away or freeze; greyed with a reason while the switch is off). The
+// daemon still takes a write to the old key, but this plugin writes the new
+// ones. A daemon below that revision has only the old key.
+var PRIVACY_REVISION = 21
+var PRIVACY_KEY = "effect.privacy"
+var PRIVACY_MODE_KEY = "effect.privacy_mode"
+var PRIVACY_AWAY_VALUE = "away"
 
 // The daemon has the away image: available, at PLACEHOLDER_REVISION or
 // later. An unknown revision counts as no.
@@ -5236,8 +5248,10 @@ function awayImagePath(config) {
 // (mediaImageSource of the raw path, "" for the placeholder glyph), `label`
 // the image's file stem (or the display copy's), else AWAY_NONE_TEXT;
 // `set` whether an image is set; `note` AWAY_UNSET_TEXT while none is and
-// a switch that shows it (`output.placeholder` or `effect.on_failure`) is
-// on "image" (the daemon shows black then), else "". Choose... is button 0, Add... 1, Clear 2;
+// a switch that shows it (`output.placeholder` is on "image"; with
+// `effect.on_failure` on "image" below PRIVACY_REVISION, else `effect.privacy`
+// on and `effect.privacy_mode` on "away") is on (the daemon shows black
+// then), else "". Choose... is button 0, Add... 1, Clear 2;
 // Choose... and Add... are disabled, the tooltip saying why, while their
 // tool is not on PATH (`tools`), Clear while no image is set, and all three
 // while `busy` (a flow runs or a setup write is in flight).
@@ -5251,7 +5265,7 @@ function awayImageView(config, record, tools, busy) {
   out.source = mediaImageSource(row.rawPath)
   var label = row.rawPath !== "" ? mediaStem(row.rawPath) : (out.set ? mediaStem(row.value) : "")
   out.label = label !== "" ? label : AWAY_NONE_TEXT
-  if (!out.set && (awaySwitchOn(config, PLACEHOLDER_KEY) || awaySwitchOn(config, ON_FAILURE_KEY))) out.note = AWAY_UNSET_TEXT
+  if (!out.set && (awaySwitchOn(config, PLACEHOLDER_KEY) || privacyShowsAway(config, record))) out.note = AWAY_UNSET_TEXT
   var gallery = t.gallery !== ""
   var chooser = t.chooser !== ""
   out.buttons.push({ label: CHOOSE_LABEL, enabled: gallery && busy !== true,
@@ -5264,8 +5278,30 @@ function awayImageView(config, record, tools, busy) {
 
 // Whether the enum row `id` of the read configuration is on the away image.
 function awaySwitchOn(config, id) {
+  return awayModeIs(config, id, AWAY_SWITCH_VALUE)
+}
+
+// The daemon replaces `effect.on_failure` by `effect.privacy` and
+// `effect.privacy_mode`: available, at PRIVACY_REVISION or later. An unknown
+// revision counts as no (the old key).
+function privacySupported(record) {
+  return available(record) && record.interfaceRevision >= PRIVACY_REVISION
+}
+
+// Whether the privacy rule hides the camera behind the away image: from
+// PRIVACY_REVISION `effect.privacy` is on and `effect.privacy_mode` is
+// "away"; below it `effect.on_failure` is "image".
+function privacyShowsAway(config, record) {
+  if (!privacySupported(record)) return awaySwitchOn(config, ON_FAILURE_KEY)
+  var on = findConfigRow(config, PRIVACY_KEY)
+  return on !== null && on.type === "bool" && on.value === true
+    && awayModeIs(config, PRIVACY_MODE_KEY, PRIVACY_AWAY_VALUE)
+}
+
+// Whether the enum row `id` of the read configuration is on `value`.
+function awayModeIs(config, id, value) {
   var row = findConfigRow(config, id)
-  return row !== null && row.type === "enum" && row.value === AWAY_SWITCH_VALUE
+  return row !== null && row.type === "enum" && row.value === value
 }
 
 // The button of the Away image row a Left/Right press lands on, from

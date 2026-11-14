@@ -4844,9 +4844,27 @@ ShellRoot {
     }
     return out
   }
+  // The rows that hide the camera when an effect cannot run. Below revision
+  // 21 (`privacy` undefined) the one `effect.on_failure` enum; from it the
+  // switch `effect.privacy` and its enum `effect.privacy_mode`, which the
+  // daemon greys with a reason while the switch is off and offers
+  // "Away image" only with an image set (or while it is the value in force).
+  // `privacy`: { on, mode }.
+  function failureRows(privacy, image) {
+    if (privacy === undefined)
+      return [cfg("effect.on_failure", "enum", "black", { label: "When an effect can't run", "default": "black",
+                  options: [{ value: "black", label: "Hide the camera: black" }, { value: "none", label: "Show the camera" }] })]
+    var modes = [{ value: "black", label: "Black" }]
+    if (image !== "" || privacy.mode === "away") modes.push({ value: "away", label: "Away image" })
+    modes.push({ value: "freeze", label: "Last frame" })
+    var mode = cfg("effect.privacy_mode", "enum", privacy.mode, { label: "Show instead of the camera", "default": "black", options: modes })
+    if (!privacy.on) { mode.enabled = false; mode.disabled_reason = "Turn on \"Hide the camera when an effect can't run\" to change this" }
+    return [cfg("effect.privacy", "bool", privacy.on, { label: "Hide the camera when an effect can't run", "default": false }), mode]
+  }
   // `editable`: revision 17's rows; else revision 16's (no placeholder row,
-  // the image read-only). `o`: more fields of the image's row.
-  function awayConfigLines(editable, image, o) {
+  // the image read-only). `o`: more fields of the image's row. `privacy`:
+  // revision 21's rows (failureRows), else the old row.
+  function awayConfigLines(editable, image, o, privacy) {
     var imageRow = editable
       ? cfg("effect.fallback_image", "path", image, { label: "Away image", description: "The image that stands in for the camera" })
       : cfg("effect.fallback_image", "path", image, { label: "Fallback image", editable: false, description: "Set it in the configuration file." })
@@ -4856,10 +4874,7 @@ ShellRoot {
                                    options: [{ value: "black", label: "Black" }, { value: "image", label: "Away image" }] }))
     var groups = [
       { id: "output", label: "Output", settings: output },
-      { id: "effect", label: "Effect", settings: [
-        cfg("effect.on_failure", "enum", "black", { label: "When an effect can't run",
-            options: [{ value: "black", label: "Hide the camera: black" }, { value: "show", label: "Show the camera" }] }),
-        imageRow] }
+      { id: "effect", label: "Effect", settings: failureRows(privacy, image).concat([imageRow]) }
     ]
     var raw = []
     for (var g = 0; g < groups.length; g++)
@@ -5057,6 +5072,69 @@ ShellRoot {
       h.dialog = null
     })
     h.grabStep(function() { return dfind("setupCard") }, "a3-setup-away-focus.png")
+
+    // revision 21: effect.on_failure is replaced by a switch and its mode
+    h.step("privacy: a revision-21 daemon, privacy off", function() {
+      h.writeFile("config-show", awayConfigLines(true, "", undefined, { on: false, mode: "black" }))
+      h.feed([snapshotLine(rev(21))])
+    }, function() { return S().record.interfaceRevision === 21 && h.model.findConfigRow(S().setup.config, "effect.privacy") !== null && settled() }, 8000)
+    h.step("privacy: the switch, then its greyed mode as text with the reason", function() {
+      h.key("4")
+      h.eq("the Daemon section", D().section, "daemon")
+      h.eq("the rows in the Effect group", D().daemonView.groups[1].rows.map(function(r) { return r.id }).join(","),
+           "effect.privacy,effect.privacy_mode")
+      h.eq("no on_failure row", stopOf("effect.on_failure"), -2)
+      h.eq("the label", dfind("configSwitch-effect.privacy").visible, true)
+      h.eq("the switch is off", dfind("configSwitch-effect.privacy").checked, false)
+      h.eq("the mode is text", dfind("configValue-effect.privacy_mode").visible, true)
+      h.eq("its value", dfind("configValue-effect.privacy_mode").text, "Black")
+      h.eq("no chips", dfind("configChoices-effect.privacy_mode").visible, false)
+      h.eq("the reason", dfind("configNote-effect.privacy_mode").text, "Turn on \"Hide the camera when an effect can't run\" to change this")
+      h.eq("no keyboard stop", stopOf("effect.privacy_mode"), -1)
+      h.check("the mode under the switch", dfind("configValue-effect.privacy_mode").mapToItem(null, 0, 0).y
+              > dfind("configSwitch-effect.privacy").mapToItem(null, 0, 0).y)
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "a4-setup-privacy-off.png")
+    h.step("privacy: Enter on the switch writes the new key", function() {
+      h.markLog()
+      D().setCursor("config", stopOf("effect.privacy"))
+      h.key(Qt.Key_Return)
+    }, function() { return has("config set -- effect.privacy true") && settled()
+                            && h.model.findConfigRow(S().setup.config, "effect.privacy").value === true }, 6000)
+    h.step("privacy: the mode is live, as chips, without Away image (no image)", function() {
+      h.eq("the daemon's one write", JSON.stringify(h.newLogArgs().filter(function(a) { return a[0] === "config" && a[1] === "set" })),
+           JSON.stringify([["config", "set", "--", "effect.privacy", "true"]]))
+      h.eq("the switch is on", dfind("configSwitch-effect.privacy").checked, true)
+      h.eq("chips", dfind("configChoices-effect.privacy_mode").visible, true)
+      h.eq("Black", dfind("configChoice-effect.privacy_mode-0").text, "Black")
+      h.eq("Last frame", dfind("configChoice-effect.privacy_mode-1").text, "Last frame")
+      h.eq("no third chip: no image, no Away image", dfind("configChoice-effect.privacy_mode-2"), null)
+      h.eq("no reason", dfind("configNote-effect.privacy_mode").text, "")
+      h.eq("a stop", stopOf("effect.privacy_mode"), stopOf("effect.privacy") + 1)
+      h.eq("no note: nothing shows the image", dfind("awayNote").visible, false)
+    })
+    h.grabStep(function() { return dfind("setupCard") }, "a5-setup-privacy-on.png")
+    h.step("privacy: Last frame writes the mode", function() {
+      h.markLog()
+      D().setCursor("config", stopOf("effect.privacy_mode"))
+      h.check("chosen", D().chooseConfig(h.model.configViewRow(D().daemonView, stopOf("effect.privacy_mode")), 1))
+    }, function() { return has("config set -- effect.privacy_mode freeze") && settled()
+                            && h.model.findConfigRow(S().setup.config, "effect.privacy_mode").value === "freeze" }, 6000)
+    h.step("privacy: the choice is marked", function() {
+      h.eq("Last frame selected", dfind("configChoice-effect.privacy_mode-1").selected, true)
+      h.eq("no dialog error", S().setupError, "")
+    })
+    h.step("privacy: switched off again, the mode greys", function() {
+      h.markLog()
+      D().setCursor("config", stopOf("effect.privacy"))
+      h.key(Qt.Key_Return)
+    }, function() { return has("config set -- effect.privacy false") && settled()
+                            && h.model.findConfigRow(S().setup.config, "effect.privacy_mode").enabled === false }, 6000)
+    h.step("privacy: greyed with its reason, its value still read", function() {
+      h.eq("text", dfind("configValue-effect.privacy_mode").text, "Last frame")
+      h.eq("the reason", dfind("configNote-effect.privacy_mode").text, "Turn on \"Hide the camera when an effect can't run\" to change this")
+      h.eq("no stop", stopOf("effect.privacy_mode"), -1)
+    })
 
     // revision 16: the old read-only row, no button
     h.step("away: revision 16", function() {
