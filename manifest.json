@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.32.0",
+  "version": "0.33.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
-  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, the background effect and the video effects' settings as the daemon's modules offer them, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom), a background gallery (pick a bundled background or add your own image), an away image shown when the camera is off or an effect cannot run, a live preview, live stream figures, the Omarchy Broadcast Mic (its noise and echo processing as the daemon's audio modules offer it, its input device, the default-microphone choice, and an indicator while apps record from it), and a setup dialog for the effect modules, their order and backends, the daemon's configuration, your backgrounds and diagnostics. Effects need omarchy-broadcastd 0.24.0, the configuration in the setup dialog 0.25.0, the microphone D-Bus API revision 13, the background gallery revision 15, the away image revision 17, the command that converts a video for system memory revision 19.",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, the background effect and the video effects' settings as the daemon's modules offer them, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom), a background gallery (pick a bundled background or add your own image), an away image shown when the camera is off or an effect cannot run, a live preview, live stream figures, the Omarchy Broadcast Mic (its noise and echo processing as the daemon's audio modules offer it, its input device, the default-microphone choice, and an indicator while apps record from it), and a setup dialog for the effect modules, their order and backends, the daemon's configuration, your backgrounds and diagnostics. Effects need omarchy-broadcastd 0.24.0, the configuration in the setup dialog 0.25.0, the microphone D-Bus API revision 13, the background gallery revision 15, the away image revision 17, the command that converts a video for system memory revision 19, the battery saver revision 22.",
   "kinds": [
     "bar-widget",
     "overlay"
@@ -25,7 +25,8 @@
       "cliPath": "",
       "previewEnabled": false,
       "previewFps": 15,
-      "panelTab": "effect"
+      "panelTab": "effect",
+      "batterySaverMode": "on_battery"
     },
     "schema": [
       {
@@ -59,6 +60,14 @@
         "options": ["effect", "camera", "mic", "status"],
         "defaultValue": "effect",
         "description": "The tab the panel shows under the preview; the panel remembers the last one chosen. Any other value reads as effect."
+      },
+      {
+        "key": "batterySaverMode",
+        "type": "enum",
+        "label": "Battery saver mode",
+        "options": ["on_battery", "power_profile", "always"],
+        "defaultValue": "on_battery",
+        "description": "The mode the panel's Battery saver switch turns on: on_battery, power_profile (follow the power profile) or always. Choose the mode itself in the setup dialog. Any other value reads as on_battery. Needs omarchy-broadcastd with D-Bus revision 22."
       }
     ]
   }

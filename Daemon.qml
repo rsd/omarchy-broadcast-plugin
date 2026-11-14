@@ -172,7 +172,12 @@ Singleton {
   // The dialogs that hold the setup (by identity): reads run only while one
   // does.
   property var setupHolders: []
-  readonly property bool setupHeld: setupHolders.length > 0
+  // The panels that hold the configuration alone (holdConfig): the Battery
+  // saver switch reads the daemon's row. The reads are those of
+  // Model.panelReads while no dialog holds the setup, those of
+  // Model.setupReads while one does.
+  property var configHolders: []
+  readonly property bool setupHeld: setupHolders.length > 0 || configHolders.length > 0
   // The reads' results (Model.emptySetup: null = still loading), replaced
   // whole by each read; emptied when the last holder lets go, so a dialog
   // opened later never shows another moment's data.
@@ -322,6 +327,31 @@ Singleton {
     if (next.length > 0) return
     readQueue = []
     readAgain = false
+    // A panel still holds the configuration: the dialog's other reads go,
+    // that one is read again with the dialog gone.
+    setup = Model.setupForReads(setup, configHolders.length > 0 ? Model.panelReads(record) : [])
+    if (configHolders.length > 0) refreshSetup()
+  }
+
+  // The panel's hold on the configuration (only `config`, and only against
+  // a daemon of Model.BATTERY_SAVER_REVISION or later): the Battery saver
+  // switch draws the daemon's row, so the plugin reads it while a panel is
+  // open.
+  function holdConfig(holder) {
+    if (!holder || configHolders.indexOf(holder) !== -1) return
+    configHolders = configHolders.concat([holder])
+    refreshSetup()
+  }
+
+  function releaseConfig(holder) {
+    var index = configHolders.indexOf(holder)
+    if (index === -1) return
+    var next = configHolders.slice()
+    next.splice(index, 1)
+    configHolders = next
+    if (next.length > 0 || setupHolders.length > 0) return
+    readQueue = []
+    readAgain = false
     setup = Model.emptySetup()
   }
 
@@ -332,7 +362,7 @@ Singleton {
     if (!setupHeld) return
     // What a daemon whose revision dropped (or that went) no longer
     // supports is not shown from an earlier read.
-    var reads = Model.setupReads(record)
+    var reads = setupHolders.length > 0 ? Model.setupReads(record) : Model.panelReads(record)
     var kept = Model.setupForReads(setup, reads)
     for (var i = 0; i < Model.SETUP_READS.length; i++) {
       var kind = Model.SETUP_READS[i]

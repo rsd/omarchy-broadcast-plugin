@@ -69,6 +69,12 @@ widget would hide.
     options are exactly Model.PANEL_TABS; each tab page is drawn only for its
     own word; the card is 520 wide and as tall as its content (the screen's
     available height is the only cap; past it the Flickable scrolls);
+  - the battery saver: the panel's switch is drawn from Model.batterySaverView
+    only, the panel holds the configuration read only while it is open
+    (Daemon.holdConfig/releaseConfig), writes the row only through
+    Daemon.setConfig of the word that view chose, and stores the mode it
+    remembers (`batterySaverMode`) only as a word of
+    Model.BATTERY_SAVER_MODES;
   - the microphone: the Mic tab is drawn from Model.micView and
     Model.micSettingsView only (the groups of surface "mic", routed in
     Model by the group's surface, never by an id), its switch runs only
@@ -184,8 +190,8 @@ check("entry point is BarWidget.qml", manifest.get("entryPoints", {}).get("barWi
 check("allowMultiple is false", manifest.get("barWidget", {}).get("allowMultiple") is False)
 schema = manifest.get("barWidget", {}).get("schema", [])
 schema_keys = [s.get("key") for s in schema]
-check("settings: cliPath, previewEnabled, previewFps, panelTab",
-      schema_keys == ["cliPath", "previewEnabled", "previewFps", "panelTab"], str(schema_keys))
+check("settings: cliPath, previewEnabled, previewFps, panelTab, batterySaverMode",
+      schema_keys == ["cliPath", "previewEnabled", "previewFps", "panelTab", "batterySaverMode"], str(schema_keys))
 by_key = {s.get("key"): s for s in schema}
 defaults = manifest.get("barWidget", {}).get("defaults", {})
 check("previewEnabled is a boolean, default false",
@@ -207,6 +213,16 @@ check("panelTab is an enum of exactly Model.PANEL_TABS, default Model.PANEL_TAB_
       and default_match is not None and default_match.group(1) == model_tabs[0]
       and tab_schema.get("defaultValue") == model_tabs[0] and defaults.get("panelTab") == model_tabs[0],
       f"{tab_schema} vs {model_tabs}")
+
+bs_schema = by_key.get("batterySaverMode", {})
+bs_match = re.search(r'^var BATTERY_SAVER_MODES = (\[[^\]]*\])$', model_src, re.M)
+bs_modes = json.loads(bs_match.group(1)) if bs_match else None
+bs_default = re.search(r'^var BATTERY_SAVER_MODE_DEFAULT = "(\w+)"$', model_src, re.M)
+check("batterySaverMode is an enum of exactly Model.BATTERY_SAVER_MODES, default Model.BATTERY_SAVER_MODE_DEFAULT (the first, never off)",
+      bs_schema.get("type") == "enum" and bs_modes is not None and bs_schema.get("options") == bs_modes and "off" not in bs_modes
+      and bs_default is not None and bs_default.group(1) == bs_modes[0]
+      and bs_schema.get("defaultValue") == bs_modes[0] and defaults.get("batterySaverMode") == bs_modes[0],
+      f"{bs_schema} vs {bs_modes}")
 
 # ---- Component.onDestruction bodies -----------------------------------------
 def destruction_bodies(src):
@@ -234,7 +250,7 @@ for path, src in sources.items():
         statements = [s.strip() for s in re.split(r"[;\n]", body) if s.strip()]
         # SettingsView's slider gives back the panel's held count when it
         # is destroyed mid-drag: a registration handed back, nothing stopped.
-        allowed = r"Daemon\.detach\(\s*root\s*\)|Preview\.release\(\s*root\s*\)"
+        allowed = r"Daemon\.detach\(\s*root\s*\)|Preview\.release\(\s*root\s*\)|Daemon\.releaseConfig\(\s*root\s*\)"
         if path.name == "SettingsView.qml":
             allowed += r"|if \(dragging\) root\.heldChanged\(-1\)"
         only_detach = all(re.fullmatch(allowed, s) for s in statements)
@@ -452,7 +468,7 @@ check("the settings section is drawn only from Model.settingsView",
       and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible \|\| root\.recommendedShown\n', panel) is not None
       and "view: root.settingsView" in panel
       and "readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)" in panel
-      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health)" in panel
+      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health, batterySaver)" in panel
       and re.search(r'objectName: "effectSettingsArea"[^}]*visible: root\.genericEffect', panel) is not None
       and "view: root.effectSettings" in panel)
 check("the set's lines, options and changes are capped before they are walked",
@@ -579,10 +595,21 @@ check("preview holders are registered only by the widget, on open/close",
       == [("hold", "root"), ("release", "root"), ("release", "root")])
 check("panel preferences are requested only by togglePreview, chooseFps and chooseTab",
       re.findall(r"root\.settingsRequested\(([^)]*\))", panel)
-      == ["{ previewEnabled: !Preview.switchOn })", "{ previewFps: option.value })", "{ panelTab: value })"]
+      == ["{ previewEnabled: !Preview.switchOn })", "{ previewFps: option.value })", "{ panelTab: value })",
+          "{ batterySaverMode: memory })"]
       and "root.settingsRequested(" not in panel.replace(block(panel, "function togglePreview"), "")
-      .replace(block(panel, "function chooseFps"), "").replace(block(panel, "function chooseTab"), ""),
+      .replace(block(panel, "function chooseFps"), "").replace(block(panel, "function chooseTab"), "")
+      .replace(block(panel, "function toggleBatterySaver"), ""),
       str(re.findall(r"root\.settingsRequested\(([^)]*\))", panel)))
+check("the battery saver: the panel holds the configuration only while open, writes the row only through Daemon.setConfig of a word Model.batterySaverView chose, and the stored mode only as a word of BATTERY_SAVER_MODES",
+      "if (root.opened) Daemon.holdConfig(root)" in block(panel, "function syncConfigHold")
+      and "else Daemon.releaseConfig(root)" in block(panel, "function syncConfigHold")
+      and "Daemon.setConfig(Model.BATTERY_SAVER_KEY, view.mode)" in block(panel, "function toggleBatterySaver")
+      and "if (!root.available || !view.visible || view.mode === null) return false" in block(panel, "function toggleBatterySaver")
+      and re.findall(r"Daemon\.holdConfig\(([^)]*)\)", "\n".join(sources[p] for p in sources if p.parent == PLUGIN)) == ["root"]
+      and "if (BATTERY_SAVER_MODES.indexOf(values.batterySaverMode) < 0) return null" in block(model, "function settingsEntry")
+      and 'readonly property string storedBatteryMode: Model.batterySaverModeValue(Model.settingValue(settings, "batterySaverMode"))' in bar_src
+      and "return batterySaverSupported(record) ? [\"config\"] : []" in block(model, "function panelReads"))
 check("chooseTab writes only a word of Model.PANEL_TABS",
       "var value = Model.PANEL_TABS[index]" in block(panel, "function chooseTab")
       and "if (value === undefined || !root.available) return false" in block(panel, "function chooseTab"))
