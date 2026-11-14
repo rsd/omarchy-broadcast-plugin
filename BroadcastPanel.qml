@@ -1776,6 +1776,29 @@ Item {
               spacing: Style.space(6)
               visible: root.health.visible
 
+              // The camera's status lines (revision 26); a closed shutter, which
+              // explains a black or away picture, is the foreground colour in
+              // bold behind a caution sign. Not cursor stops.
+              Repeater {
+                objectName: "healthStatus"
+                model: root.health.status.length
+                delegate: Text {
+                  required property int index
+                  readonly property var line: root.health.status[index] || ({ text: "", strong: false })
+                  objectName: "healthStatus-" + index
+                  Accessible.role: Accessible.StaticText
+                  Accessible.name: line.strong ? "Warning: " + line.text : line.text
+                  textFormat: Text.PlainText
+                  width: parent ? parent.width : 0
+                  wrapMode: Text.Wrap
+                  text: line.strong ? Model.GLYPH_WARNING + " " + line.text : line.text
+                  color: line.strong ? root.foreground : root.dim
+                  font.bold: line.strong
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
               Text {
                 objectName: "healthDelivers"
                 textFormat: Text.PlainText

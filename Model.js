@@ -1428,6 +1428,8 @@ var RESERVED_KEYS = ["__proto__", "constructor", "prototype"]
 var SETTING_LABEL_CAP = 48
 var SETTING_REASON_CAP = 96
 var SETTING_UNIT_CAP = 16
+// A setting's description (revision 26), the producer's bound.
+var SETTING_DESCRIPTION_CAP = 160
 var OPTION_LABEL_CAP = 32
 // Rendering caps (the producer's are 64 settings a camera and 16 options a
 // setting); past them the panel says "Showing N of M".
@@ -1639,6 +1641,7 @@ function settingEntry(s, surface) {
     // Only a global setting is the microphone's (groupSurface).
     surface: surface === MIC_SURFACE && scope === "global" ? MIC_SURFACE : "", stored: s.stored === true, enabled: enabled,
     reason: enabled ? "" : settingText(s.disabled_reason, SETTING_REASON_CAP),
+    description: settingText(s.description, SETTING_DESCRIPTION_CAP), displayOffset: null, displayScale: null, displayRaw: false,
     value: null, defaultValue: null, min: 0, max: 0, step: 0, unit: "", options: [], optionsTotal: 0
   }
   if (s.type === "int") {
@@ -1655,6 +1658,22 @@ function settingEntry(s, surface) {
     e.value = clampInt(value, min, max)
     e.defaultValue = clampInt(def, min, max)
     e.unit = settingText(s.unit, SETTING_UNIT_CAP)
+    // Display transform (revision 27): optional integers, a scale above
+    // zero. A key that is present but invalid means no transform at all:
+    // the raw value shows, without the unit (displayRaw), as a client that
+    // does not apply the transform shows it. Either key valid alone makes
+    // the transform; the raw value is what is kept and written.
+    var hasOffset = s.display_offset !== undefined
+    var hasScale = s.display_scale !== undefined
+    var dOffset = settingInt(s.display_offset)
+    var dScale = settingInt(s.display_scale)
+    if (dScale !== null && !(dScale > 0)) dScale = null
+    if ((hasOffset && dOffset === null) || (hasScale && dScale === null)) {
+      e.displayRaw = true
+    } else if (dOffset !== null || dScale !== null) {
+      e.displayOffset = dOffset !== null ? dOffset : 0
+      e.displayScale = dScale !== null ? dScale : 1
+    }
   } else if (s.type === "bool") {
     if (typeof s.value !== "boolean") return null
     e.value = s.value
@@ -1985,7 +2004,13 @@ function settingValueText(row, value) {
   if (row.type === "int") {
     var n = settingInt(value)
     if (n === null) return UNKNOWN
-    return String(n) + (row.unit !== "" ? " " + row.unit : "")
+    if (row.displayRaw === true) return String(n)
+    var unit = row.unit !== "" ? " " + row.unit : ""
+    if (row.displayOffset !== null && row.displayOffset !== undefined && row.displayScale !== null && row.displayScale !== undefined) {
+      var shown = (n - row.displayOffset) * row.displayScale
+      return (shown >= 0 ? "+" + String(shown) : "\u2212" + String(-shown)) + unit
+    }
+    return String(n) + unit
   }
   if (row.type === "enum") {
     var at = optionIndex(row.options, value)
@@ -2001,10 +2026,12 @@ function settingValueText(row, value) {
 function settingDescription(row) {
   if (!row) return ""
   var value = typeof row.valueText === "string" ? row.valueText : ""
-  if (row.enabled) return value
+  var note = typeof row.description === "string" ? row.description : ""
+  if (row.enabled) return note !== "" ? (value !== "" ? value + ". " + note : note) : value
   var parts = ["Unavailable"]
   if (value !== "") parts.push(value)
   if (typeof row.reason === "string" && row.reason !== "") parts.push(row.reason)
+  if (note !== "") parts.push(note)
   return parts.join(". ")
 }
 
@@ -2059,8 +2086,9 @@ function openGroupId(open, set) {
 // groups: { id, label, index, expanded, glyph, rows, truncation, live }, where
 // the rows of a collapsed group are not listed and `live` is a read-only line
 // under the rows ("" for none, see groupLiveText); a row:
-//   { id, type, widget, label, enabled, reason, value, valueText, min, max,
-//     step, options, selectedIndex, optionsNote, stop }
+//   { id, type, widget, label, enabled, reason, description, displayOffset,
+//     displayScale, value, valueText, min, max, step, options, selectedIndex,
+//     optionsNote, stop }
 // `stop` numbers the rows drawn, top to bottom (the keyboard's stops, see
 // cursorStops). `hint` replaces everything when the settings cannot be
 // shown (an old CLI or daemon, a newer schema, a camera without settings);
@@ -2078,7 +2106,8 @@ function viewRowOf(row, drafts, stop) {
   var value = shownSettingValue(row, drafts)
   return {
     id: row.id, type: row.type, widget: settingWidget(row), label: row.label, enabled: row.enabled,
-    reason: row.reason, value: value, valueText: settingValueText(row, value), min: row.min, max: row.max,
+    reason: row.reason, description: row.description, displayOffset: row.displayOffset, displayScale: row.displayScale,
+    value: value, valueText: settingValueText(row, value), min: row.min, max: row.max,
     step: row.step, options: row.options, selectedIndex: row.type === "enum" ? optionIndex(row.options, value) : -1,
     optionsNote: showingText(row.options.length, row.optionsTotal, "choices"), stop: stop
   }
@@ -2867,6 +2896,13 @@ var HEALTH_SUGGESTIONS_CAP = 8
 var HEALTH_RECOMMENDED_CAP = 32
 var HEALTH_REASON_CAP = DETAIL_CAP
 var HEALTH_VALUE_CAP = 48
+// The camera's status lines (revision 26): "Shutter closed" first, then
+// "Show Mode: desk view" and the like.
+var HEALTH_STATUS_REVISION = 26
+var HEALTH_STATUS_CAP = 4
+var HEALTH_STATUS_LINE_CAP = 96
+var HEALTH_SHUTTERS = ["", "open", "closed"]
+var HEALTH_SHOW_MODES = ["", "normal", "desk_view"]
 // "Delivers ... of ... fps" shows below this share of the capture mode's rate.
 var HEALTH_DELIVERS_SHARE = 0.95
 var RECOMMENDED_TITLE = "RECOMMENDED FOR THIS CAMERA"
@@ -2915,8 +2951,17 @@ function healthFields(m) {
     recommended.push({ setting: cid, label: label, value: settingText(c.value, HEALTH_VALUE_CAP),
                        current: settingText(c.current, HEALTH_VALUE_CAP) })
   }
+  var status = []
+  src = Array.isArray(m.status) ? m.status : []
+  for (var q = 0; q < src.length && q < HEALTH_STATUS_CAP; q++) {
+    var line = settingText(src[q], HEALTH_STATUS_LINE_CAP)
+    if (line !== "") status.push(line)
+  }
   return {
     camera: rawId(m.camera),
+    shutter: typeof m.shutter === "string" && HEALTH_SHUTTERS.indexOf(m.shutter) >= 0 ? m.shutter : "",
+    showMode: typeof m.show_mode === "string" && HEALTH_SHOW_MODES.indexOf(m.show_mode) >= 0 ? m.show_mode : "",
+    status: status,
     deliveredFps: statNumber(m.delivered_fps),
     nominalFps: statNumber(m.nominal_fps),
     corruptFrames: count(m.corrupt_frames),
@@ -2992,12 +3037,16 @@ function suggestionAction(row, value) {
 // the line that opens and folds the recommended changes ("2 changes:
 // Sharpness, Anti-flicker"; "" while there are none).
 function healthView(record, open) {
-  var out = { visible: false, camera: "", delivers: "", warnings: [], suggestions: [], recommended: [], shownSuggestions: 0,
+  var out = { visible: false, camera: "", delivers: "", status: [], warnings: [], suggestions: [], recommended: [], shownSuggestions: 0,
               more: { visible: false, text: "", glyph: "" }, changes: { open: false, text: "", glyph: "" } }
   var h = shownHealth(record)
   if (!h) return out
   out.camera = h.camera
   out.delivers = deliversText(h)
+  if (record.interfaceRevision >= HEALTH_STATUS_REVISION) {
+    for (var t = 0; t < h.status.length && t < HEALTH_STATUS_CAP; t++)
+      out.status.push({ text: h.status[t], strong: t === 0 && h.shutter === "closed" })
+  }
   out.warnings = h.warnings.slice(0, HEALTH_WARNINGS_CAP)
   var supported = settingsSupported(record)
   for (var i = 0; i < h.suggestions.length && i < HEALTH_SUGGESTIONS_CAP; i++) {
@@ -3025,7 +3074,7 @@ function healthView(record, open) {
     out.changes = { open: changesOpen, text: count + out.recommended.map(function(x) { return x.label }).join(", "),
                     glyph: changesOpen ? GLYPH_EXPANDED : GLYPH_COLLAPSED }
   }
-  out.visible = out.delivers !== "" || out.warnings.length > 0 || out.suggestions.length > 0
+  out.visible = out.delivers !== "" || out.status.length > 0 || out.warnings.length > 0 || out.suggestions.length > 0
   return out
 }
 

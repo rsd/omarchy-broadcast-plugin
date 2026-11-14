@@ -325,7 +325,7 @@ Column {
                 id: settingRow
                 required property int index
                 readonly property var row: groupBlock.group.rows[index] || ({ id: "", type: "", widget: "", label: "", enabled: false,
-                                                                              reason: "", value: null, valueText: "", min: 0, max: 1,
+                                                                              reason: "", description: "", displayOffset: null, displayScale: null, value: null, valueText: "", min: 0, max: 1,
                                                                               step: 1, options: [], selectedIndex: -1, optionsNote: "", stop: -1 })
                 readonly property bool greyed: !row.enabled
                 readonly property bool onCursor: root.hasCursor("setting", row.stop)
@@ -426,6 +426,18 @@ Column {
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
+                  }
+                  // The daemon's description of the setting (revision 26), also while greyed.
+                  Text {
+                    objectName: "settingDescription-" + settingRow.row.id
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    visible: text !== ""
+                    text: settingRow.row.description
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
                   }
                   Text {
                     textFormat: Text.PlainText

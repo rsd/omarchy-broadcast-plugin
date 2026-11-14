@@ -27,7 +27,10 @@
 #       none   nothing (a daemon below interface revision 7)
 #     settings-state holds one setting per line, fields separated by "|":
 #       group|group label|id|type|label|value|default|stored|min|max|step|
-#       unit|options|master|when|reason|fixed|scope|surface
+#       unit|options|master|when|reason|fixed|scope|surface|display_offset|
+#       display_scale|description
+#     (the last three optional, revisions 27 and 26: an int's display transform
+#     as integers, and a description text with no "|")
 #     options as value:Label,value:Label (enum); a setting with a master
 #     (another setting's id) is enabled only while the master's value is one
 #     of `when` (comma-separated), else greyed with `reason`; fixed 1: always
@@ -207,8 +210,11 @@ function setting(k,   s, t, i, n, os, kv, w, nw, ws, mt) {
   if (t == "int") {
     s = s ",\"min\":" (f[k, 9] + 0) ",\"max\":" (f[k, 10] + 0) ",\"step\":" (f[k, 11] + 0)
     if (f[k, 12] != "") s = s ",\"unit\":" jstr(f[k, 12])
+    if (f[k, 20] != "") s = s ",\"display_offset\":" (f[k, 20] + 0)
+    if (f[k, 21] != "") s = s ",\"display_scale\":" (f[k, 21] + 0)
     s = s ",\"hint\":\"slider\""
   }
+  if (f[k, 22] != "") s = s ",\"description\":" jstr(f[k, 22])
   if (t == "bool") s = s ",\"hint\":\"switch\""
   if (t == "enum") {
     n = split(f[k, 13], os, ",")
@@ -223,8 +229,8 @@ function change(k,   s) {
   if (f[k, 4] != "action") s = s ",\"value\":" jval(f[k, 4], f[k, 6])
   return s ",\"stored\":" (f[k, 8] == "1" ? "true" : "false") ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16]) "}"
 }
-function load(   i) { n++; for (i = 1; i <= 19; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
-function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 19; i++) s = s "|" f[k, i]; return s }
+function load(   i) { n++; for (i = 1; i <= 22; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
+function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 22; i++) s = s "|" f[k, i]; return s }
 '
 
 setting_file() { head -n 1 -- "$dir/$1" 2>/dev/null || echo "$2"; }
