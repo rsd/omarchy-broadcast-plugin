@@ -1869,6 +1869,73 @@ TestCase {
     compare(menu.widget, "dropdown")
   }
 
+  function test_setting_display_transform() {
+    var e = function(o) { return Model.settingEntry(intS("camera.image.x", "X", o)) }
+    var text = function(o, raw) { return Model.settingValueText(e(o), raw) }
+    var plain = e({})
+    compare(plain.displayOffset, null)
+    compare(plain.displayScale, null)
+    compare(Model.settingValueText(plain, 57), "57", "no transform: unchanged")
+    // offset only
+    var off = { display_offset: 128 }
+    compare(e(off).displayOffset, 128)
+    compare(e(off).displayScale, 1, "missing scale reads 1")
+    compare(text(off, 128), "+0")
+    compare(text(off, 130), "+2")
+    compare(text(off, 125), "\u22123")
+    // offset, scale and unit
+    var all = { display_offset: 50, display_scale: 40, unit: "K" }
+    compare(text(all, 57), "+280 K")
+    compare(text(all, 47), "\u2212120 K")
+    compare(text(all, 50), "+0 K")
+    // scale only: the offset reads 0
+    compare(e({ display_scale: 10 }).displayOffset, 0)
+    compare(text({ display_scale: 10 }, 7), "+70")
+    // a key present but invalid: no transform, the raw value without the unit
+    var bad = ["x", 0, -1, 1.5, null]
+    for (var i = 0; i < bad.length; i++) {
+      compare(text({ display_offset: 50, display_scale: bad[i], unit: "K" }, 57), "57", "bad scale " + JSON.stringify(bad[i]))
+      compare(text({ display_offset: "y", display_scale: bad[i], unit: "K" }, 57), "57", "both invalid " + JSON.stringify(bad[i]))
+      if (bad[i] !== 0 && bad[i] !== -1) compare(text({ display_offset: bad[i], display_scale: 40, unit: "K" }, 57), "57", "bad offset " + JSON.stringify(bad[i]))
+    }
+    compare(text({ display_scale: "x", unit: "K" }, 57), "57", "invalid scale alone")
+    compare(text({ display_offset: 1.5, unit: "K" }, 57), "57", "invalid offset alone")
+    compare(e({ display_offset: 1.5 }).displayOffset, null)
+    compare(e({ display_offset: 1.5 }).displayRaw, true)
+    compare(e(all).displayRaw, false)
+    compare(text({ unit: "K" }, 57), "57 K", "both absent: raw with the unit")
+    // the entry keeps raw values: range, value, default; a non-int ignores the keys
+    var kept = e(merged(all, { min: 0, max: 100, value: 57, "default": 50 }))
+    compare(kept.min + ".." + kept.max + "/" + kept.value + "/" + kept.defaultValue, "0..100/57/50")
+    compare(Model.settingEntry(boolS("camera.image.b", "B", { display_offset: 5 })).displayOffset, null)
+    // every caller formats through settingValueText: the held value, a suggestion
+    var row = Model.settingEntry(merged(intS("camera.image.x", "X", all), { min: 0, max: 100 }))
+    compare(Model.suggestionAction(row, 62), "Set to +480 K")
+    compare(Model.settingValueText(row, "x"), Model.UNKNOWN)
+    compare(Model.settingNudge(row, 57, 1) - 57, Model.settingKeyStep(row), "nudge works on raw values")
+  }
+
+  function test_setting_description() {
+    var e = function(o) { return Model.settingEntry(intS("camera.image.x", "X", o)) }
+    compare(e({}).description, "")
+    compare(e({ description: "Shifts the picture warmer or cooler" }).description, "Shifts the picture warmer or cooler")
+    compare(e({ description: 5 }).description, "")
+    compare(e({ description: "<b>Soft</b>\nlight" }).description, "bSoft/b light")
+    compare(Model.SETTING_DESCRIPTION_CAP, 160)
+    compare(e({ description: new Array(300).join("x") }).description.length, 160)
+    // read for other types too
+    compare(Model.settingEntry(boolS("camera.image.b", "B", { description: "A switch" })).description, "A switch")
+    // the accessible description: value, then the description; greyed: unavailable, value, reason, description
+    var row = { enabled: true, valueText: "+2", description: "Shifts it" }
+    compare(Model.settingDescription(row), "+2. Shifts it")
+    compare(Model.settingDescription({ enabled: true, valueText: "", description: "Shifts it" }), "Shifts it")
+    compare(Model.settingDescription({ enabled: true, valueText: "+2", description: "" }), "+2")
+    compare(Model.settingDescription({ enabled: false, valueText: "+2", reason: "Turn it on", description: "Shifts it" }),
+            "Unavailable. +2. Turn it on. Shifts it")
+    compare(Model.settingDescription({ enabled: false, valueText: "", reason: "", description: "Shifts it" }), "Unavailable. Shifts it")
+    compare(Model.settingDescription({ enabled: true, valueText: "+2" }), "+2", "a row with none")
+  }
+
   function test_setting_values() {
     var r = brio()
     var pan = Model.findSetting(r, "camera.focus.pan_absolute")
@@ -1897,6 +1964,28 @@ TestCase {
     compare(Model.settingValueText(pan, -14400), "-14400")
     compare(Model.settingValueText(mode, "manual"), "Manual")
     compare(Model.settingValueText(mode, "x"), Model.UNKNOWN)
+    // an int with a negative minimum and a unit (a microphone's hardware gain in dB)
+    var gain = Model.settingEntry(intS("mic.input.hardware_gain_db", "Hardware gain",
+                                       { scope: "global", min: -12, max: 36, value: 6, "default": 6, unit: "dB" }), "mic")
+    compare(gain.min, -12)
+    compare(gain.max, 36)
+    compare(gain.value, 6)
+    compare(gain.unit, "dB")
+    compare(Model.settingWidget(gain), "slider")
+    compare(Model.settingValueText(gain, -3), "-3 dB")
+    compare(Model.settingValueText(gain, 6), "6 dB")
+    compare(Model.settingKeyStep(gain), 2)
+    compare(Model.settingKeyStep(intS("camera.white_balance.temperature_compensation", "Temperature compensation", { max: 100, value: 57, "default": 50 })), 5)
+    compare(Model.settingNudge(gain, -11, -1), -12, "clamped at the bottom of the negative range")
+    compare(Model.settingNudge(gain, -12, -1), -12)
+    compare(Model.settingNudge(gain, 35, 1), 36, "clamped at the top")
+    compare(Model.settingNudge(gain, 36, 1), 36)
+    compare(Model.settingNudge(gain, -1, 1), 1)
+    compare(Model.clampSetting(gain, -50), -12)
+    compare(Model.snapSetting(gain, -3), -3)
+    // Option sets like these are three short chips
+    compare(Model.fitsSegmented([{ label: "Slower" }, { label: "Default" }, { label: "Faster" }]), true)
+    compare(Model.fitsSegmented([{ label: "Closer" }, { label: "Default" }, { label: "Farther" }]), true)
     compare(Model.shownSettingValue(pan, { "camera.focus.pan_absolute": 0 }), 0)
     compare(Model.shownSettingValue(pan, { "camera.focus.pan_absolute": 99999 }), 36000, "clamped")
     compare(Model.shownSettingValue(pan, { "camera.focus.pan_absolute": "x" }), 14400)
@@ -5547,7 +5636,7 @@ TestCase {
 
   function test_health_snapshot_and_lines() {
     var r = snap(rev20({}))
-    compare(JSON.stringify(r.health), JSON.stringify({ camera: brioId, deliveredFps: 19.5, nominalFps: 30, corruptFrames: 0, warnings: [],
+    compare(JSON.stringify(r.health), JSON.stringify({ camera: brioId, shutter: "", showMode: "", status: [], deliveredFps: 19.5, nominalFps: 30, corruptFrames: 0, warnings: [],
       suggestions: [{ setting: denoiseId, value: "on", reason: "The image is noisy in this light" }], hasRecommendation: true,
       recommended: [{ setting: "camera.image.sharpness", label: "Sharpness", value: "5", current: "3" }] }))
     var res = Model.reduce(r, line(healthLine({ delivered_fps: 29.9, warnings: ["Shared USB hub"] })))
@@ -5581,6 +5670,55 @@ TestCase {
     var many = []
     for (var i = 0; i < 50; i++) many.push("Warning " + i)
     compare(Model.reduce(r, line(healthLine({ warnings: many }))).record.health.warnings.length, Model.HEALTH_WARNINGS_CAP)
+  }
+
+  function test_health_status_fields() {
+    var f = function(o) { return Model.healthFields(healthObj(o)) }
+    var d = f({})
+    compare(d.shutter, "")
+    compare(d.showMode, "")
+    compare(JSON.stringify(d.status), "[]", "missing: none")
+    var ok = f({ shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"] })
+    compare(ok.shutter, "closed")
+    compare(ok.showMode, "desk_view")
+    compare(JSON.stringify(ok.status), JSON.stringify(["Shutter closed", "Show Mode: desk view"]))
+    compare(f({ shutter: "open", show_mode: "normal" }).shutter, "open")
+    compare(f({ shutter: "open", show_mode: "normal" }).showMode, "normal")
+    // anything else is "": "open" and "normal" are never inferred
+    var junk = [["CLOSED"], ["half"], [7], [null], [{}], ["closed "]]
+    for (var i = 0; i < junk.length; i++) {
+      compare(f({ shutter: junk[i][0] }).shutter, "", JSON.stringify(junk[i]))
+      compare(f({ show_mode: junk[i][0] }).showMode, "", JSON.stringify(junk[i]))
+    }
+    compare(f({ show_mode: "desk view" }).showMode, "")
+    // status: sanitised, non-strings and blanks dropped, capped in count and length
+    // (like every list, read to its cap only: a junk entry uses one of the places)
+    var st = f({ status: ["<b>Shutter</b> closed", 5, "Two\nlines", ""] }).status
+    compare(JSON.stringify(st), JSON.stringify(["bShutter/b closed", "Two lines"]))
+    compare(JSON.stringify(f({ status: ["One", "Two", "Three", "Four", "Five"] }).status), JSON.stringify(["One", "Two", "Three", "Four"]))
+    compare(Model.HEALTH_STATUS_CAP, 4)
+    compare(f({ status: [new Array(200).join("x")] }).status[0].length, Model.HEALTH_STATUS_LINE_CAP)
+    compare(Model.HEALTH_STATUS_LINE_CAP, 96)
+    compare(JSON.stringify(f({ status: "Shutter closed" }).status), "[]", "not an array")
+  }
+
+  function test_health_view_status_gated_by_revision() {
+    var o = { shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"] }
+    compare(Model.HEALTH_STATUS_REVISION, 26)
+    var at = function(rev, extra) { return Model.healthView(snap(rev20(merged({ interface_revision: rev, camera_health: healthObj(merged(o, extra || {})) }, {})))) }
+    compare(JSON.stringify(at(25).status), "[]", "below revision 26: none")
+    var v = at(26)
+    compare(JSON.stringify(v.status), JSON.stringify([{ text: "Shutter closed", strong: true }, { text: "Show Mode: desk view", strong: false }]))
+    compare(JSON.stringify(at(27).status.map(function(x) { return x.strong })), JSON.stringify([true, false]))
+    // strong only while the shutter is closed, and only the first line
+    compare(JSON.stringify(at(26, { shutter: "open" }).status.map(function(x) { return x.strong })), JSON.stringify([false, false]))
+    compare(JSON.stringify(at(26, { shutter: "" }).status.map(function(x) { return x.strong })), JSON.stringify([false, false]))
+    // visible on status alone
+    var quiet = { delivered_fps: 30, suggestions: [], warnings: [], status: ["Show Mode: normal"] }
+    compare(at(26, quiet).visible, true)
+    compare(at(25, quiet).visible, false)
+    compare(Model.healthView(snap(rev20({ interface_revision: 26, camera_health: healthObj({ delivered_fps: 30, suggestions: [] }) }))).visible, false)
+    compare(JSON.stringify(Model.healthView(null).status), "[]")
   }
 
   function test_health_delivers_text() {

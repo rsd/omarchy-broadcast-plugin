@@ -2193,7 +2193,7 @@ ShellRoot {
     var x = o || {}
     var f = function(v) { return v === undefined ? "" : String(v) }
     return [group, groupLabel, id, type, label, f(value), f(def), x.stored ? "1" : "0", f(x.min), f(x.max), f(x.step), f(x.unit),
-            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope), f(x.surface)].join("|")
+            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope), f(x.surface), f(x.offset), f(x.scale), f(x.description)].join("|")
   }
   // The MX Brio as the daemon publishes it (its starting values).
   function brioState() {
@@ -2205,12 +2205,17 @@ ShellRoot {
     return [
       img("brightness", "Brightness", 128, 128), img("contrast", "Contrast", 128, 128), img("saturation", "Saturation", 128, 128),
       img("sharpness", "Sharpness", 128, 128), img("backlight_compensation", "Backlight compensation", 1, 1, { max: 1 }),
+      img("vibrance", "Vibrance", 128, 128),
       stateRow("white_balance", "White balance", "camera.white_balance.white_balance_automatic", "bool", "Automatic white balance", "true", "true"),
       stateRow("white_balance", "White balance", "camera.white_balance.white_balance_temperature", "int", "Temperature", 2975, 5000,
                { min: 2000, max: 7500, step: 1, unit: "K", master: "camera.white_balance.white_balance_automatic", when: "false",
                  reason: "Turn off automatic white balance to change this" }),
+      stateRow("white_balance", "White balance", "camera.white_balance.temperature_compensation", "int", "Temperature compensation", 57, 50,
+               { min: 0, max: 100, step: 1, unit: "K", offset: 50, scale: 40, description: "Shifts the picture warmer or cooler" }),
       stateRow("exposure", "Exposure", "camera.exposure.auto_exposure", "enum", "Exposure mode", "aperture_priority", "aperture_priority",
                { options: "manual:Manual,aperture_priority:Auto" }),
+      stateRow("exposure", "Exposure", "camera.exposure.exposure_compensation", "int", "Exposure compensation", 128, 128,
+               { min: 0, max: 255, step: 1, offset: 128 }),
       stateRow("exposure", "Exposure", "camera.exposure.exposure_time_absolute", "int", "Exposure time", 1250, 156,
                { min: 3, max: 2047, step: 1, unit: "×100 µs", master: "camera.exposure.auto_exposure", when: "manual,shutter_priority",
                  reason: "Set exposure to manual to change this" }),
@@ -2227,7 +2232,8 @@ ShellRoot {
       stateRow("focus", "Focus & zoom", "camera.focus.tilt_absolute", "int", "Tilt", -14400, 0, { min: -36000, max: 36000, step: 3600 }),
       stateRow("focus", "Focus & zoom", "camera.focus.pan_reset", "action", "Recentre pan", "-", "-"),
       stateRow("focus", "Focus & zoom", "camera.focus.tilt_reset", "action", "Recentre tilt", "-", "-"),
-      stateRow("focus", "Focus & zoom", "camera.focus.field_of_view", "enum", "Field of view", "65", "90", { options: "90:90°,78:78°,65:65°" })
+      stateRow("focus", "Focus & zoom", "camera.focus.field_of_view", "enum", "Field of view", "65", "90", { options: "90:90°,78:78°,65:65°" }),
+      stateRow("focus", "Focus & zoom", "camera.focus.show_mode", "bool", "Show Mode", "true", "false")
     ]
   }
 
@@ -2259,6 +2265,14 @@ ShellRoot {
       return null
     }
     var stopOf = function(id) { var r = row(id); return r ? r.row.stop : -1 }
+    // Scroll the settings so the item is inside the viewport, then click it.
+    var clickAt = function(id, item) {
+      var f = h.find(A(), "settingsFlick")
+      var y = item.mapToItem(f, 0, 0).y
+      if (y + item.height > f.height) f.contentY += y + item.height - f.height + 8
+      else if (y < 0) f.contentY += y - 8
+      click(item)
+    }
     // The panel's choice of open group, as a header click makes it.
     var openOnly = function(ids) { C().settingsOpen = ids.length > 0 ? ids[0] : "" }
     var noInnerScroll = function(label) {
@@ -2307,7 +2321,7 @@ ShellRoot {
     h.step("settings: drawn from the set, Image open, the rest closed", function() {
       var set = S().record.settings
       h.eq("assembled from seven lines into four groups", set.groups.map(function(g) { return g.id + ":" + g.rows.length }).join(","),
-           "image:5,white_balance:2,exposure:5,focus:8")
+           "image:6,white_balance:3,exposure:6,focus:9")
       h.eq("the section's title", h.find(A(), "settingsTitle").text + "/" + h.find(A(), "settingsTitle").visible, "SETTINGS/true")
       var hl = h.find(A(), "settingsGroupLabel-image"), rl = h.find(A(), "settingLabel-camera.image.brightness")
       h.eq("a group's label is aligned with its rows' labels", Math.round(hl.mapToItem(C(), 0, 0).x), Math.round(rl.mapToItem(C(), 0, 0).x))
@@ -2328,7 +2342,7 @@ ShellRoot {
       h.eq("no hint", h.find(A(), "settingsHint").visible, false)
       h.eq("reset shown", h.find(A(), "settingsReset").visible, true)
       h.eq("cursor stops: the rows drawn", kinds(),
-           "switch,preview,fps,tabs,camera0,camera1,camera2,next,reset,group0,setting0,setting1,setting2,setting3,setting4,group1,group2,group3")
+           "switch,preview,fps,tabs,camera0,camera1,camera2,next,reset,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
       h.eq("accessible row", row("camera.image.brightness").Accessible.name, "Brightness")
       h.eq("accessible header", header("exposure").Accessible.name + "/" + header("exposure").Accessible.description, "Exposure/Collapsed")
       h.fits(A(), "Camera tab with the MX Brio, Image open")
@@ -2487,7 +2501,7 @@ ShellRoot {
     h.wait(250)
     h.step("settings: Focus & zoom alone open, with its two Recentre buttons", function() {
       h.eq("open", openGroups(), "focus")
-      h.eq("rows", C().settingsView.groups[3].rows.length, 8)
+      h.eq("rows", C().settingsView.groups[3].rows.length, 9)
       h.eq("the buttons", h.find(A(), "settingAction-camera.focus.pan_reset").text + "," + h.find(A(), "settingAction-camera.focus.tilt_reset").text,
            "Recentre pan,Recentre tilt")
       C().setCursor("setting", stopOf("camera.focus.pan_reset"))
@@ -2508,8 +2522,13 @@ ShellRoot {
       h.eq("focus greyed", h.find(A(), "settingReason-camera.focus.focus_absolute").text, "Turn off continuous autofocus to change this")
       h.eq("pan value", h.find(A(), "settingValue-camera.focus.pan_absolute").text, "14400")
       h.eq("tilt value", h.find(A(), "settingValue-camera.focus.tilt_absolute").text, "-14400")
-      h.fits(A(), "Focus & zoom open (the largest group, two actions included)")
-      noInnerScroll("Focus & zoom open")
+      // nine rows outgrow the card:
+      // it stops at the screen's room and the settings scroll inside it
+      var fl = h.find(A(), "settingsFlick")
+      h.check("Focus & zoom open: the card stays within the screen's room (" + A().popup.contentHeight + " <= " + Math.round(A().popup.availableCardHeight) + ")",
+              A().popup.contentHeight <= A().popup.availableCardHeight + 0.5, A().popup.contentHeight + " vs " + A().popup.availableCardHeight)
+      h.check("Focus & zoom open: the settings scroll inside it", fl.interactive && fl.contentHeight > fl.height, fl.contentHeight + " in " + fl.height)
+      h.eq("Focus & zoom open: with a scroll cue", h.find(A(), "settingsMoreBelow").visible, true)
       h.note("height: card " + A().popup.contentHeight + " in " + Math.round(A().popup.availableCardHeight))
     })
     h.grabStep(function() { return A().popup }, "s1-focus-fov.png")
@@ -2535,6 +2554,104 @@ ShellRoot {
     h.step("settings: the field of view chosen by a click", function() {
       h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.field_of_view", "90")]))
     })
+
+    // MX Brio: Show Mode is drawn by the generic renderer like any other row
+    h.step("settings: the last Focus row is Show Mode, a switch, on", function() {
+      var ids = C().settingsView.groups[3].rows.map(function(r) { return r.id }).slice(8).join(",")
+      h.eq("order after the field of view", ids, "camera.focus.show_mode")
+      h.eq("Show Mode is a switch, on", h.find(A(), "settingSwitch-camera.focus.show_mode").checked, true)
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.focus.show_mode"))
+      h.key(Qt.Key_Return)
+    }, function() { return value("camera.focus.show_mode") === false && !S().commandBusy }, 3000)
+    h.step("settings: Show Mode flipped by Enter", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.show_mode", "false")]))
+      C().cursorActive = false
+    })
+
+    // a greyed row (enabled false with a reason) and an enum the daemon sets
+    // to a value outside its options: reason shown, no input, no chip lit
+    h.step("settings: the camera reports a value Show Mode and the field of view do not know", function() {
+      var st = brioState().map(function(line) {
+        if (line.indexOf("|camera.focus.show_mode|") >= 0)
+          return stateRow("focus", "Focus & zoom", "camera.focus.show_mode", "bool", "Show Mode", "true", "false", { reason: "The camera reports a mode this version does not know", fixed: true })
+        if (line.indexOf("|camera.focus.field_of_view|") >= 0)
+          return stateRow("focus", "Focus & zoom", "camera.focus.field_of_view", "enum", "Field of view", "turbo", "90", { options: "90:90°,78:78°,65:65°" })
+        return line
+      })
+      h.writeFile("settings-state", st)
+      h.writeFile("settings-serial", ["9"])
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !!S().record.settings && S().record.settings.serial === 9 && h.writerIdle() })
+    h.wait(300)
+    h.step("settings: greyed row shows its reason and takes no input; unknown enum value lights nothing", function() {
+      var sm = h.model.findSetting(S().record, "camera.focus.show_mode")
+      h.eq("Show Mode greyed", sm.enabled, false)
+      h.eq("its reason", h.find(A(), "settingReason-camera.focus.show_mode").text, "The camera reports a mode this version does not know")
+      h.eq("its switch takes no input", h.find(A(), "settingSwitch-camera.focus.show_mode").enabled, false)
+      h.markLog()
+      clickAt("camera.focus.show_mode", h.find(A(), "settingSwitch-camera.focus.show_mode"))
+      h.eq("no chip lit", ["90°", "78°", "65°"].map(function(l) { return chip("camera.focus.field_of_view", l).selected }).join(","), "false,false,false")
+      h.eq("the row's value is empty", value("camera.focus.field_of_view"), "")
+    })
+    h.wait(300)
+    h.step("settings: the click on the greyed switch wrote nothing", function() {
+      h.eq("no settings command", JSON.stringify(setArgs()), "[]")
+      h.writeFile("settings-state", brioState())
+      h.writeFile("settings-serial", ["10"])
+      h.feed([snapshotLine(rev7({}))])
+    }, function() { return !!S().record.settings && S().record.settings.serial === 10 && h.writerIdle() })
+    h.wait(300)
+
+    // the Image, White balance and Exposure rows added in 0.51: plain sliders
+    h.step("settings: Vibrance, Temperature compensation and Exposure compensation are sliders with their values", function() {
+      openOnly(["image"])
+    }, function() { return shown("camera.image.vibrance") })
+    h.step("settings: Vibrance is a slider reading 128, last of its group", function() {
+      var ids = C().settingsView.groups[0].rows.map(function(r) { return r.id })
+      h.eq("last in Image", ids[ids.length - 1], "camera.image.vibrance")
+      h.eq("value text", h.find(A(), "settingValue-camera.image.vibrance").text, "128")
+      h.eq("a slider", !!h.find(A(), "settingSlider-camera.image.vibrance"), true)
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.image.vibrance"))
+      h.key(Qt.Key_Right)
+    }, function() { return setArgs().length === 1 && value("camera.image.vibrance") === 141 }, 3000)
+    h.step("settings: Right on Vibrance steps by 13", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.image.vibrance", 141)]))
+      C().cursorActive = false
+      openOnly(["white_balance"])
+    }, function() { return shown("camera.white_balance.temperature_compensation") })
+    h.step("settings: Temperature compensation reads +280 K (raw 57), with its description, and steps by 5", function() {
+      h.eq("value text", h.find(A(), "settingValue-camera.white_balance.temperature_compensation").text, "+280 K")
+      h.eq("slider keeps the raw range", h.find(A(), "settingSlider-camera.white_balance.temperature_compensation").minimum + ".." + h.find(A(), "settingSlider-camera.white_balance.temperature_compensation").maximum, "0..100")
+      var d = h.find(A(), "settingDescription-camera.white_balance.temperature_compensation")
+      h.eq("description", d.text + "/" + d.visible, "Shifts the picture warmer or cooler/true")
+      h.eq("plain text", d.textFormat, Text.PlainText)
+      h.eq("a row without one draws none", h.find(A(), "settingDescription-camera.white_balance.white_balance_automatic").visible, false)
+      h.eq("accessible description", row("camera.white_balance.temperature_compensation").Accessible.description, "+280 K. Shifts the picture warmer or cooler")
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.white_balance.temperature_compensation"))
+      h.key(Qt.Key_Right)
+    }, function() { return setArgs().length === 1 && value("camera.white_balance.temperature_compensation") === 62 }, 3000)
+    h.step("settings: Temperature compensation argv", function() {
+      h.eq("argv: the raw value is written", JSON.stringify(setArgs()), JSON.stringify([write("camera.white_balance.temperature_compensation", 62)]))
+      h.eq("value text moved on, +480 K", h.find(A(), "settingValue-camera.white_balance.temperature_compensation").text, "+480 K")
+      C().cursorActive = false
+      openOnly(["exposure"])
+    }, function() { return shown("camera.exposure.exposure_compensation") })
+    h.step("settings: Exposure compensation reads +0 (raw 128, offset only) and Left steps it down", function() {
+      h.eq("value text", h.find(A(), "settingValue-camera.exposure.exposure_compensation").text, "+0")
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.exposure.exposure_compensation"))
+      h.key(Qt.Key_Left)
+    }, function() { return setArgs().length === 1 && value("camera.exposure.exposure_compensation") === 115 }, 3000)
+    h.step("settings: Exposure compensation argv", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.exposure.exposure_compensation", 115)]))
+      h.eq("value text, a minus sign", h.find(A(), "settingValue-camera.exposure.exposure_compensation").text, "\u221213")
+      C().cursorActive = false
+      openOnly(["focus"])
+    }, function() { return shown("camera.focus.field_of_view") })
+    h.wait(250)
 
     // a drag: one write for the whole move, at its end
     h.step("settings: drag zoom", function() {
@@ -3070,6 +3187,7 @@ ShellRoot {
         m("input", "Microphone", "mic.input.enabled", "bool", "Noise and echo processing", "true", "true", {}),
         m("input", "Microphone", "mic.input.device", "enum", "Input device", "default", "default",
           { options: "default:System default," + micDevice + ":USB PnP Sound Device," + micLongDevice + ":K66" }),
+        m("input", "Microphone", "mic.input.hardware_gain_db", "int", "Hardware gain", 6, 6, { min: -12, max: 36, step: 1, unit: "dB" }),
         m("input", "Microphone", "mic.input.make_default", "action", "Use as default microphone", "-", "-", {}),
         m("input", "Microphone", "mic.input.restore_default", "action", "Use the previous default microphone", "-", "-",
           { fixed: true, reason: "The Omarchy Broadcast Mic was not made the default here" }),
@@ -3124,13 +3242,53 @@ ShellRoot {
            "The Omarchy Broadcast Mic was not made the default here")
       h.eq("studio voice says what it costs", h.find(A(), "settingLabel-mic.voice.enabled").text, "Studio voice (adds noticeable delay)")
       h.eq("no modules note", h.find(A(), "mic-settingsNote").visible, false)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs,mic-host,setting0,setting1,setting2,setting3,setting4,setting5,setting6,setting7")
+      h.eq("stops", kinds(), "switch,preview,fps,tabs,mic-host,setting0,setting1,setting2,setting3,setting4,setting5,setting6,setting7,setting8")
       h.eq("the bar's mic glyph", A().micButton.visible + "/" + A().micButton.text, "true/" + String.fromCodePoint(0xF036C))
       h.eq("its tooltip", A().micButton.tooltipText, "Omarchy Broadcast Mic: processing · 1 app recording")
       h.check("beside the camera's", A().micButton.x >= A().iconButton.x + A().iconButton.width - 0.5, A().micButton.x)
       h.fits(A(), "Mic tab")
     })
     h.grabStep(function() { return A().popup }, "m1-mic.png")
+    // revision 25: the hardware gain, a dB slider over the device's own range
+    h.step("mic: the hardware gain sits between the device and the default button, a slider reading 6 dB", function() {
+      var ids = C().micSettings.groups[0].rows.map(function(r) { return r.id }).join(",")
+      h.eq("order", ids, "mic.input.enabled,mic.input.device,mic.input.hardware_gain_db,mic.input.make_default,mic.input.restore_default")
+      var g = h.model.findSetting(S().record, "mic.input.hardware_gain_db")
+      h.eq("range kept, negative min", g.min + "," + g.max + "," + g.unit, "-12,36,dB")
+      h.eq("a slider", !!h.find(A(), "settingSlider-mic.input.hardware_gain_db"), true)
+      h.eq("value text", h.find(A(), "settingValue-mic.input.hardware_gain_db").text, "6 dB")
+      h.markLog()
+      C().setCursor("setting", stopOf("mic.input.hardware_gain_db"))
+      h.eq("the cursor is on the slider row", highlights("mic.input.hardware_gain_db"), "row")
+      h.key(Qt.Key_Left)
+    }, function() { return setArgs().length === 1 && value("mic.input.hardware_gain_db") === 4 && !S().commandBusy }, 3000)
+    h.step("mic: Left stepped by 2 dB and wrote as a global setting", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.hardware_gain_db", 4)]))
+      h.eq("value text", h.find(A(), "settingValue-mic.input.hardware_gain_db").text, "4 dB")
+      h.markLog()
+      h.check("a negative gain, written after --", S().commitSetting("mic.input.hardware_gain_db", -3))
+    }, function() { return setArgs().length === 1 && value("mic.input.hardware_gain_db") === -3 && !S().commandBusy }, 3000)
+    h.step("mic: a negative gain reads -3 dB", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.hardware_gain_db", -3)]))
+      h.eq("value text", h.find(A(), "settingValue-mic.input.hardware_gain_db").text, "-3 dB")
+      h.markLog()
+      h.check("near the bottom", S().commitSetting("mic.input.hardware_gain_db", -11))
+    }, function() { return setArgs().length === 1 && value("mic.input.hardware_gain_db") === -11 && !S().commandBusy }, 3000)
+    h.step("mic: Left near the bottom stays in range", function() {
+      h.markLog()
+      C().setCursor("setting", stopOf("mic.input.hardware_gain_db"))
+      h.key(Qt.Key_Left)
+    }, function() { return setArgs().length === 1 && value("mic.input.hardware_gain_db") === -12 && !S().commandBusy }, 3000)
+    h.step("mic: clamped at -12", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.hardware_gain_db", -12)]))
+      h.eq("value text", h.find(A(), "settingValue-mic.input.hardware_gain_db").text, "-12 dB")
+      h.markLog()
+      h.key(Qt.Key_Right)
+    }, function() { return setArgs().length === 1 && value("mic.input.hardware_gain_db") === -10 && !S().commandBusy }, 3000)
+    h.step("mic: Right steps up from the negative end", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.hardware_gain_db", -10)]))
+      C().cursorActive = false
+    })
     h.step("mic: studio voice on, by the keyboard; noise removal greys with the daemon's reason", function() {
       h.markLog()
       C().setCursor("setting", stopOf("mic.voice.enabled"))
@@ -3381,7 +3539,7 @@ ShellRoot {
               JSON.stringify([tp, bp]))
       h.check("above the settings' title", bp.y < h.find(A(), "settingsTitle").mapToItem(C(), 0, 0).y)
       h.eq("stops", kinds(), "switch,preview,fps,tabs,camera0,camera1,camera2,next,suggestion0,recommended,recommended-changes,reset,group0,"
-           + "setting0,setting1,setting2,setting3,setting4,group1,group2,group3")
+           + "setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
       h.eq("the Camera tab carries the caution sign", h.find(A(), "tab-camera").iconText, h.model.GLYPH_WARNING)
       h.eq("and says so", h.find(A(), "tab-camera").Accessible.name, "Camera, with a warning")
       h.eq("the other tabs do not", h.find(A(), "tab-effect").iconText + h.find(A(), "tab-mic").iconText + h.find(A(), "tab-status").iconText, "")
@@ -3481,6 +3639,37 @@ ShellRoot {
     h.step("health: nothing for another camera", function() {
       h.eq("no block", visible("healthBlock"), false)
       h.eq("no recommended settings", visible("recommendedBlock"), false)
+    })
+    // interface revision 26: the camera's status lines
+    h.step("health: a revision-26 daemon reports a closed shutter and a Show Mode line", function() {
+      var o = { shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"] }
+      h.feed([snapshotLine(rev20({ interface_revision: 26, camera_health: healthObj(o) }))])
+    }, function() { return S().record.interfaceRevision === 26 && S().record.health.status.length === 2 })
+    h.wait(250)
+    h.step("health: both status lines, the first strong, before the rate", function() {
+      var a = h.find(A(), "healthStatus-0"), b = h.find(A(), "healthStatus-1")
+      h.eq("first line, behind the caution sign", a.text, h.model.GLYPH_WARNING + " Shutter closed")
+      h.eq("second line", b.text, "Show Mode: desk view")
+      h.eq("first is bold", a.font.bold, true)
+      h.eq("second is not", b.font.bold, false)
+      h.check("first in the foreground colour", String(a.color) === String(C().foreground), String(a.color))
+      h.check("second muted", String(b.color) === String(C().dim), String(b.color))
+      h.eq("a strong line's accessible name is a warning", a.Accessible.name, "Warning: Shutter closed")
+      h.eq("a plain line's accessible name is its text", b.Accessible.name, "Show Mode: desk view")
+      h.eq("plain text", a.textFormat, Text.PlainText)
+      h.eq("no third", h.find(A(), "healthStatus-2"), null)
+      h.check("above the rate", a.mapToItem(C(), 0, 0).y < h.find(A(), "healthDelivers").mapToItem(C(), 0, 0).y)
+      h.eq("the status lines are no cursor stops", kinds(),
+           "switch,preview,fps,tabs,camera0,camera1,camera2,next,recommended,recommended-changes,reset,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
+    })
+    h.step("health: the same report at revision 25 shows no status line", function() {
+      var o = { shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"] }
+      h.feed([snapshotLine(rev20({ interface_revision: 25, camera_health: healthObj(o) }))])
+    }, function() { return S().record.interfaceRevision === 25 })
+    h.wait(250)
+    h.step("health: none drawn below revision 26", function() {
+      h.eq("no first line", h.find(A(), "healthStatus-0"), null)
+      h.eq("the rest of the health still drawn", visible("healthBlock"), true)
     })
     h.step("health: a daemon below revision 20 (null)", function() {
       h.feed([snapshotLine(rev20({ interface_revision: 19, camera_health: null }))])
