@@ -133,6 +133,14 @@
 # enables or greys the row `effect.privacy_mode` of config-show, as the
 # daemon does (reason: Turn on "Hide the camera when an effect can't run" to change this).
 #
+# The battery saver (interface revision 22): the harness's config-show has the
+# row `video.battery_saver` (an enum, its `notice` field "") and `video.memory`.
+# `config set -- video.memory VALUE` greys the saver's row with the reason
+# (Set video processing to automatic to use this) unless the value is auto, as
+# the daemon does; `config set -- video.battery_saver MODE` sets the row's
+# `notice` to the text of $FAKE_OB_DIR/battery-notice if that file exists (the
+# mode written during a camera session: Applies when the camera restarts).
+#
 # The camera's health (interface revision 20): the harness puts
 # `camera_health` in its snapshot lines and writes `camera_health` lines to
 # the feed itself. `recommended [--json]` prints $FAKE_OB_DIR/camera-health
@@ -445,6 +453,24 @@ set_config_enabled() {
   }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
 }
 
+# config-show with the "notice" of the row that starts {"id":"KEY","value":...
+# set to TEXT (plain text; quotes are escaped; "" for none), for a row that
+# has the field (interface revision 22).
+set_config_notice() {
+  awk -v key="$1" -v text="$2" 'BEGIN { gsub(/"/, "\\\"", text) }
+  {
+    head = "{\"id\":\"" key "\",\"value\":"
+    at = index($0, head)
+    if (at > 0) {
+      before = substr($0, 1, at - 1 + length(head))
+      rest = substr($0, at + length(head))
+      if (match(rest, /"notice":"([^"\\]|\\.)*"/))
+        $0 = before substr(rest, 1, RSTART - 1) "\"notice\":\"" text "\"" substr(rest, RSTART + RLENGTH)
+    }
+    print
+  }' "$dir/config-show" > "$dir/config-show.tmp" && mv -f -- "$dir/config-show.tmp" "$dir/config-show"
+}
+
 if [ "${1:-}" = "media" ]; then
   case "${2:-} ${3:-}" in
     "list background") [ $# -eq 4 ] && [ "$4" = "--json" ] && setup_read media-list ;;
@@ -525,6 +551,15 @@ case ${1:-} in
           if [ "$4" = effect.privacy ]; then
             if [ "$value" = true ]; then set_config_enabled effect.privacy_mode true ""
             else set_config_enabled effect.privacy_mode false "Turn on \"Hide the camera when an effect can't run\" to change this"; fi
+          fi
+          # the battery saver (interface revision 22) is greyed unless video.memory is auto
+          if [ "$4" = video.memory ]; then
+            if [ "$value" = '"auto"' ]; then set_config_enabled video.battery_saver true ""
+            else set_config_enabled video.battery_saver false "Set video processing to automatic to use this"; fi
+          fi
+          # a mode written in a camera session: the daemon's notice, the text of $FAKE_OB_DIR/battery-notice if it exists
+          if [ "$4" = video.battery_saver ] && [ -f "$dir/battery-notice" ]; then
+            set_config_notice video.battery_saver "$(cat "$dir/battery-notice")"
           fi
         fi
         setup_changed config_changed ;;

@@ -1217,7 +1217,8 @@ function previewUnsaved(current, stored) {
 
 // The layout entry to write for a user's change: { id, ...the settings as the
 // bar gave them, ...values }. Only previewEnabled (a boolean), previewFps
-// (15 or 30) and panelTab (a word of PANEL_TABS) may be written; anything
+// (15 or 30), panelTab (a word of PANEL_TABS) and batterySaverMode (a word of
+// BATTERY_SAVER_MODES) may be written; anything
 // else, or nothing to write, is null. The settings given are not modified.
 function settingsEntry(moduleName, settings, values) {
   if (typeof moduleName !== "string" || moduleName === "" || !isPlainObject(values)) return null
@@ -1242,6 +1243,11 @@ function settingsEntry(moduleName, settings, values) {
   if (values.panelTab !== undefined) {
     if (PANEL_TABS.indexOf(values.panelTab) < 0) return null
     entry.panelTab = values.panelTab
+    wrote = true
+  }
+  if (values.batterySaverMode !== undefined) {
+    if (BATTERY_SAVER_MODES.indexOf(values.batterySaverMode) < 0) return null
+    entry.batterySaverMode = values.batterySaverMode
     wrote = true
   }
   return wrote ? entry : null
@@ -3062,7 +3068,9 @@ function recommendedArgv(cli, record, intent) {
 //   effect  the background effect's choices (one stop for the row;
 //           Left/Right walk its choices, as in the shell's button groups),
 //           the Background row while backgroundRowShown (one stop;
-//           Left/Right walk Gallery... and Add...), then the rows of `effectSettings` (effectSettingsView: the
+//           Left/Right walk Gallery... and Add...), the Away image button,
+//           the Battery saver switch while `batterySaver` (batterySaverView)
+//           is visible, then the rows of `effectSettings` (effectSettingsView: the
 //           daemon's other global settings, drawn generically, no group
 //           header is a stop);
 //   camera  one per rendered camera row (`cameraCount` is the count the
@@ -3082,7 +3090,7 @@ function recommendedArgv(cli, record, intent) {
 // Nothing is a stop while the daemon is unavailable: no control is drawn. The
 // effect row is no stop either while it is not drawn (effectModeView: the
 // daemon predates module effects, or offers no background effect).
-function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings, health) {
+function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings, health, batterySaver) {
   if (!available(record)) return []
   var stops = [{ kind: "switch", index: -1 }]
   if (previewControls === true) {
@@ -3095,6 +3103,7 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
     if (effectModeShown(record)) stops.push({ kind: "effect", index: -1 })
     if (backgroundRowShown(record)) stops.push({ kind: "background", index: -1 })
     if (placeholderSupported(record)) stops.push({ kind: "away", index: -1 })
+    if (isPlainObject(batterySaver) && batterySaver.visible === true) stops.push({ kind: "battery", index: -1 })
     if (effectSettingsShown(effectSettings)) {
       // The generic rows' stops number from 0 in this tab's view, as the
       // camera's do in theirs (the two are never shown together).
@@ -3294,6 +3303,7 @@ var CONFIG_KEY_CAP = 128
 var CONFIG_DESCRIPTION_CAP = 160
 var CONFIG_VALUE_CAP = 160
 var CONFIG_REASON_CAP = 160
+var CONFIG_NOTICE_CAP = 160
 var CONFIG_FILE_CAP = 96
 var CONFIG_DIR_CAP = 256
 // The payload a summon carries: a view and a config key only.
@@ -3625,7 +3635,7 @@ function configOptions(value) {
 //   list         value an array of strings (display copies, at most
 //                CONFIG_LIST_CAP)
 // plus the fields every row has: label, description, editable, source,
-// overridden_by, apply, enabled and disabled_reason.
+// overridden_by, apply, enabled, disabled_reason and notice.
 function configEntry(s) {
   if (!isPlainObject(s)) return null
   var id = configKeyOf(s.id)
@@ -3640,6 +3650,10 @@ function configEntry(s) {
     editable: s.editable === true, source: fileText(s.source), overriddenBy: fileText(s.overridden_by),
     apply: CONFIG_APPLY.indexOf(s.apply) >= 0 ? s.apply : "live",
     enabled: enabled, reason: enabled ? "" : settingText(s.disabled_reason, CONFIG_REASON_CAP),
+    // What the daemon says about the row's state now, when it has something
+    // to ("Applies when the camera restarts"); "" for none (interface
+    // revision 22; a daemon below it never prints the field).
+    notice: settingText(s.notice, CONFIG_NOTICE_CAP),
     // A path row's raw value, kept only when it is a usable absolute path
     // (mediaPath): a thumbnail's source and a picker's --selected, never
     // shown. "" otherwise.
@@ -4157,9 +4171,10 @@ function configWidget(row, away) {
 }
 
 // A config row as drawn: { id, type, widget, label, description, value,
-// valueText, options, note, applyText, greyed, stop }. `note` is "Overridden
-// by <file>" for a row a later file sets, else the daemon's reason for a
-// greyed one; `applyText` says when a change takes effect (not for a live
+// valueText, options, note, notice, applyText, greyed, stop }. `note` is
+// "Overridden by <file>" for a row a later file sets, else the daemon's reason
+// for a greyed one; `notice` is what the daemon says about the row's state
+// now, "" for none; `applyText` says when a change takes effect (not for a live
 // one); `stop` is the keyboard stop of an interactive row, -1 for text.
 // `away` as for configWidget.
 function configRowView(row, stop, away) {
@@ -4172,6 +4187,7 @@ function configRowView(row, stop, away) {
     id: row.id, type: row.type, widget: widget, label: row.label, description: row.description, value: row.value,
     valueText: configValueText(row), options: options,
     note: overridden ? overriddenText(row.overriddenBy) : (row.enabled ? "" : row.reason),
+    notice: typeof row.notice === "string" ? row.notice : "",
     applyText: APPLY_TEXTS[row.apply] !== undefined && widget !== "text" ? APPLY_TEXTS[row.apply] : "",
     greyed: overridden || !row.enabled, stop: widget === "text" ? -1 : stop
   }
@@ -4231,6 +4247,92 @@ function configGroupsView(config, pick, away) {
     if (views.length > 0) groups.push({ id: picked[q].group.id, label: picked[q].group.label, rows: views })
   }
   return { groups: groups, stops: stop }
+}
+
+// ---- battery saver (video.battery_saver, interface revision 22)
+
+// The daemon runs the video effects without the NVIDIA GPU, in system memory,
+// when the mode says so: `off` never, `on_battery` while the machine runs on
+// its battery, `power_profile` while the power profile is power-saver,
+// `always`. The setup dialog draws the mode as any enum; the panel has a
+// switch for it, which writes `off` or the last mode that was not `off`.
+var BATTERY_SAVER_REVISION = 22
+var BATTERY_SAVER_KEY = "video.battery_saver"
+var BATTERY_SAVER_OFF = "off"
+// The modes the switch turns on, and the first (the default): the words
+// of the daemon's enum other than `off`; the manifest's `batterySaverMode`
+// has the same options.
+var BATTERY_SAVER_MODES = ["on_battery", "power_profile", "always"]
+var BATTERY_SAVER_MODE_DEFAULT = "on_battery"
+var BATTERY_SAVER_LABEL = "Battery saver"
+var BATTERY_SAVER_NOW_MARK = "Now: "
+
+// The remembered mode, read back: a word of BATTERY_SAVER_MODES exactly,
+// else the default.
+function batterySaverModeValue(value) {
+  return typeof value === "string" && BATTERY_SAVER_MODES.indexOf(value) >= 0 ? value : BATTERY_SAVER_MODE_DEFAULT
+}
+
+// The panel's switch is offered by a daemon of BATTERY_SAVER_REVISION or
+// later (an unknown revision is not one).
+function batterySaverSupported(record) {
+  return available(record) && record.interfaceRevision >= BATTERY_SAVER_REVISION
+}
+
+// The reads the panel holds for the switch: only the configuration, and only
+// from a daemon that has the row.
+function panelReads(record) {
+  return batterySaverSupported(record) ? ["config"] : []
+}
+
+// The row of the read configuration, or null (not read yet, the read
+// failed, or the daemon does not publish it).
+function batterySaverRow(config) {
+  var row = findConfigRow(config, BATTERY_SAVER_KEY)
+  return row !== null && row.type === "enum" ? row : null
+}
+
+// The part of the daemon's description that says what is in force, from
+// "Now: " to its end ("Now: on battery, the camera runs without the NVIDIA
+// GPU"); "" when it has none.
+function batterySaverNow(description) {
+  if (typeof description !== "string") return ""
+  var at = description.lastIndexOf(BATTERY_SAVER_NOW_MARK)
+  return at >= 0 ? description.slice(at).trim() : ""
+}
+
+// The switch as drawn: { visible, on, enabled, reason, now, notice, mode }.
+// Visible only against a daemon of BATTERY_SAVER_REVISION or later that
+// published the row. `on`: the mode is not `off`. `enabled` and `reason`:
+// the daemon's (the row is greyed while video.memory is not automatic, and
+// its write refused). `mode`: the word a click writes: `off` while on, else
+// the remembered mode (`stored`, through batterySaverModeValue); null when
+// nothing can be written now (hidden, greyed, or the word is not one of the
+// daemon's options).
+function batterySaverView(record, config, stored) {
+  var out = { visible: false, on: false, enabled: false, reason: "", now: "", notice: "", mode: null }
+  if (!batterySaverSupported(record)) return out
+  var row = batterySaverRow(config)
+  if (row === null) return out
+  out.visible = true
+  out.on = row.value !== null && row.value !== BATTERY_SAVER_OFF
+  out.enabled = row.enabled && row.editable && row.overriddenBy === ""
+  out.reason = row.overriddenBy !== "" ? overriddenText(row.overriddenBy) : (row.enabled ? "" : row.reason)
+  out.now = batterySaverNow(row.description)
+  out.notice = row.notice
+  if (out.enabled) {
+    var word = out.on ? BATTERY_SAVER_OFF : batterySaverModeValue(stored)
+    if (configOptionIndex(row.options, word) >= 0) out.mode = word
+  }
+  return out
+}
+
+// The mode to remember when the switch turns the saver off: the row's mode
+// in force, when it is one the switch turns on, else null (nothing to
+// remember: the mode is off already, or unknown).
+function batterySaverMemory(config) {
+  var row = batterySaverRow(config)
+  return row !== null && BATTERY_SAVER_MODES.indexOf(row.value) >= 0 ? row.value : null
 }
 
 // The Backends section: { hint, groups, stops }: the modules group's profile

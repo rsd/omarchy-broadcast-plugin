@@ -82,6 +82,9 @@ Item {
   // so a widget re-injected with the same entry never undoes a choice the
   // shell could not store.
   property string storedTab: Model.PANEL_TAB_DEFAULT
+  // The Battery saver mode the settings hold (Model.batterySaverModeValue):
+  // what the switch turns on, the last mode that was not `off`.
+  property string storedBatteryMode: Model.BATTERY_SAVER_MODE_DEFAULT
   // A tab asked for this opening only (the bar's microphone glyph asks for
   // "mic"): shown without being stored; "" once the panel closes, which
   // brings back the tab shown before it (tabBeforeRequest) unless the user
@@ -96,8 +99,8 @@ Item {
   signal closeRequested()
   signal switchRequested(int direction)
   // A user's change of a panel preference: { previewEnabled },
-  // { previewFps } or { panelTab }. Only togglePreview, chooseFps and
-  // chooseTab emit it.
+  // { previewFps }, { panelTab } or { batterySaverMode }. Only togglePreview,
+  // chooseFps, chooseTab and toggleBatterySaver emit it.
   signal settingsRequested(var values)
   // The setup dialog, opened at the config row of key `focus`.
   signal setupRequested(string focus)
@@ -134,6 +137,18 @@ Item {
   // effect choice, which has a row of its own).
   readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)
   readonly property bool genericEffect: Model.effectSettingsShown(effectSettings)
+  // The Battery saver switch (interface revision 22), from the daemon's
+  // config row (the panel holds the configuration read while it is open,
+  // Daemon.holdConfig). `batteryMode` is the mode this session last turned
+  // off, which the switch turns on again; "" until one was, when the stored
+  // mode (storedBatteryMode) is the one.
+  property string batteryMode: ""
+  readonly property var batterySaver: Model.batterySaverView(record, Daemon.setup.config,
+    batteryMode !== "" ? batteryMode : storedBatteryMode)
+  // The switch was used since the panel opened: only then is the last
+  // setup write's failure shown under it.
+  property bool batteryWritten: false
+  readonly property real greyedOpacity: 0.45
   // The Mic tab: the microphone's own part, then its settings (the groups
   // of surface "mic"), drawn generically.
   readonly property var micView: Model.micView(record)
@@ -159,7 +174,7 @@ Item {
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
   // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health)
+  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health, batterySaver)
   property bool cursorActive: false
   property int cursorIndex: 0
   readonly property var currentStop: cursorActive && stops.length > 0
@@ -451,11 +466,36 @@ Item {
     return Daemon.setMicHost(!root.micView.hostOn)
   }
 
+  // The Battery saver switch: writes `off` while the saver is on, else the
+  // last mode that was not `off` (`config set -- video.battery_saver MODE`,
+  // through the daemon's setup writes). Turning it off first remembers the
+  // mode in force, for the next time it is turned on. Nothing while the row
+  // is greyed by the daemon or a write is running.
+  function toggleBatterySaver() {
+    var view = root.batterySaver
+    if (!root.available || !view.visible || view.mode === null) return false
+    var memory = view.on ? Model.batterySaverMemory(Daemon.setup.config) : null
+    if (!Daemon.setConfig(Model.BATTERY_SAVER_KEY, view.mode)) return false
+    root.batteryWritten = true
+    if (memory !== null) {
+      root.batteryMode = memory
+      if (memory !== root.storedBatteryMode) root.settingsRequested({ batterySaverMode: memory })
+    }
+    return true
+  }
+
+  // The panel reads the configuration while it is open, for the switch.
+  function syncConfigHold() {
+    if (root.opened) Daemon.holdConfig(root)
+    else Daemon.releaseConfig(root)
+  }
+
   function activateCursor() {
     var stop = currentStop
     if (!stop) return
     if (stop.kind === "switch") toggleSwitch()
     else if (stop.kind === "mic-host") toggleMic()
+    else if (stop.kind === "battery") toggleBatterySaver()
     else if (stop.kind === "preview") togglePreview()
     else if (stop.kind === "fps") chooseFps(fpsCursor)
     else if (stop.kind === "tabs") chooseTab(tabCursor)
@@ -515,15 +555,20 @@ Item {
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "background") scrollItemIntoView(backgroundLine)
     else if (stop.kind === "away") scrollItemIntoView(awayLine)
+    else if (stop.kind === "battery") scrollItemIntoView(batteryBlock)
     else if (stop.kind === "mic-host") scrollItemIntoView(micHostLine)
     else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
     else scrollItemIntoView(nextButton)
   }
 
-  onOpenedChanged: if (opened) {
-    cursorActive = false
-    cursorIndex = 0
-    flick.contentY = 0
+  onOpenedChanged: {
+    syncConfigHold()
+    batteryWritten = false
+    if (opened) {
+      cursorActive = false
+      cursorIndex = 0
+      flick.contentY = 0
+    }
   }
   onStopsChanged: if (cursorIndex >= stops.length) cursorIndex = Math.max(0, stops.length - 1)
   onStoredTabChanged: showTab(storedTab)
@@ -537,7 +582,9 @@ Item {
       if (back !== "") showTab(back)
     }
   }
+  Component.onDestruction: Daemon.releaseConfig(root)
   Component.onCompleted: {
+    syncConfigHold()
     showTab(storedTab)
     if (requestedTab !== "") {
       tabBeforeRequest = tab
@@ -1228,6 +1275,114 @@ Item {
                 Accessible.description: Model.AWAY_BUTTON_TOOLTIP
                 onHovered: function(on) { if (on) root.setCursor("away", -1) }
                 onClicked: root.openAwayImage()
+              }
+            }
+
+            // ---- the Battery saver switch (interface revision 22): the
+            // daemon's `video.battery_saver`, on while its mode is not off.
+            // Under it what is in force now (the end of the daemon's
+            // description), why it is greyed, and the daemon's notice when
+            // the running camera does not match yet. The mode itself is
+            // chosen in the setup dialog.
+            Column {
+              id: batteryBlock
+              objectName: "batteryBlock"
+              width: parent.width
+              spacing: Style.space(2)
+              visible: root.batterySaver.visible
+
+              Item {
+                id: batteryLine
+                objectName: "batteryRow"
+                width: parent.width
+                implicitHeight: Math.max(batteryLabel.implicitHeight, batterySwitch.implicitHeight)
+                height: implicitHeight
+
+                Text {
+                  id: batteryLabel
+                  objectName: "batteryLabel"
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  anchors.right: batterySwitch.left
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  elide: Text.ElideRight
+                  text: Model.BATTERY_SAVER_LABEL
+                  color: root.batterySaver.enabled ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                ToggleSwitch {
+                  id: batterySwitch
+                  objectName: "batterySwitch"
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: root.batterySaver.enabled ? 1.0 : root.greyedOpacity
+                  interactive: root.batterySaver.enabled
+                  checked: root.batterySaver.on
+                  busy: Daemon.setupBusy
+                  hasCursor: root.hasCursor("battery", -1)
+                  foreground: root.foreground
+                  accent: root.accent
+                  onHovered: function(on) { if (on) root.setCursor("battery", -1) }
+                  onToggled: root.toggleBatterySaver()
+                  Accessible.role: Accessible.CheckBox
+                  Accessible.name: Model.BATTERY_SAVER_LABEL
+                  Accessible.description: root.batterySaver.reason !== "" ? root.batterySaver.reason : root.batterySaver.now
+                  Accessible.checkable: true
+                  Accessible.checked: root.batterySaver.on
+
+                  PanelToolTip {
+                    visible: batterySwitch.containsMouse
+                    text: root.batterySaver.reason !== "" ? root.batterySaver.reason
+                      : (root.batterySaver.on ? "Turn the battery saver off" : "Turn the battery saver on")
+                    fontFamily: root.fontFamily
+                  }
+                }
+              }
+              Text {
+                objectName: "batteryReason"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.batterySaver.reason
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                objectName: "batteryNow"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== "" && root.batterySaver.enabled
+                text: root.batterySaver.now
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                objectName: "batteryNotice"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.batterySaver.notice
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                objectName: "batteryError"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.batteryWritten ? Daemon.setupError : ""
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
             }
 

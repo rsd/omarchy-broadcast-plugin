@@ -3354,6 +3354,137 @@ TestCase {
                                                                     apply: "reload", options: options }, o || {})))
   }
 
+  // ---- battery saver (video.battery_saver, interface revision 22)
+
+  function batteryModes() {
+    return [{ value: "off", label: "Off" }, { value: "on_battery", label: "On battery" },
+            { value: "power_profile", label: "Follow the power profile" }, { value: "always", label: "Always" }]
+  }
+  function batteryRow(value, o) {
+    return cfgRow("video.battery_saver", "enum", merged({ label: "Battery saver", value: value, "default": "on_battery", apply: "reload",
+      options: batteryModes(), notice: "",
+      description: "Run the camera without the NVIDIA GPU to save power. Now: on battery, the camera runs without the NVIDIA GPU" }, o || {}))
+  }
+  function batteryConfig(value, o) {
+    return Model.readConfig(configLines([{ id: "video", label: "Video processing", settings: [
+      cfgRow("video.memory", "enum", { label: "Video processing", value: "auto", options: [{ value: "auto", label: "Automatic" }, { value: "host", label: "System memory" }] }),
+      batteryRow(value, o)] }]), 0, "")
+  }
+
+  function test_battery_saver_revision_gate() {
+    compare(Model.BATTERY_SAVER_REVISION, 22)
+    var rev = function(n) { return snap({ interface_revision: n }) }
+    var cfg = batteryConfig("on_battery")
+    compare(Model.batterySaverView(rev(21), cfg, "").visible, false, "below revision 22 the row is not offered, whatever the file holds")
+    compare(Model.batterySaverView(rev(22), cfg, "").visible, true)
+    compare(Model.batterySaverView(rev(23), cfg, "").visible, true)
+    compare(Model.batterySaverView(Model.withLink("not-running"), cfg, "").visible, false)
+    compare(Model.batterySaverView(rev(22), null, "").visible, false, "the configuration is not read yet")
+    compare(Model.batterySaverView(rev(22), Model.readFailed("x"), "").visible, false, "or its read failed")
+    var without = Model.readConfig(configLines(cfgGroups()), 0, "")
+    compare(Model.batterySaverView(rev(22), without, "").visible, false, "a daemon that does not publish the row")
+    var wrongType = Model.readConfig(configLines([{ id: "video", label: "V", settings: [cfgRow("video.battery_saver", "bool", { value: true })] }]), 0, "")
+    compare(Model.batterySaverView(rev(22), wrongType, "").visible, false, "only an enum")
+    compare(JSON.stringify(Model.panelReads(rev(22))), JSON.stringify(["config"]))
+    compare(JSON.stringify(Model.panelReads(rev(21))), "[]")
+    compare(JSON.stringify(Model.panelReads(Model.withLink("not-running"))), "[]")
+  }
+
+  function test_battery_saver_view_and_words() {
+    var r = snap({ interface_revision: 22 })
+    var on = Model.batterySaverView(r, batteryConfig("on_battery"), "")
+    compare(on.on, true)
+    compare(on.enabled, true)
+    compare(on.mode, "off", "turning it off writes off")
+    compare(on.now, "Now: on battery, the camera runs without the NVIDIA GPU")
+    compare(on.notice, "")
+    compare(on.reason, "")
+    var off = Model.batterySaverView(r, batteryConfig("off"), "")
+    compare(off.on, false)
+    compare(off.mode, "on_battery", "nothing remembered: the default")
+    compare(Model.batterySaverView(r, batteryConfig("off"), "power_profile").mode, "power_profile", "the last mode")
+    compare(Model.batterySaverView(r, batteryConfig("off"), "always").mode, "always")
+    compare(Model.batterySaverView(r, batteryConfig("off"), "off").mode, "on_battery", "off is never what it turns on")
+    compare(Model.batterySaverView(r, batteryConfig("off"), "--flag").mode, "on_battery", "only a word of the modes")
+    compare(Model.batterySaverView(r, batteryConfig("off"), 7).mode, "on_battery")
+    compare(Model.batterySaverView(r, batteryConfig("always"), "").on, true, "any mode but off is on")
+    compare(Model.batterySaverView(r, batteryConfig("power_profile"), "").mode, "off")
+    // a mode the daemon does not offer is not written
+    var fewer = Model.readConfig(configLines([{ id: "video", label: "V", settings: [
+      batteryRow("off", { options: [{ value: "off", label: "Off" }, { value: "always", label: "Always" }] })] }]), 0, "")
+    compare(Model.batterySaverView(r, fewer, "power_profile").mode, null, "the remembered mode is not one of its options")
+    compare(Model.batterySaverView(r, fewer, "always").mode, "always")
+    // memory: what a turn off remembers
+    compare(Model.batterySaverMemory(batteryConfig("power_profile")), "power_profile")
+    compare(Model.batterySaverMemory(batteryConfig("off")), null)
+    compare(Model.batterySaverMemory(null), null)
+    compare(Model.batterySaverModeValue("always"), "always")
+    compare(Model.batterySaverModeValue("off"), "on_battery", "off is not a mode to remember")
+    compare(Model.batterySaverModeValue("Always"), "on_battery")
+    compare(Model.batterySaverModeValue(undefined), "on_battery")
+    compare(Model.batterySaverModeValue(["always"]), "on_battery")
+    // the write goes through the one config path, as the row's own word
+    compare(Model.configWord(Model.batterySaverRow(batteryConfig("off")), "power_profile"), "power_profile")
+    compare(Model.configWord(Model.batterySaverRow(batteryConfig("off")), "sometimes"), null)
+  }
+
+  function test_battery_saver_greyed_and_notice() {
+    var r = snap({ interface_revision: 22 })
+    var grey = Model.batterySaverView(r, batteryConfig("on_battery", { enabled: false, disabled_reason: "Set video processing to automatic to use this" }), "")
+    compare(grey.visible, true)
+    compare(grey.enabled, false)
+    compare(grey.reason, "Set video processing to automatic to use this")
+    compare(grey.mode, null, "greyed: nothing to write")
+    compare(grey.on, true, "its value is still shown")
+    compare(Model.batterySaverView(r, batteryConfig("off", { editable: false }), "").mode, null, "a row the daemon takes no write for")
+    var over = Model.batterySaverView(r, batteryConfig("off", { overridden_by: "config.d/90-local.toml", enabled: false,
+                                                                 disabled_reason: "Overridden by config.d/90-local.toml" }), "")
+    compare(over.enabled, false)
+    compare(over.reason, "Overridden by config.d/90-local.toml")
+    var note = Model.batterySaverView(r, batteryConfig("on_battery", { notice: "Applies when the camera restarts" }), "")
+    compare(note.notice, "Applies when the camera restarts")
+    compare(note.enabled, true, "a notice does not grey the row")
+    compare(Model.batterySaverView(r, batteryConfig("on_battery", { notice: "<b>x</b>\nz" }), "").notice.indexOf("<"), -1, "sanitised")
+    // the description's Now: part
+    compare(Model.batterySaverNow("Saves power. Now: always, whatever the power source"), "Now: always, whatever the power source")
+    compare(Model.batterySaverNow("Saves power."), "")
+    compare(Model.batterySaverNow(undefined), "")
+    // the keyboard stop, on the Effect tab only
+    var v = Model.batterySaverView(r, batteryConfig("on_battery"), "")
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", null, null, null, null, v)).indexOf("battery") >= 0, true)
+    compare(kindsOf(Model.cursorStops(r, 1, false, "camera", null, null, null, null, v)).indexOf("battery"), -1)
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect")).indexOf("battery"), -1, "no view: no stop")
+    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", null, null, null, null, Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), ""))).indexOf("battery"), -1)
+  }
+
+  function test_config_notice_in_rows() {
+    var c = Model.readConfig(configLines([{ id: "video", label: "Video", settings: [
+      batteryRow("off", { notice: "Applies when the camera restarts" }),
+      cfgRow("video.x", "bool", { value: true })] }]), 0, "")
+    var notice = Model.configRowView(Model.findConfigRow(c, "video.battery_saver"), 0).notice
+    compare(notice, "Applies when the camera restarts", "every row view carries it")
+    compare(Model.configRowView(Model.findConfigRow(c, "video.x"), 1).notice, "", "a row without one: empty")
+    compare(Model.findConfigRow(c, "video.x").notice, "", "an older daemon prints none")
+    var long = ""
+    while (long.length < 400) long += "ab "
+    var cut = Model.configEntry(cfgRow("video.y", "bool", { value: true, notice: long }))
+    verify(cut.notice.length <= Model.CONFIG_NOTICE_CAP, "bounded")
+    compare(Model.configEntry(cfgRow("video.y", "bool", { value: true, notice: 7 })).notice, "", "a non-string reads as none")
+    // greyed rows keep their note, and the notice is separate from it
+    var g = Model.configRowView(Model.configEntry(cfgRow("video.z", "bool", { value: true, enabled: false, disabled_reason: "why", notice: "n" })), 0)
+    compare(g.note + "|" + g.notice, "why|n")
+  }
+
+  function test_battery_saver_setting_is_written_as_a_mode() {
+    var e = Model.settingsEntry("m", { cliPath: "/x" }, { batterySaverMode: "power_profile" })
+    compare(JSON.stringify(e), JSON.stringify({ id: "m", cliPath: "/x", batterySaverMode: "power_profile" }))
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: "off" }), null, "off is not a mode to remember")
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: "x; rm" }), null)
+    compare(Model.settingsEntry("m", {}, { batterySaverMode: 1 }), null)
+    compare(JSON.stringify(Model.settingsEntry("m", { previewFps: 30 }, { panelTab: "mic", batterySaverMode: "always" })),
+            JSON.stringify({ id: "m", previewFps: 30, panelTab: "mic", batterySaverMode: "always" }))
+  }
+
   function test_config_enum_dropdown_for_many_or_long_choices() {
     // many choices: a dropdown, as the panel draws a long setting
     var mode = modeRow(outputModeOptions(16))

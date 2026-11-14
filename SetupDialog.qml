@@ -1098,6 +1098,7 @@ Item {
                             : (row.widget === "away" ? Accessible.Grouping : Accessible.StaticText)))
                       Accessible.name: row.label
                       Accessible.description: row.valueText + (row.note !== "" ? ". " + row.note : "")
+                        + (row.notice !== "" ? ". " + row.notice : "")
                         + (row.description !== "" ? ". " + row.description : "")
                       Accessible.checkable: row.widget === "switch"
                       Accessible.checked: row.widget === "switch" && row.value === true
@@ -1388,7 +1389,10 @@ Item {
 
                         Note { text: configRow.row.description; font.pixelSize: Style.font.caption }
                         Note { objectName: "configNote-" + configRow.row.id; text: configRow.row.note }
-                        Note { text: configRow.row.applyText; font.pixelSize: Style.font.caption }
+                        // What the daemon says about the row now, when it has
+                        // something to (revision 22): as a note, not an error.
+                        Note { objectName: "configNotice-" + configRow.row.id; text: configRow.row.notice }
+                        Note { text: configRow.row.notice !== "" ? "" : configRow.row.applyText; font.pixelSize: Style.font.caption }
                       }
                     }
                   }
