@@ -39,9 +39,10 @@ BarWidget {
   // The panel tab the settings hold, validated (anything else reads as the
   // default); the panel follows it when it changes.
   readonly property string storedTab: Model.panelTabValue(Model.settingValue(settings, "panelTab"))
-  // The Battery saver mode the panel's switch turns on, validated (anything
-  // else reads as the default).
-  readonly property string storedBatteryMode: Model.batterySaverModeValue(Model.settingValue(settings, "batterySaverMode"))
+  // The Battery saver mode the panel's switch turns on, validated against
+  // the daemon (`auto`, or nothing stored, reads as auto only from a daemon
+  // that knows it; anything else unknown reads as on_battery).
+  readonly property string storedBatteryMode: Model.batterySaverModeValue(Model.settingValue(settings, "batterySaverMode"), record)
   readonly property color urgentColor: bar ? bar.urgent : Commons.Color.urgent
   // The microphone indicator (Model.micIndicator): shown while apps record.
   readonly property var micIndicator: Model.micIndicator(record)
