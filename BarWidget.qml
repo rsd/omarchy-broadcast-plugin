@@ -34,7 +34,7 @@ BarWidget {
   moduleName: "br.com.dias.omarchy-broadcast"
 
   readonly property var record: Daemon.record
-  readonly property var visual: Model.visualFor(Model.visualKey(record))
+  readonly property var visual: Model.barVisual(record)
   readonly property var cliSetting: Model.settingValue(settings, "cliPath")
   // The panel tab the settings hold, validated (anything else reads as the
   // default); the panel follows it when it changes.

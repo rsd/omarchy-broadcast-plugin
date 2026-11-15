@@ -3662,6 +3662,41 @@ ShellRoot {
       h.eq("the status lines are no cursor stops", kinds(),
            "switch,preview,fps,tabs,camera0,camera1,camera2,next,recommended,recommended-changes,reset,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
     })
+    // a closed shutter while a session runs: the tab chip and the bar say so
+    h.step("health: a session runs with the shutter closed", function() {
+      var o = { shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"] }
+      h.feed([snapshotLine(rev20({ state: "active", consumers: 1, interface_revision: 26, camera_health: healthObj(o) }))])
+    }, function() { return S().record.state === "active" && S().record.health.shutter === "closed" })
+    h.wait(250)
+    h.step("health: the Camera tab and the bar show the closed shutter", function() {
+      h.eq("the Camera tab carries the caution sign", h.find(A(), "tab-camera").iconText, h.model.GLYPH_WARNING)
+      h.eq("and names the shutter and the warning", h.find(A(), "tab-camera").Accessible.name, "Camera, shutter closed, with a warning")
+      h.eq("the bar glyph is video-off", A().iconButton.text, h.model.GLYPH_VIDEO_OFF)
+      h.check("the tooltip says so", A().iconButton.tooltipText.indexOf("camera shutter closed") >= 0, A().iconButton.tooltipText)
+      h.check("the accessible name says so", A().iconButton.Accessible.name.indexOf("camera shutter closed") >= 0)
+    })
+    h.step("health: the shutter opens", function() {
+      var o = { shutter: "open", show_mode: "desk_view", status: ["Show Mode: desk view"], warnings: [] }
+      h.feed([snapshotLine(rev20({ state: "active", consumers: 1, interface_revision: 26, camera_health: healthObj(o) }))])
+    }, function() { return S().record.health.shutter === "open" })
+    h.wait(250)
+    h.step("health: the tab and the bar clear", function() {
+      h.eq("no caution sign", h.find(A(), "tab-camera").iconText, "")
+      h.eq("plain name", h.find(A(), "tab-camera").Accessible.name, "Camera")
+      h.eq("the filled video glyph", A().iconButton.text, h.model.GLYPH_VIDEO)
+      h.check("no phrase", A().iconButton.tooltipText.indexOf("shutter") < 0, A().iconButton.tooltipText)
+    })
+    h.step("health: closed again, then no session runs", function() {
+      var o = { shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"], warnings: [] }
+      h.feed([snapshotLine(rev20({ state: "idle", consumers: 0, interface_revision: 26, camera_health: healthObj(o) }))])
+    }, function() { return S().record.state === "idle" && S().record.health.shutter === "closed" })
+    h.wait(250)
+    h.step("health: idle shows neither", function() {
+      h.eq("no caution sign", h.find(A(), "tab-camera").iconText, "")
+      h.eq("plain name", h.find(A(), "tab-camera").Accessible.name, "Camera")
+      h.eq("the idle glyph", A().iconButton.text, h.model.GLYPH_WEBCAM)
+      h.check("no phrase", A().iconButton.tooltipText.indexOf("shutter") < 0, A().iconButton.tooltipText)
+    })
     h.step("health: the same report at revision 25 shows no status line", function() {
       var o = { shutter: "closed", show_mode: "desk_view", status: ["Shutter closed", "Show Mode: desk view"] }
       h.feed([snapshotLine(rev20({ interface_revision: 25, camera_health: healthObj(o) }))])

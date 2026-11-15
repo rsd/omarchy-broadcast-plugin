@@ -105,6 +105,7 @@ var GLYPH_WEBCAM = String.fromCodePoint(0xF05A0)
 var GLYPH_WEBCAM_OFF = String.fromCodePoint(0xF1737)
 var GLYPH_VIDEO = String.fromCodePoint(0xF0567)
 var GLYPH_VIDEO_OUTLINE = String.fromCodePoint(0xF0BDC)
+var GLYPH_VIDEO_OFF = String.fromCodePoint(0xF0568) // mdi-video-off, filled: a closed camera shutter on the bar
 var GLYPH_VIDEO_OFF_OUTLINE = String.fromCodePoint(0xF0BDB)
 var GLYPH_ALERT = String.fromCodePoint(0xF0028)
 var GLYPH_WARNING = String.fromCodePoint(0xF002A) // mdi-alert-outline
@@ -612,6 +613,15 @@ function visualFor(key) {
   }
 }
 
+// The bar's visual: visualFor(visualKey(record)), except that while the
+// camera's privacy shutter is closed (shutterClosed) the glyph is the filled
+// video-off one. The key, colour role and dimming stay the state's own.
+function barVisual(record) {
+  var v = visualFor(visualKey(record))
+  if (shutterClosed(record)) v.glyph = GLYPH_VIDEO_OFF
+  return v
+}
+
 var VISUAL_KEYS = ["off", "idle", "starting", "active", "error", "unavailable"]
 
 // ---------------------------------------------------------------- text
@@ -665,6 +675,7 @@ function tooltipText(record) {
     var parts = [prefix + record.state]
     parts.push(camera !== "" ? camera : "no camera")
     if (record.consumers >= 0) parts.push(consumersText(record.consumers))
+    if (shutterClosed(record)) parts.push("camera shutter closed")
     var effect = effectSummary(record)
     if (effect !== "") parts.push(effect)
     if (record.error !== "") parts.push("error: " + sanitize(record.error, 60))
@@ -2605,17 +2616,22 @@ function panelTabValue(value) {
 // constants only. `health` (healthView): while the active camera's health
 // has warnings, the Camera tab carries the caution sign (`glyph`) and says
 // so in its accessible `name`, so it shows from another tab; the warnings
-// themselves are only in the Camera tab.
+// themselves are only in the Camera tab. A closed privacy shutter
+// (`health.shutterClosed`) raises the same sign and names itself in `name`;
+// with both a warning and a closed shutter the name says both.
 var PANEL_TAB_WARNING_NAME = "Camera, with a warning"
+var PANEL_TAB_SHUTTER_NAME = "Camera, shutter closed"
+var PANEL_TAB_SHUTTER_WARNING_NAME = "Camera, shutter closed, with a warning"
 function panelTabOptions(tab, health) {
   var current = panelTabValue(tab)
   var warned = isPlainObject(health) && Array.isArray(health.warnings) && health.warnings.length > 0
+  var shut = isPlainObject(health) && health.shutterClosed === true
   var out = []
   for (var i = 0; i < PANEL_TABS.length; i++) {
     var v = PANEL_TABS[i]
-    var flag = warned && v === "camera"
+    var flag = (warned || shut) && v === "camera"
     out.push({ value: v, label: PANEL_TAB_LABELS[v], description: PANEL_TAB_DESCRIPTIONS[v], selected: v === current,
-               glyph: flag ? GLYPH_WARNING : "", name: flag ? PANEL_TAB_WARNING_NAME : PANEL_TAB_LABELS[v] })
+               glyph: flag ? GLYPH_WARNING : "", name: flag ? (shut ? (warned ? PANEL_TAB_SHUTTER_WARNING_NAME : PANEL_TAB_SHUTTER_NAME) : PANEL_TAB_WARNING_NAME) : PANEL_TAB_LABELS[v] })
   }
   return out
 }
@@ -2995,6 +3011,16 @@ function shownHealth(record) {
   return h.camera !== "" && h.camera === record.activeCamera ? h : null
 }
 
+// True only while a session runs (state active or starting) on a daemon that
+// reports the shutter (revision >= HEALTH_STATUS_REVISION) and the active
+// camera's health says the privacy shutter is closed.
+function shutterClosed(record) {
+  if (!available(record) || record.interfaceRevision < HEALTH_STATUS_REVISION) return false
+  if (record.state !== "active" && record.state !== "starting") return false
+  var h = shownHealth(record)
+  return h !== null && h.shutter === "closed"
+}
+
 // A suggestion's value as a value of its row: a switch "on"/"true" or
 // "off"/"false", an option of the row, an integer on its grid; null when it
 // is none of these.
@@ -3037,7 +3063,7 @@ function suggestionAction(row, value) {
 // the line that opens and folds the recommended changes ("2 changes:
 // Sharpness, Anti-flicker"; "" while there are none).
 function healthView(record, open) {
-  var out = { visible: false, camera: "", delivers: "", status: [], warnings: [], suggestions: [], recommended: [], shownSuggestions: 0,
+  var out = { visible: false, shutterClosed: shutterClosed(record), camera: "", delivers: "", status: [], warnings: [], suggestions: [], recommended: [], shownSuggestions: 0,
               more: { visible: false, text: "", glyph: "" }, changes: { open: false, text: "", glyph: "" } }
   var h = shownHealth(record)
   if (!h) return out
