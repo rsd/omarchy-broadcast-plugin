@@ -5866,6 +5866,72 @@ TestCase {
     compare(Model.healthView(r, { camera: brioId, suggestions: "yes" }).shownSuggestions, 1)
   }
 
+  // A closed privacy shutter while a session runs (revision 26).
+  function shutterRecord(state, shutter, rev) {
+    var o = { interface_revision: rev === undefined ? 26 : rev, state: state, consumers: state === "active" || state === "starting" ? 1 : 0,
+              camera_health: healthObj({ shutter: shutter }) }
+    return snap(rev20(o))
+  }
+
+  function test_shutter_closed_gates() {
+    compare(Model.shutterClosed(shutterRecord("active", "closed")), true)
+    compare(Model.shutterClosed(shutterRecord("starting", "closed")), true)
+    compare(Model.shutterClosed(shutterRecord("active", "open")), false)
+    compare(Model.shutterClosed(shutterRecord("active", "")), false)
+    compare(Model.shutterClosed(shutterRecord("idle", "closed")), false)
+    compare(Model.shutterClosed(shutterRecord("off", "closed")), false)
+    compare(Model.shutterClosed(shutterRecord("error", "closed")), false)
+    compare(Model.shutterClosed(shutterRecord("active", "closed", 25)), false, "below revision 26")
+    compare(Model.shutterClosed(shutterRecord("active", "closed", 27)), true)
+    compare(Model.shutterClosed(Model.emptyRecord("connecting")), false, "unavailable")
+    compare(Model.shutterClosed(null), false)
+    var other = Model.reduce(shutterRecord("active", "closed"), line(healthLine({ camera: fhdId, shutter: "closed" }))).record
+    compare(Model.shutterClosed(other), false, "another camera's health")
+    compare(Model.healthView(shutterRecord("active", "closed")).shutterClosed, true)
+    compare(Model.healthView(shutterRecord("idle", "closed")).shutterClosed, false)
+    compare(Model.healthView(null).shutterClosed, false)
+  }
+
+  function test_shutter_closed_tab() {
+    var shut = Model.healthView(shutterRecord("active", "closed"))
+    var o = Model.panelTabOptions("effect", shut)
+    compare(JSON.stringify(o.map(function(x) { return x.glyph })), JSON.stringify(["", Model.GLYPH_WARNING, "", ""]))
+    compare(o[1].name, "Camera, shutter closed")
+    var both = Model.healthView(snap(rev20({ interface_revision: 26, state: "active", consumers: 1,
+                                             camera_health: healthObj({ shutter: "closed", warnings: ["Shared USB hub"] }) })))
+    compare(Model.panelTabOptions("effect", both)[1].name, "Camera, shutter closed, with a warning", "both are named")
+    compare(Model.panelTabOptions("effect", both)[1].glyph, Model.GLYPH_WARNING)
+    var warn = Model.healthView(snap(rev20({ interface_revision: 26, state: "active", consumers: 1,
+                                             camera_health: healthObj({ shutter: "open", warnings: ["Shared USB hub"] }) })))
+    compare(Model.panelTabOptions("effect", warn)[1].name, "Camera, with a warning")
+    var idle = Model.panelTabOptions("effect", Model.healthView(shutterRecord("idle", "closed")))
+    compare(idle[1].glyph, "")
+    compare(idle[1].name, "Camera")
+  }
+
+  function test_shutter_closed_bar_and_tooltip() {
+    var r = shutterRecord("active", "closed")
+    var v = Model.barVisual(r)
+    compare(v.glyph, Model.GLYPH_VIDEO_OFF)
+    compare(v.colorRole, "accent")
+    compare(v.dimmed, false)
+    compare(v.key, "active")
+    verify(Model.GLYPH_VIDEO_OFF !== Model.GLYPH_VIDEO_OFF_OUTLINE && Model.GLYPH_VIDEO_OFF !== Model.GLYPH_WEBCAM_OFF)
+    compare(Model.barVisual(shutterRecord("starting", "closed")).glyph, Model.GLYPH_VIDEO_OFF)
+    compare(Model.barVisual(shutterRecord("starting", "closed")).colorRole, "accent")
+    compare(Model.barVisual(shutterRecord("active", "open")).glyph, Model.GLYPH_VIDEO)
+    compare(Model.barVisual(shutterRecord("active", "closed", 25)).glyph, Model.GLYPH_VIDEO)
+    compare(Model.barVisual(shutterRecord("idle", "closed")).glyph, Model.GLYPH_WEBCAM)
+    compare(Model.barVisual(shutterRecord("off", "closed")).glyph, Model.GLYPH_WEBCAM_OFF)
+    compare(Model.barVisual(shutterRecord("error", "closed")).glyph, Model.GLYPH_ALERT)
+    compare(Model.barVisual(shutterRecord("error", "closed")).colorRole, "urgent")
+    compare(Model.barVisual(Model.emptyRecord("connecting")).glyph, Model.GLYPH_VIDEO_OFF_OUTLINE)
+    compare(Model.tooltipText(r), "Omarchy Broadcast: active \u00b7 Logitech MX Brio \u00b7 1 consumer \u00b7 camera shutter closed")
+    compare(Model.tooltipText(shutterRecord("active", "open")).indexOf("shutter"), -1)
+    compare(Model.tooltipText(shutterRecord("idle", "closed")).indexOf("shutter"), -1)
+    compare(Model.tooltipText(shutterRecord("active", "closed", 25)).indexOf("shutter"), -1)
+  }
+
   function test_panel_tab_warning() {
     var r = healthRecord({ camera_health: healthObj({ warnings: ["Shared USB hub"] }) })
     var o = Model.panelTabOptions("effect", Model.healthView(r))
