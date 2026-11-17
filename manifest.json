@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.36.0",
+  "version": "0.37.0",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
-  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, the background effect and the video effects' settings as the daemon's modules offer them, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom), a background gallery (pick a bundled background or add your own image), an away image shown when the camera is off or an effect cannot run, a live preview, live stream figures, the Omarchy Broadcast Mic (its noise and echo processing as the daemon's audio modules offer it, its input device, the default-microphone choice, and an indicator while apps record from it), and a setup dialog for the effect modules, their order and backends, the daemon's configuration, your backgrounds and diagnostics. Effects need omarchy-broadcastd 0.24.0, the configuration in the setup dialog 0.25.0, the microphone D-Bus API revision 13, the background gallery revision 15, the away image revision 17, the command that converts a video for system memory revision 19, the battery saver revision 22.",
+  "description": "Status and control of the omarchy-broadcastd virtual camera in the Omarchy bar: on/off, camera selection, the background effect and the video effects' settings as the daemon's modules offer them, the camera's own settings as the daemon publishes them (image, white balance, exposure, focus and zoom), a background gallery (pick a bundled background or add your own image), an away image shown when the camera is off or an effect cannot run, a live preview (beside the settings, or a one-line strip while hidden), a Details view with live stream figures and a Copy button, the Omarchy Broadcast Mic (its noise and echo processing as the daemon's audio modules offer it, its input device, the default-microphone choice, and an indicator while apps record from it), and a setup dialog for the effect modules, their order and backends, the daemon's configuration, your backgrounds and diagnostics. Effects need omarchy-broadcastd 0.24.0, the configuration in the setup dialog 0.25.0, the microphone D-Bus API revision 13, the background gallery revision 15, the away image revision 17, the command that converts a video for system memory revision 19, the battery saver revision 22.",
   "kinds": [
     "bar-widget",
     "overlay"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omarchy Broadcast",
-    "description": "Shows the virtual camera's state, and a microphone glyph while apps record from the Omarchy Broadcast Mic; left click opens the panel with the live preview, effects, cameras, the microphone and status, middle click turns the camera on or off, right click opens the setup dialog (modules, stage order, backends, daemon configuration, diagnostics).",
+    "description": "Shows the virtual camera's state, and a microphone glyph while apps record from the Omarchy Broadcast Mic; left click opens the panel with the live preview, effects, the camera and its settings, the microphone and a Details view, middle click turns the camera on or off, right click opens the setup dialog (modules, stage order, backends, daemon configuration, diagnostics).",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -26,7 +26,8 @@
       "previewEnabled": false,
       "previewFps": 15,
       "panelTab": "effect",
-      "batterySaverMode": "auto"
+      "batterySaverMode": "auto",
+      "narrowPanel": false
     },
     "schema": [
       {
@@ -39,9 +40,9 @@
       {
         "key": "previewEnabled",
         "type": "boolean",
-        "label": "Preview in the panel",
+        "label": "Show the preview",
         "defaultValue": false,
-        "description": "On: opening the panel starts the camera and shows what apps receive. Off: the panel shows the preview only while another app already uses the camera. Needs omarchy-broadcast 0.18 or newer."
+        "description": "Whether the panel shows the live preview; the panel's Show preview and Hide set it, and the next opening restores it. Shown: opening the panel starts the camera and shows what apps receive. Hidden (the default): a one-line strip, and the camera is not started. Needs omarchy-broadcast 0.18 or newer."
       },
       {
         "key": "previewFps",
@@ -51,15 +52,15 @@
         "max": 30,
         "step": 15,
         "defaultValue": 15,
-        "description": "15 or 30 frames per second; any other value reads as 15."
+        "description": "The preview's refresh rate (not the camera's), also chosen over the preview: 15 or 30 frames per second; any other value reads as 15."
       },
       {
         "key": "panelTab",
         "type": "enum",
         "label": "Panel tab",
-        "options": ["effect", "camera", "mic", "status"],
+        "options": ["effect", "camera", "mic"],
         "defaultValue": "effect",
-        "description": "The tab the panel shows under the preview; the panel remembers the last one chosen. Any other value reads as effect."
+        "description": "The tab the panel shows: effect (Effects), camera or mic; the panel remembers the last one chosen. Any other value (status, from an earlier version) reads as effect."
       },
       {
         "key": "batterySaverMode",
@@ -68,6 +69,13 @@
         "options": ["auto", "on_battery", "power_profile", "always"],
         "defaultValue": "auto",
         "description": "The mode the panel's Battery saver switch turns on, also chosen from the panel's Mode dropdown: auto (on battery or power saver), on_battery, power_profile (follow the power profile) or always. Any other value reads as on_battery. Needs omarchy-broadcastd with D-Bus revision 22; auto needs revision 23 and reads as on_battery below it."
+      },
+      {
+        "key": "narrowPanel",
+        "type": "boolean",
+        "label": "Narrow panel (one column)",
+        "defaultValue": false,
+        "description": "On: the panel is one column, 520 wide, with the live preview above the tabs (none on the Mic tab). Off (the default): while the preview is shown it sits beside the settings, 920 wide; hidden, the panel is the settings column alone."
       }
     ]
   }

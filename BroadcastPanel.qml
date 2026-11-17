@@ -6,73 +6,86 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// The popup's content, top to bottom: the header (state and switch), the
-// daemon's error or the last command's failure, the live preview in a fixed
-// 16:9 area with its switch and rate on one row under it, then four tabs:
-//   Effect  the background effect's choices as the daemon's settings schema
-//           offers them (the options of its mode setting; none named here),
-//           the background image it holds (from interface revision 15 the
-//           Background row: a thumbnail, the image's name, Gallery... and
-//           Add...; before it a read-only row), from revision 17 an Away
-//           image... button that opens the setup dialog at the away image's
-//           row, from revision 22 the Battery saver switch and under it
-//           its Mode dropdown (the mode the switch turns on), then the
-//           daemon's other global
-//           settings (strength, noise removal, ...) drawn generically, or
-//           the hint that replaces them (a daemon below revision 9);
-//   Camera  the camera list and Next camera, then from interface revision
-//           20 the active camera's health (the rate it really delivers when
-//           short of its mode's, the daemon's warnings about it, and effect
-//           suggestions, each with its button, the first shown and the
-//           rest behind a line that opens them), then the camera's settings
-//           as the daemon publishes them: Use recommended settings on its
-//           title's line and the changes it would make folded to one line
-//           that opens their list, when there are any, then SettingsView
-//           (groups that open and close, a widget per type, Reset to
-//           defaults), or the hint that replaces them;
-//   Mic     the Omarchy Broadcast Mic: its own switch (`mic on|off`), its
-//           state, the apps recording from it, the delay its processing
-//           adds, the modules it runs on and its error, then its settings
-//           as the daemon publishes them (the groups of surface "mic":
-//           processing, input device, the default-microphone actions, the
-//           audio modules' effects), drawn by the same renderer, or the
-//           hint that replaces it all (a daemon below revision 13);
-//   Status  state, camera, consumers (by kind where the daemon splits them),
-//           output mode, PipeWire output, the daemon's interface revision,
-//           and the live figures while active.
+// The popup's content. Two layouts (Model.panelLayout, chosen by the
+// widget's `narrowPanel` setting and whether the user shows the preview;
+// a failing preview says why inside the wide frame area, and the layout
+// stays):
+//
+//   wide    the header across the top; under it, on the left, the live
+//           preview (16:9, its controls drawn over the frame: Hide, a
+//           rule-of-thirds grid and the preview's refresh rate) and a short
+//           summary (camera, format, apps, microphone); on the right the
+//           tab row and the tab shown
+//   narrow  one column: the header (its state line under the title and the
+//           controls, across the column), the tab row, the preview under it
+//           (a one-line strip with Show preview, or its frame while it shows
+//           one; none on the Mic tab, so the tab row stays put) and the tab
+//           shown
+//
+// With the preview hidden the wide layout is the narrow one (the settings
+// column alone). The header, the alerts, the preview and the tab row stay
+// put; the tab's content (the body) is the one part that scrolls, once the
+// card reaches its cap (Model.PANEL_HEIGHT_CAP, or the screen).
+//
+// The header: the glyph, the product's name and its state in words
+// (Model.headerState: "Ready: starts when an app uses the camera"), the
+// labelled main switch ("Virtual camera") and an (i) that opens the Details
+// view in place of the tabs (state, camera, USB id, output, PipeWire, the
+// consumers, the daemon's revision and this plugin's version, with Copy).
+//
+// The tabs:
+//   Effects the background effect's choices as the daemon's settings schema
+//           offers them (the options of its mode setting; none named here)
+//           with what follows the choice under it (its strength under Blur;
+//           from interface revision 15 the Background row under Replace: a
+//           thumbnail, the image's name, Gallery... and Add...), then the
+//           daemon's other global settings drawn generically (one switch per
+//           effect, its dependents under it once it is on), the "Not
+//           available now (n)" line for what cannot run here, and "More":
+//           from revision 22 the Battery saver (its switch and the mode it
+//           turns on, one row) and from revision 17 the Away image row,
+//           whose Setup... opens the setup dialog there;
+//   Camera  the camera dropdown, then from interface revision 20 the active
+//           camera's health (the rate it really delivers when short of its
+//           mode's, the daemon's warnings about it, and effect suggestions,
+//           each with its button, the first shown and the rest behind a line
+//           that opens them), then the camera's settings as the daemon
+//           publishes them: Use recommended settings with the changes it
+//           would make folded to one line, then SettingsView (groups that
+//           open and close, a widget per type, the "Not available now"
+//           line, Reset to defaults as a quiet link at the bottom);
+//   Mic     the Omarchy Broadcast Mic: its own switch (`mic on|off`); while
+//           it is off one sentence saying what it is and nothing else; while
+//           it is on its state in one line, its error, then its settings as
+//           the daemon publishes them (the groups of surface "mic": the
+//           input device, the default-microphone switch, the audio modules'
+//           effects), drawn by the same renderer, or the hint that replaces
+//           it all (a daemon below revision 13).
 // Only the chosen tab is drawn. Everything shown comes out of Model.js
 // already sanitised, and every Text here is PlainText as well
 // (tests/check-source.py counts them).
 //
 // Nothing here changes state directly: a control runs a CLI command through
 // the Daemon singleton, and the result arrives on the watch stream. The
-// preview's two controls and the tab are preferences: they ask the widget to
-// write its layout entry (settingsRequested); the Preview singleton follows
-// the preview ones, and this panel holds its own tab. The preview shows what
-// apps receive: black while the camera is idle or an effect loads. Opening the
-// panel never starts the camera.
-//
-// The card is sized to its content (see BarWidget.qml); the panel's
-// Flickable only scrolls when the screen is too short for the part above the
-// camera settings. One settings group is open at a time, so the tab is never
-// taller than its tallest group; past the screen's room (`contentRoom`) the
-// groups scroll on their own, inside the Camera tab, under the settings'
-// title line that holds Reset to defaults (never scrolled away), so opening
-// a group never scrolls the whole panel.
+// preview's shown or hidden state, its rate and the tab are preferences: they
+// ask the widget to write its layout entry (settingsRequested), so the next
+// opening restores them; the Preview singleton follows the preview ones, and
+// this panel holds its own tab. The preview shows what apps receive. Opening
+// the panel with the preview hidden never starts the camera.
 //
 // Keyboard, as in the shell's own panels (PanelKeyCatcher, CursorSurface):
 // the first arrow key shows the cursor on the on/off switch; Up/Down (or k/j)
-// then walk the switch, the Preview switch, the preview-rate row, the tab row
-// and the stops of the tab shown (Model.cursorStops); Left/Right (or h/l)
-// change the tab on the tab row, walk the preview-rate, effect and a
-// setting's choices and the Background row's two buttons (nothing is
-// written or run until Enter or Space), move a
-// slider, and open (Right) or close (Left) a settings group; 1 to 4 show
-// the Effect, Camera, Mic and Status tab from anywhere; Enter or Space activates
-// (a group header opens or closes, a choice is made, a dropdown opens its
-// list, a switch flips, an action runs); Escape closes; Tab moves to the
-// neighbouring panel. The mouse moves the same cursor, so only one highlight
-// is ever drawn.
+// then walk the switch, the (i), the preview's controls, the tab row and the
+// stops of the tab shown (Model.cursorStops); Left/Right (or h/l) change the
+// tab on the tab row, walk the preview rate, effect and a setting's choices
+// and the Background row's two buttons (nothing is written or run until
+// Enter or Space), move a slider, and open (Right) or close (Left) a
+// settings group; 1 to 3 show the Effects, Camera and Mic tab from
+// anywhere; Enter or Space activates (a group header, the "Not available
+// now" line and "More" open or close, a choice is made, a dropdown opens its
+// list, a switch flips, an action runs); Escape leaves the Details view,
+// else closes; Tab moves to the neighbouring panel. The mouse moves the same
+// cursor, so only one highlight is ever drawn.
 Item {
   id: root
 
@@ -88,6 +101,9 @@ Item {
   // what the switch turns on, the last mode that was not `off` or the last
   // one chosen in the Mode dropdown.
   property string storedBatteryMode: Model.BATTERY_SAVER_MODE_DEFAULT
+  // The widget's layout (Model.panelLayout over its `narrowPanel` setting
+  // and the preview): { wide, width }.
+  property var layout: ({ wide: false, width: Model.PANEL_NARROW_WIDTH })
   // A tab asked for this opening only (the bar's microphone glyph asks for
   // "mic"): shown without being stored; "" once the panel closes, which
   // brings back the tab shown before it (tabBeforeRequest) unless the user
@@ -95,9 +111,6 @@ Item {
   property string requestedTab: ""
   property string tabBeforeRequest: ""
   property bool ready: false
-  // The card's room for this content on the screen (the popup's available
-  // height less its padding); 0: unknown, no cap. Bounds the settings area.
-  property real contentRoom: 0
 
   signal closeRequested()
   signal switchRequested(int direction)
@@ -115,22 +128,28 @@ Item {
   readonly property var message: Model.unavailableMessage(record)
   // The last command failure; a path it ends on is drawn on a line of its own.
   readonly property var commandErrorParts: Model.commandErrorParts(Daemon.commandError)
-  readonly property var statsRows: Model.statsRows(record)
-  readonly property var statusRows: Model.statusRows(record)
-  readonly property var cameras: record.cameras
-  readonly property string heroMeta: Model.heroMeta(record)
+  readonly property string heroMeta: Model.headerState(record)
+  readonly property var cameraPicker: Model.cameraPickerView(record)
   readonly property string truncation: Model.truncationText(record)
   // The background effect's choice row, from the settings schema.
   readonly property var effectMode: Model.effectModeView(record, Daemon.settingDrafts)
   readonly property var effectRows: Model.effectRows(record)
-  // The Background row (interface revision 15): the image in force and the
-  // gallery's two actions, faded while their tool is not on PATH.
-  readonly property var backgroundRow: Model.backgroundRowView(record, Daemon.mediaTools, Daemon.mediaBusy, Daemon.backgroundMedia)
+  // The Background row (interface revision 15), drawn while Replace is the
+  // choice shown: the image in force and the gallery's two actions, faded
+  // while their tool is not on PATH.
+  readonly property var backgroundRow: Model.backgroundRowView(record, Daemon.mediaTools, Daemon.mediaBusy, Daemon.backgroundMedia, Daemon.settingDrafts)
   // The Away image row and its Setup... button (interface revision 17).
   readonly property bool awayShown: Model.placeholderSupported(record)
   readonly property var preview: Preview.placeholder
   readonly property bool previewControls: Model.previewControlsShown(record, Preview.pathReason)
   readonly property var fpsOptions: Model.fpsOptions(Preview.fps)
+  // Where the preview is drawn now (Model.previewStripView): its frame, a
+  // strip, or nothing.
+  readonly property var previewPlace: Model.previewStripView(preview, Preview.switchOn, previewControls, layout, tab)
+  readonly property var summaryRows: Model.previewSummaryRows(record)
+  // The rule-of-thirds grid over the frame: this panel's choice of the
+  // session (memory only).
+  property bool gridOn: false
   // The settings group open: this panel's choice of the session (memory
   // only): a group id, "" for none, null for the default (Model.openGroupId).
   property var settingsOpen: null
@@ -139,7 +158,6 @@ Item {
   // The Effect tab's generic rows: the daemon's global settings (all but the
   // effect choice, which has a row of its own).
   readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)
-  readonly property bool genericEffect: Model.effectSettingsShown(effectSettings)
   // The Battery saver switch (interface revision 22), from the daemon's
   // config row (the panel holds the configuration read while it is open,
   // Daemon.holdConfig), and its Mode dropdown. `batteryMode` is the mode
@@ -168,7 +186,20 @@ Item {
   // What the keyboard walks and the rows act on: the tab shown's section.
   readonly property var activeView: tab === "effect" ? effectSettings : (tab === "mic" ? micSettings : settingsView)
   readonly property SettingsView activeBlock: tab === "effect" ? effectSettingsBlock : (tab === "mic" ? micSettingsBlock : settingsBlock)
-  // A slider is held: the Flickables must not take the drag over.
+  // The "Not available now" line of the tab shown, open or folded: this
+  // panel's choice of the session (memory only), one per tab (tab -> true
+  // while open).
+  property var notAvailableOpen: ({})
+  readonly property var notAvailable: Model.notAvailableView(activeView, notAvailableOpen[tab] === true)
+  // "More" on the Effects tab (the battery saver and the away image), open
+  // or folded: memory only.
+  property bool moreOpen: false
+  readonly property bool moreShown: batterySaver.visible || awayShown
+  // The Details view, in place of the tabs.
+  property bool detailsOpen: false
+  readonly property var detailsRows: Model.detailsRows(record)
+  property bool copied: false
+  // A slider is held: the body must not take the drag over.
   property int slidersHeld: 0
 
   // ---- the tab shown ----------------------------------------------------------
@@ -177,10 +208,15 @@ Item {
   readonly property var tabOptions: Model.panelTabOptions(tab, health)
 
   // ---- the keyboard cursor (one list of stops; see Model.cursorStops) ------
-  // Built from the rendered row count, so the cursor and the rows agree.
-  readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health, batterySaver)
+  readonly property var stops: Model.cursorStops(record, {
+    details: detailsOpen, preview: previewPlace, previewControls: previewControls, wide: layout.wide, tab: tab, cameraCount: cameraPicker.options.length,
+    settings: settingsView, effectSettings: effectSettings, micSettings: micSettings, health: health, batterySaver: batterySaver,
+    backgroundRow: backgroundRow.visible, notAvailable: notAvailable, moreOpen: moreOpen })
   property bool cursorActive: false
   property int cursorIndex: 0
+  // The stops the cursor was last placed among: when they change, it stays
+  // on the same stop (Model.cursorAfter), not on whatever moved to its index.
+  property var stopsSeen: []
   readonly property var currentStop: cursorActive && stops.length > 0
     ? stops[Model.clampCursor(cursorIndex, stops.length)] : null
   // The effect choice under the cursor while the effect row holds it.
@@ -205,7 +241,17 @@ Item {
   readonly property color glyphColor: visual.colorRole === "urgent" ? urgent
     : (visual.colorRole === "accent" ? accent : foreground)
 
-  implicitHeight: column.implicitHeight
+  // ---- geometry ------------------------------------------------------------------
+  readonly property real gap: Style.space(12)
+  // The wide layout's columns: the settings on the right, as wide as the
+  // narrow layout's column; the preview takes the rest.
+  readonly property real rightWidth: layout.wide ? Math.round(contentColumn.width * 0.55) : contentColumn.width
+  readonly property real leftWidth: layout.wide ? Math.max(0, contentColumn.width - rightWidth - Style.space(16)) : 0
+  // The content's own height: the header, then the taller of the two
+  // columns (the right one: the pinned rows and the whole body).
+  readonly property real rightNeeded: rightPinned.implicitHeight + (rightPinned.implicitHeight > 0 ? gap : 0) + body.implicitHeight
+  readonly property real leftNeeded: layout.wide ? leftColumn.implicitHeight : 0
+  implicitHeight: topColumn.implicitHeight + gap + Math.max(leftNeeded, rightNeeded) + Style.space(2)
 
   function hasCursor(kind, index) {
     return currentStop !== null && currentStop.kind === kind
@@ -320,7 +366,7 @@ Item {
     var next = Model.panelTabValue(value)
     if (next === root.tab) return
     var inTab = root.currentStop !== null
-      && ["switch", "preview", "fps", "tabs"].indexOf(root.currentStop.kind) < 0
+      && ["switch", "info", "preview", "grid", "fps", "tabs"].indexOf(root.currentStop.kind) < 0
     root.tab = next
     root.tabCursor = Model.PANEL_TABS.indexOf(next)
     if (inTab) root.setCursor("tabs", -1)
@@ -404,7 +450,7 @@ Item {
       return !!option && option.value !== row.value && Daemon.commitSetting(row.id, option.value)
     }
     if (row.widget === "dropdown") return root.activeBlock.openChoices(stop)
-    if (row.widget === "switch") return Daemon.commitSetting(row.id, row.value !== true)
+    if (row.widget === "switch") return Daemon.commitSetting(row.id, Model.switchFlip(row))
     if (row.widget === "action") return Daemon.runSettingAction(row.id)
     return false
   }
@@ -418,7 +464,7 @@ Item {
     var onHeader = hasCursor("group", index)
     root.settingsOpen = Model.groupOpenAfter(root.settingsOpen, root.record.settings, group.id, open)
     if (onHeader) setCursor("group", index)
-    scrollItemIntoView(settingsBlock.groupItem(index), true)
+    scrollItemIntoView(settingsBlock.groupItem(index))
   }
 
   function toggleGroup(id) {
@@ -529,6 +575,13 @@ Item {
     var stop = currentStop
     if (!stop) return
     if (stop.kind === "switch") toggleSwitch()
+    else if (stop.kind === "info") toggleDetails()
+    else if (stop.kind === "details-back") toggleDetails()
+    else if (stop.kind === "details-copy") copyDetails()
+    else if (stop.kind === "grid") toggleGrid()
+    else if (stop.kind === "unavailable") toggleNotAvailable()
+    else if (stop.kind === "unavailable-setup") openSetupFor(stop.index)
+    else if (stop.kind === "more") toggleMore()
     else if (stop.kind === "mic-host") toggleMic()
     else if (stop.kind === "battery") toggleBatterySaver()
     else if (stop.kind === "battery-mode") openBatteryModes()
@@ -545,57 +598,124 @@ Item {
     else if (stop.kind === "recommended-changes") toggleHealthList("changes")
     else if (stop.kind === "group") setGroupOpen(stop.index, !(root.settingsView.groups[stop.index] || {}).expanded)
     else if (stop.kind === "setting") activateSetting(stop.index)
-    else if (stop.kind === "camera") {
-      var row = cameraRepeater.itemAt(stop.index)
-      if (row) row.choose()
-    } else if (stop.kind === "next") Daemon.nextCamera()
+    else if (stop.kind === "camera") openCameraList()
   }
 
-  // Only does anything when the screen is too short for the card (the
-  // Flickable then scrolls); at the normal size everything is in view. A
-  // settings row or header is first brought into view in the settings'
-  // own Flickable, then that area in the panel's.
-  function scrollItemIntoView(item, inner) {
+  // Only does anything once the card is at its cap (the body then
+  // scrolls): an item of the body is brought into its view. The header, the
+  // preview and the tab row never scroll.
+  function scrollItemIntoView(item) {
     if (!item) return
     Qt.callLater(function() {
-      if (!item) return
-      if (inner === true) scrollWithin(root.activeBlock.flick, item)
-      scrollWithin(flick, inner === true ? root.activeBlock.flick : item)
+      if (!item || !root.inBody(item)) return
+      var f = bodyFlick
+      var margin = Style.space(6)
+      var top = item.mapToItem(f.contentItem, 0, 0).y
+      var bottom = top + item.height
+      var maxY = Math.max(0, f.contentHeight - f.height)
+      if (top < f.contentY + margin) f.contentY = Math.max(0, top - margin)
+      else if (bottom > f.contentY + f.height - margin)
+        f.contentY = Math.min(maxY, bottom + margin - f.height)
     })
   }
 
-  function scrollWithin(f, item) {
-    var margin = Style.space(6)
-    var top = item.mapToItem(f.contentItem, 0, 0).y
-    var bottom = top + item.height
-    var maxY = Math.max(0, f.contentHeight - f.height)
-    if (top < f.contentY + margin) f.contentY = Math.max(0, top - margin)
-    else if (bottom > f.contentY + f.height - margin)
-      f.contentY = Math.min(maxY, bottom + margin - f.height)
+  function inBody(item) {
+    for (var p = item; p; p = p.parent) if (p === body) return true
+    return false
   }
 
   function scrollCursorIntoView() {
     var stop = currentStop
     if (!stop) return
-    if (stop.kind === "switch") flick.contentY = 0
-    else if (stop.kind === "preview") scrollItemIntoView(previewLine)
-    else if (stop.kind === "fps") scrollItemIntoView(fpsLine)
-    else if (stop.kind === "tabs") scrollItemIntoView(tabRow)
-    else if (stop.kind === "group") scrollItemIntoView(settingsBlock.groupItem(stop.index), true)
-    else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index), true)
+    if (stop.kind === "group") scrollItemIntoView(settingsBlock.groupItem(stop.index))
+    else if (stop.kind === "setting") scrollItemIntoView(root.activeBlock.rowItem(stop.index))
     else if (stop.kind === "reset") scrollItemIntoView(settingsBlock.resetItem)
+    else if (stop.kind === "unavailable") scrollItemIntoView(root.activeBlock.notAvailableItem)
+    else if (stop.kind === "unavailable-setup") scrollItemIntoView(root.activeBlock.setupItem(stop.index))
     else if (stop.kind === "suggestion") scrollItemIntoView(suggestionRepeater.itemAt(stop.index))
     else if (stop.kind === "recommended") scrollItemIntoView(recommendedButton)
     else if (stop.kind === "suggestions-more") scrollItemIntoView(suggestionsMore)
     else if (stop.kind === "recommended-changes") scrollItemIntoView(recommendedChangesLine)
     else if (stop.kind === "effect") scrollItemIntoView(effectChoices)
     else if (stop.kind === "background") scrollItemIntoView(backgroundLine)
+    else if (stop.kind === "more") scrollItemIntoView(moreLine)
     else if (stop.kind === "away") scrollItemIntoView(awayLine)
-    else if (stop.kind === "battery") scrollItemIntoView(batteryBlock)
-    else if (stop.kind === "battery-mode") scrollItemIntoView(batteryModeLine)
+    else if (stop.kind === "battery" || stop.kind === "battery-mode") scrollItemIntoView(batteryBlock)
     else if (stop.kind === "mic-host") scrollItemIntoView(micHostLine)
-    else if (stop.kind === "camera") scrollItemIntoView(cameraRepeater.itemAt(stop.index))
-    else scrollItemIntoView(nextButton)
+    else if (stop.kind === "camera") scrollItemIntoView(cameraLine)
+    else if (stop.kind === "details-copy" || stop.kind === "details-back") scrollItemIntoView(detailsHeader)
+    else if (stop.kind === "tabs" || stop.kind === "switch" || stop.kind === "info") bodyFlick.contentY = bodyFlick.contentY
+  }
+
+  // ---- the header's (i), the preview's grid, the disclosures ------------------
+
+  // The Details view in place of the tabs, or the tabs back. The cursor
+  // stays on the (i) (or comes to it from the view's Back).
+  function toggleDetails() {
+    if (!root.available && !root.detailsOpen) return false
+    root.detailsOpen = !root.detailsOpen
+    root.copied = false
+    if (root.cursorActive) root.setCursor("info", -1)
+    bodyFlick.contentY = 0
+    return true
+  }
+
+  // Copy: the Details rows as text (Model.detailsText) to the clipboard,
+  // through a read-only text edit, as the setup dialog copies a command.
+  function copyDetails() {
+    if (!root.detailsOpen) return false
+    detailsCopy.text = Model.detailsText(root.detailsRows)
+    detailsCopy.selectAll()
+    detailsCopy.copy()
+    detailsCopy.deselect()
+    root.copied = true
+    return true
+  }
+
+  function toggleGrid() {
+    if (root.previewPlace.mode !== "frame") return false
+    root.gridOn = !root.gridOn
+    return true
+  }
+
+  function toggleNotAvailable() {
+    if (!root.notAvailable.visible) return false
+    var next = {}
+    for (var k in root.notAvailableOpen) next[k] = root.notAvailableOpen[k]
+    next[root.tab] = !(next[root.tab] === true)
+    root.notAvailableOpen = next
+    return true
+  }
+
+  // An entry's Setup...: the setup dialog (the panel closes, as for the
+  // right click).
+  function openSetupFor(index) {
+    var entry = root.notAvailable.entries[index]
+    if (!root.available || !entry || !entry.setup) return false
+    root.setupRequested("")
+    return true
+  }
+
+  function toggleMore() {
+    if (!root.moreShown) return false
+    root.moreOpen = !root.moreOpen
+    return true
+  }
+
+  // A choice of the camera dropdown: the camera it names, when it can be
+  // chosen and is not the active one (Model.cameraChoice).
+  function chooseCamera(value) {
+    var id = Model.cameraChoice(root.record, value)
+    if (id === null || !root.available) return false
+    return Daemon.selectCamera(id)
+  }
+
+  // Enter or Space on the camera dropdown: its list opens and takes the
+  // keyboard; the key catcher gets it back on close.
+  function openCameraList() {
+    if (!root.available || !root.cameraPicker.visible) return false
+    cameraDropdown.open()
+    return true
   }
 
   onOpenedChanged: {
@@ -604,10 +724,15 @@ Item {
     if (opened) {
       cursorActive = false
       cursorIndex = 0
-      flick.contentY = 0
+      detailsOpen = false
+      copied = false
+      bodyFlick.contentY = 0
     }
   }
-  onStopsChanged: if (cursorIndex >= stops.length) cursorIndex = Math.max(0, stops.length - 1)
+  onStopsChanged: {
+    cursorIndex = Model.cursorAfter(stopsSeen, cursorIndex, stops)
+    stopsSeen = stops
+  }
   onStoredTabChanged: showTab(storedTab)
   onRequestedTabChanged: {
     if (requestedTab !== "") {
@@ -621,6 +746,7 @@ Item {
   }
   Component.onDestruction: Daemon.releaseConfig(root)
   Component.onCompleted: {
+    stopsSeen = stops
     syncConfigHold()
     showTab(storedTab)
     if (requestedTab !== "") {
@@ -675,409 +801,355 @@ Item {
       else root.moveCursorH(dx)
     }
     onActivateRequested: if (root.cursorActive) root.activateCursor()
-    onCloseRequested: root.closeRequested()
+    // Escape leaves the Details view first.
+    onCloseRequested: {
+      if (root.detailsOpen) root.toggleDetails()
+      else root.closeRequested()
+    }
     onTabRequested: function(direction) { root.switchRequested(direction) }
     // 1, 2, 3: a tab by its place in the row, as the shell's agents panel
     // jumps to an account by its number.
     onTextKey: function(t) {
       var n = Model.PANEL_TABS.length
-      if (t.length === 1 && t >= "1" && t <= String(n)) root.chooseTab(Number(t) - 1)
+      if (t.length === 1 && t >= "1" && t <= String(n) && !root.detailsOpen) root.chooseTab(Number(t) - 1)
     }
 
-    // The scroll fallback: at the normal size the card is as tall as the
-    // content and this never moves; on a screen too short for the card it
-    // scrolls, and only then.
-    Flickable {
-      id: flick
-      objectName: "panelFlick"
-      anchors.fill: parent
-      contentWidth: width
-      contentHeight: column.implicitHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      flickableDirection: Flickable.VerticalFlick
-      interactive: contentHeight > height + 0.5 && root.slidersHeld === 0
-      ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+    // ---- pinned on top: the header and the alerts
+    Column {
+      id: topColumn
+      objectName: "topColumn"
+      x: Style.space(2)
+      width: parent.width - Style.space(4)
+      spacing: Style.space(10)
 
-      // Inset from the clipped edges, so a row's border is never shaved.
-      Column {
-        id: column
-        x: Style.space(2)
-        width: flick.width - Style.space(4)
-        spacing: Style.space(12)
+      // ---- header: glyph, title, the state in words; the labelled main
+      // switch and the (i) on the right
+      // Narrow: the state line runs under the title and the controls,
+      // across the column (beside the controls it would wrap to an orphan
+      // word); wide: under the title.
+      Item {
+        id: hero
+        objectName: "hero"
+        readonly property bool stacked: !root.layout.wide
+        readonly property real topHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroControls.implicitHeight)
+        width: parent.width
+        implicitHeight: topHeight + (stacked && heroState.text !== "" ? Style.space(4) + heroState.implicitHeight : 0)
 
-        // ---- header: glyph, title, status line, switch
-        PanelHero {
-          id: hero
-          objectName: "hero"
-          width: parent.width
-          title: Model.PRODUCT
-          meta: root.heroMeta
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          iconOpacity: root.visual.dimmed ? 0.5 : 1.0
-          iconComponent: Component {
-            Text {
-              textFormat: Text.PlainText
-              text: root.visual.glyph
-              color: root.glyphColor
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.display
-            }
-          }
-          trailingControl: Component {
-            ToggleSwitch {
-              id: toggle
-              objectName: "enableSwitch"
-              visible: root.available
-              checked: root.record.enabled
-              busy: Daemon.toggleBusy
-              hasCursor: root.hasCursor("switch", -1)
-              foreground: root.foreground
-              accent: root.accent
-              onHovered: function(on) { if (on) root.setCursor("switch", -1) }
-              onToggled: root.toggleSwitch()
-              Accessible.role: Accessible.CheckBox
-              Accessible.name: "Camera"
-              Accessible.checkable: true
-              Accessible.checked: root.record.enabled
-
-              PanelToolTip {
-                visible: toggle.containsMouse
-                text: root.record.enabled ? "Turn the camera off" : "Turn the camera on"
-                fontFamily: root.fontFamily
-              }
-            }
-          }
+        Text {
+          id: heroIcon
+          textFormat: Text.PlainText
+          anchors.left: parent.left
+          y: Math.round((hero.topHeight - implicitHeight) / 2)
+          opacity: root.visual.dimmed ? 0.5 : 1.0
+          text: root.visual.glyph
+          color: root.glyphColor
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.display
         }
-
-        // ---- daemon unavailable
         Column {
-          objectName: "unavailableBlock"
-          width: parent.width
-          spacing: Style.space(6)
-          visible: !root.available
+          id: heroLabels
+          anchors.left: heroIcon.right
+          anchors.leftMargin: Style.space(14)
+          anchors.right: heroControls.left
+          anchors.rightMargin: Style.space(12)
+          y: Math.round((hero.topHeight - implicitHeight) / 2)
+          spacing: Style.space(2)
 
           Text {
-            objectName: "unavailableTitle"
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.Wrap
-            text: root.message.title
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-          // A file path the title ends on, on a line of its own. It wraps at
-          // any character, without preferring a "/": the break falls wherever
-          // the line is full, so the path reads as one string that ran on.
-          Text {
-            objectName: "unavailablePath"
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.WrapAnywhere
-            visible: text !== ""
-            text: root.message.path
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.Wrap
-            visible: text !== ""
-            text: root.message.detail
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-          Text {
-            objectName: "unavailableHint"
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.Wrap
-            visible: text !== ""
-            text: root.message.hint
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-          // Shown, never run: the plugin has no button that starts the daemon.
-          Text {
-            objectName: "unavailableCommand"
+            id: heroTitle
+            objectName: "heroTitle"
             textFormat: Text.PlainText
             width: parent.width
             elide: Text.ElideRight
-            visible: text !== ""
-            text: root.message.commandText
+            text: Model.PRODUCT
             color: root.foreground
             font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.title
+            font.bold: true
+          }
+          // Room for the state line while it sits under the title (wide).
+          Item {
+            width: 1
+            height: hero.stacked || heroState.text === "" ? 0 : heroState.implicitHeight
+            visible: height > 0
           }
         }
-
-        // ---- the daemon's error text, whatever the state
         Text {
-          objectName: "daemonError"
+          id: heroState
+          objectName: "heroState"
           textFormat: Text.PlainText
-          width: parent.width
+          x: heroLabels.x
+          y: hero.stacked ? hero.topHeight + Style.space(4) : heroLabels.y + heroTitle.height + heroLabels.spacing
+          width: hero.stacked ? hero.width - heroLabels.x : heroLabels.width
           wrapMode: Text.Wrap
-          visible: root.available && root.record.error !== ""
-          text: root.record.error
-          color: root.urgent
+          maximumLineCount: 2
+          elide: Text.ElideRight
+          text: root.heroMeta
+          color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
+        Row {
+          id: heroControls
+          anchors.right: parent.right
+          y: Math.round((hero.topHeight - implicitHeight) / 2)
+          spacing: Style.space(10)
 
-        // ---- the daemon's warning (it keeps streaming): the normal text
-        // colour behind a caution sign, never the urgent colour
+          Text {
+            objectName: "enableLabel"
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.available
+            text: Model.MAIN_SWITCH_LABEL
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+          ToggleSwitch {
+            id: toggle
+            objectName: "enableSwitch"
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.available
+            checked: root.record.enabled
+            busy: Daemon.toggleBusy
+            hasCursor: root.hasCursor("switch", -1)
+            foreground: root.foreground
+            accent: root.accent
+            onHovered: function(on) { if (on) root.setCursor("switch", -1) }
+            onToggled: root.toggleSwitch()
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: Model.MAIN_SWITCH_LABEL
+            Accessible.checkable: true
+            Accessible.checked: root.record.enabled
+
+            PanelToolTip {
+              visible: toggle.containsMouse
+              text: root.record.enabled ? "Turn the virtual camera off" : "Turn the virtual camera on"
+              fontFamily: root.fontFamily
+            }
+          }
+          // (i): the Details view (state, device, outputs, versions, Copy).
+          Button {
+            id: infoButton
+            objectName: "infoButton"
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.available
+            text: "i"
+            tooltipText: root.detailsOpen ? "Back to the settings" : "Details: state, device, outputs and versions"
+            selected: root.detailsOpen
+            bordered: true
+            hasCursor: root.hasCursor("info", -1)
+            foreground: root.foreground
+            background: Commons.Color.background
+            accent: root.accent
+            fontFamily: root.fontFamily
+            Accessible.role: Accessible.Button
+            Accessible.name: Model.DETAILS_TITLE
+            onHovered: function(on) { if (on) root.setCursor("info", -1) }
+            onClicked: root.toggleDetails()
+          }
+        }
+      }
+
+      // ---- daemon unavailable
+      Column {
+        objectName: "unavailableBlock"
+        width: parent.width
+        spacing: Style.space(6)
+        visible: !root.available
+
         Text {
-          objectName: "daemonWarning"
-          Accessible.role: Accessible.StaticText
-          Accessible.name: "Warning: " + root.record.warning
+          objectName: "unavailableTitle"
           textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.Wrap
-          visible: root.available && root.record.warning !== ""
-          text: Model.GLYPH_WARNING + " " + root.record.warning
+          text: root.message.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+        // A file path the title ends on, on a line of its own. It wraps at
+        // any character, without preferring a "/": the break falls wherever
+        // the line is full, so the path reads as one string that ran on.
+        Text {
+          objectName: "unavailablePath"
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.WrapAnywhere
+          visible: text !== ""
+          text: root.message.path
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          visible: text !== ""
+          text: root.message.detail
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        Text {
+          objectName: "unavailableHint"
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          visible: text !== ""
+          text: root.message.hint
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        // Shown, never run: the plugin has no button that starts the daemon.
+        Text {
+          objectName: "unavailableCommand"
+          textFormat: Text.PlainText
+          width: parent.width
+          elide: Text.ElideRight
+          visible: text !== ""
+          text: root.message.commandText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
+      }
 
-        // ---- the last control command's failure; its text and the path it
-        // may end on read as one message, so they sit close together
+      // ---- the daemon's error text, whatever the state
+      Text {
+        objectName: "daemonError"
+        textFormat: Text.PlainText
+        width: parent.width
+        wrapMode: Text.Wrap
+        visible: root.available && root.record.error !== ""
+        text: root.record.error
+        color: root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      // ---- the daemon's warning (it keeps streaming): the normal text
+      // colour behind a caution sign, never the urgent colour
+      Text {
+        objectName: "daemonWarning"
+        Accessible.role: Accessible.StaticText
+        Accessible.name: "Warning: " + root.record.warning
+        textFormat: Text.PlainText
+        width: parent.width
+        wrapMode: Text.Wrap
+        visible: root.available && root.record.warning !== ""
+        text: Model.GLYPH_WARNING + " " + root.record.warning
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      // ---- the last control command's failure; its text and the path it
+      // may end on read as one message, so they sit close together
+      Column {
+        objectName: "commandErrorBlock"
+        width: parent.width
+        spacing: Style.space(6)
+        visible: root.commandErrorParts.text !== ""
+
+        Text {
+          objectName: "commandError"
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          visible: text !== ""
+          text: root.commandErrorParts.text
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        // The path a CLI-missing failure ends on (same reasoning as above).
+        Text {
+          objectName: "commandErrorPath"
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.WrapAnywhere
+          visible: text !== ""
+          text: root.commandErrorParts.path
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+      }
+
+    }
+
+    // ---- under the header: the preview column (wide only) and the
+    // settings column
+    Item {
+      id: contentColumn
+      objectName: "contentColumn"
+      x: Style.space(2)
+      y: topColumn.y + topColumn.height + root.gap
+      width: parent.width - Style.space(4)
+      height: Math.max(0, parent.height - y)
+
+      // ---- wide: the preview and its summary, never scrolled
+      Column {
+        id: leftColumn
+        objectName: "previewColumn"
+        width: root.leftWidth
+        visible: root.layout.wide && root.available
+        spacing: Style.space(10)
+
+        // The frame goes here in the wide layout (see previewBlock).
+        Item {
+          id: wideSlot
+          width: parent.width
+          implicitHeight: previewBlock.parent === wideSlot ? previewBlock.implicitHeight : 0
+          height: implicitHeight
+        }
+
         Column {
-          objectName: "commandErrorBlock"
+          objectName: "previewSummary"
           width: parent.width
           spacing: Style.space(6)
-          visible: root.commandErrorParts.text !== ""
+          visible: root.summaryRows.length > 0
 
-          Text {
-            objectName: "commandError"
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.Wrap
-            visible: text !== ""
-            text: root.commandErrorParts.text
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-          // The path a CLI-missing failure ends on (same reasoning as above).
-          Text {
-            objectName: "commandErrorPath"
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.WrapAnywhere
-            visible: text !== ""
-            text: root.commandErrorParts.path
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
+          Repeater {
+            objectName: "previewSummaryRepeater"
+            model: root.summaryRows
+            delegate: InfoRow {
+              required property var modelData
+              label: modelData.label
+              value: modelData.value
+            }
           }
         }
+      }
 
-        // ---- live preview: what apps receive, fixed under the header (an
-        // error stays right under the on/off switch, above it). The 16:9
-        // area is always drawn while the daemon is available, so the card
-        // keeps its size whether a frame, the starting box or a note shows.
+      // ---- the settings column: the tab row, the narrow layout's preview
+      // under it (so the tabs never move from one tab to another: the Mic
+      // tab has no preview there), both pinned, then the body
+      Item {
+        id: rightColumn
+        objectName: "settingsColumn"
+        x: root.layout.wide ? root.leftWidth + Style.space(16) : 0
+        width: root.rightWidth
+        height: parent.height
+
         Column {
-          id: previewBlock
-          objectName: "previewBlock"
+          id: rightPinned
+          objectName: "rightPinned"
           width: parent.width
-          spacing: Style.space(8)
-          visible: root.preview.mode !== "hidden"
-
-          // 16:9, as the frames are (480x270). The theme's fill for a note
-          // and while the preview starts; black only behind a frame.
-          Rectangle {
-            id: previewFrame
-            objectName: "previewFrame"
-            width: parent.width
-            height: Math.round(width * 9 / 16)
-            color: root.preview.mode === "image" ? "black" : root.hoverFill
-            border.width: 1
-            border.color: root.faint
-            clip: true
-            Accessible.role: Accessible.Graphic
-            Accessible.name: root.preview.mode === "image" ? "Camera preview" : root.preview.text
-
-            // The source is built from the validated path only (see
-            // Model.previewSource); a new frame is a new URL, never cached.
-            // Loaded off the UI thread, and the last frame stays up while the
-            // next one loads, so a reload does not flash the black fill. Bound
-            // only while this panel is open: a closed panel (its content is
-            // kept once built) loads nothing while another one previews.
-            // Decoded at most at the frame size, whatever the file holds.
-            Image {
-              id: previewImage
-              objectName: "previewImage"
-              anchors.fill: parent
-              anchors.margins: 1
-              fillMode: Image.PreserveAspectCrop
-              cache: false
-              asynchronous: true
-              retainWhileLoading: true
-              sourceSize.width: 480
-              sourceSize.height: 270
-              visible: root.opened && root.preview.mode === "image"
-              source: root.opened && root.preview.mode === "image" ? Preview.frameSource : ""
-            }
-            // While the preview starts.
-            Text {
-              objectName: "previewPlaceholder"
-              textFormat: Text.PlainText
-              anchors.centerIn: parent
-              width: parent.width - Style.space(24)
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.Wrap
-              visible: root.preview.mode === "box"
-              text: root.preview.mode === "box" ? root.preview.text : ""
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-            // Wherever no frame is shown and none is starting: the preview
-            // cannot work here (a daemon before revision 5, an unusable
-            // XDG_RUNTIME_DIR), it ended with an error, or the camera is off
-            // or idle, or the preview is off.
-            Text {
-              objectName: "previewNote"
-              textFormat: Text.PlainText
-              anchors.centerIn: parent
-              width: parent.width - Style.space(24)
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.Wrap
-              visible: root.preview.mode === "note"
-              text: root.preview.mode === "note" ? root.preview.text : ""
-              color: root.preview.error ? root.urgent : root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-          }
-
-          // The Preview switch on the left, the rate on the right: one row.
-          Item {
-            objectName: "previewControls"
-            width: parent.width
-            visible: root.previewControls
-            implicitHeight: Math.max(previewLine.implicitHeight, fpsLine.implicitHeight)
-
-            Item {
-              id: previewLine
-              objectName: "previewRow"
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.previewControls
-              implicitWidth: previewLabel.implicitWidth + Style.space(10) + previewSwitch.implicitWidth
-              implicitHeight: Math.max(previewLabel.implicitHeight, previewSwitch.implicitHeight)
-              width: implicitWidth
-              height: implicitHeight
-
-              Text {
-                id: previewLabel
-                textFormat: Text.PlainText
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Preview"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-              ToggleSwitch {
-                id: previewSwitch
-                objectName: "previewToggle"
-                anchors.left: previewLabel.right
-                anchors.leftMargin: Style.space(10)
-                anchors.verticalCenter: parent.verticalCenter
-                checked: Preview.switchOn
-                hasCursor: root.hasCursor("preview", -1)
-                foreground: root.foreground
-                accent: root.accent
-                onHovered: function(on) { if (on) root.setCursor("preview", -1) }
-                onToggled: root.togglePreview()
-                Accessible.role: Accessible.CheckBox
-                Accessible.name: "Preview"
-                Accessible.description: "When on, opening the panel starts the camera for the preview"
-                Accessible.checkable: true
-                Accessible.checked: Preview.switchOn
-
-                // What the switch decides (R1): whether opening the panel
-                // starts the camera. Frames of a camera another app uses show
-                // either way.
-                PanelToolTip {
-                  visible: previewSwitch.containsMouse
-                  text: Preview.switchOn ? "Preview only while another app uses the camera"
-                    : "Start the camera for the preview whenever the panel opens"
-                  fontFamily: root.fontFamily
-                }
-              }
-            }
-
-            // The rate the preview asks for: one stop, Left/Right walk it. The
-            // shell's ButtonGroup, driven by the panel cursor (cursorIndex and
-            // hovered), never by Tab focus.
-            Item {
-              id: fpsLine
-              objectName: "fpsRow"
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.previewControls
-              implicitWidth: fpsChoices.implicitWidth
-              implicitHeight: fpsChoices.implicitHeight
-              width: implicitWidth
-              height: implicitHeight
-
-              ButtonGroup {
-                id: fpsChoices
-                objectName: "fpsChoices"
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                options: root.fpsOptions
-                value: String(Preview.fps)
-                focusable: false
-                cursorIndex: root.hasCursor("fps", -1) ? root.fpsCursor : -1
-                foreground: root.foreground
-                background: Commons.Color.background
-                accent: root.accent
-                fontFamily: root.fontFamily
-                onHovered: function(index, isHovered) { if (isHovered) root.setFpsCursor(index) }
-                onChanged: function(value) { root.chooseFps(Model.PREVIEW_FPS_CHOICES.indexOf(Number(value))) }
-              }
-            }
-          }
-
-          // A choice the shell did not store: it holds until the shell is
-          // restarted, and nothing else says so.
-          Text {
-            objectName: "previewUnsaved"
-            textFormat: Text.PlainText
-            width: parent.width
-            wrapMode: Text.Wrap
-            visible: root.previewControls && Preview.unsaved
-            text: Model.PREVIEW_UNSAVED_TEXT
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-        }
-
-        // ---- the tabs: a row of the shell's Buttons (the chips its
-        // ButtonGroup draws, as the effect row is), one stop for the panel
-        // cursor, then the tab shown. Only while the daemon is available.
-        Column {
-          id: tabBlock
-          objectName: "tabBlock"
-          width: parent.width
-          spacing: Style.space(12)
+          spacing: root.gap
           visible: root.available
 
+          // ---- the tabs: a row of the shell's Buttons (the chips its
+          // ButtonGroup draws, as the effect row is), one stop for the
+          // panel cursor. Not while the Details view is open.
           Row {
             id: tabRow
             objectName: "tabRow"
             width: parent.width
+            visible: !root.detailsOpen
             spacing: Style.spacing.md
             Accessible.role: Accessible.PageTabList
             Accessible.name: "Panel sections"
@@ -1118,821 +1190,465 @@ Item {
             }
           }
 
-          // ---- Effect: the background effect's choices, the image the
-          // daemon holds, then the other global settings
-          Column {
-            id: effectTab
-            objectName: "effectTab"
+          // The frame goes here in the narrow layout (see previewBlock).
+          Item {
+            id: narrowSlot
             width: parent.width
-            spacing: Style.space(10)
-            visible: root.tab === "effect"
-
-            Flow {
-              id: effectChoices
-              objectName: "effectChoices"
-              width: parent.width
-              spacing: Style.spacing.md
-              visible: root.effectMode.visible
-
-              Repeater {
-                id: effectRepeater
-                objectName: "effectRepeater"
-                model: root.effectMode.options
-                delegate: Button {
-                  id: effectChip
-                  required property var modelData
-                  required property int index
-                  objectName: "effectChoice-" + index
-                  text: modelData.label
-                  tooltipText: modelData.tooltip
-                  selected: modelData.selected
-                  // One highlight: the panel cursor, which the mouse moves too.
-                  hasCursor: root.hasCursor("effect", -1) && root.effectCursor === index
-                  bordered: true
-                  // Faded while the daemon greys the setting out; the
-                  // reason is the hint below.
-                  opacity: modelData.faded ? 0.45 : 1.0
-                  foreground: root.foreground
-                  // The fill the shell's ButtonGroup gives its chips.
-                  background: Commons.Color.background
-                  accent: root.accent
-                  fontFamily: root.fontFamily
-                  onHovered: function(on) { if (on) root.setEffectCursor(effectChip.index) }
-                  onClicked: root.chooseEffect(effectChip.index)
-                }
-              }
-            }
-
-            // ---- the Background row: the image in force (a 16:9
-            // thumbnail, decoded at twice its drawn size; a faint image
-            // glyph when there is none or it does not load) and its name,
-            // then Gallery... and Add...
-            Item {
-              id: backgroundLine
-              objectName: "backgroundLine"
-              width: parent.width
-              visible: root.backgroundRow.visible
-              implicitHeight: visible ? Math.max(backgroundThumb.height, backgroundButtons.implicitHeight, backgroundText.implicitHeight) : 0
-              height: implicitHeight
-
-              MediaThumbnail {
-                id: backgroundThumb
-                objectName: "background"
-                anchors.verticalCenter: parent.verticalCenter
-                name: "Background image: " + root.backgroundRow.label
-                // Only the checked path's URL (Model.mediaImageSource: the
-                // image, or a video's poster from the read gallery), and
-                // only while the panel is open.
-                source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : ""
-                video: root.backgroundRow.video
-                fill: root.hoverFill
-                faint: root.faint
-                fontFamily: root.fontFamily
-              }
-
-              Column {
-                id: backgroundText
-                anchors.left: backgroundThumb.right
-                anchors.leftMargin: Style.space(10)
-                anchors.right: backgroundButtons.left
-                anchors.rightMargin: Style.space(10)
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(2)
-
-                Text {
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  elide: Text.ElideRight
-                  text: Model.BACKGROUND_ROW_LABEL
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-                Text {
-                  objectName: "backgroundLabel"
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  elide: Text.ElideMiddle
-                  text: root.backgroundRow.label
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-              }
-
-              Row {
-                id: backgroundButtons
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.spacing.md
-
-                Repeater {
-                  model: root.backgroundRow.buttons.length
-                  delegate: Button {
-                    id: backgroundButton
-                    required property int index
-                    readonly property var button: root.backgroundRow.buttons[index]
-                    objectName: "backgroundButton-" + index
-                    text: button ? button.label : ""
-                    tooltipText: button ? button.tooltip : ""
-                    hasCursor: root.hasCursor("background", -1) && root.backgroundCursor === index
-                    bordered: true
-                    // Faded and inert while its tool is not on PATH or a
-                    // flow runs (the tooltip and the hint below say why);
-                    // kept enabled so the tooltip still shows.
-                    opacity: button && button.enabled ? 1.0 : 0.45
-                    foreground: root.foreground
-                    background: Commons.Color.background
-                    accent: root.accent
-                    fontFamily: root.fontFamily
-                    Accessible.name: button ? button.label : ""
-                    Accessible.description: button ? button.tooltip : ""
-                    onHovered: function(on) { if (on) root.setBackgroundCursor(backgroundButton.index) }
-                    onClicked: root.activateBackground(backgroundButton.index)
-                  }
-                }
-              }
-            }
-
-            // What a running flow waits for (the buttons are faded
-            // meanwhile), else which of the gallery's tools is not on PATH.
-            Text {
-              objectName: "backgroundHint"
-              textFormat: Text.PlainText
-              width: parent.width
-              wrapMode: Text.Wrap
-              visible: text !== ""
-              text: Model.backgroundHint(root.backgroundRow, Daemon.mediaFlow)
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            // ---- the Away image row (interface revision 17): its label,
-            // then Setup... on the right. The watch's snapshot carries no
-            // config value (no file name here), so the button opens the
-            // setup dialog at the Away image row, where it is chosen.
-            Item {
-              id: awayLine
-              objectName: "awayLine"
-              width: parent.width
-              visible: root.awayShown
-              implicitHeight: visible ? Math.max(awayButton.implicitHeight, awayLabel.implicitHeight) : 0
-              height: implicitHeight
-
-              Text {
-                id: awayLabel
-                objectName: "awayLabel"
-                textFormat: Text.PlainText
-                anchors.left: parent.left
-                anchors.right: awayButton.left
-                anchors.rightMargin: Style.space(10)
-                anchors.verticalCenter: parent.verticalCenter
-                elide: Text.ElideRight
-                text: Model.AWAY_ROW_LABEL
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Button {
-                id: awayButton
-                objectName: "awayButton"
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                text: Model.AWAY_BUTTON_LABEL
-                tooltipText: Model.AWAY_BUTTON_TOOLTIP
-                hasCursor: root.hasCursor("away", -1)
-                bordered: true
-                foreground: root.foreground
-                background: Commons.Color.background
-                accent: root.accent
-                fontFamily: root.fontFamily
-                Accessible.name: Model.AWAY_ROW_LABEL + ": " + Model.AWAY_BUTTON_LABEL
-                Accessible.description: Model.AWAY_BUTTON_TOOLTIP
-                onHovered: function(on) { if (on) root.setCursor("away", -1) }
-                onClicked: root.openAwayImage()
-              }
-            }
-
-            // ---- the Battery saver switch (interface revision 22): the
-            // daemon's `video.battery_saver`, on while its mode is not off.
-            // Under it the Mode row: "Mode" and a dropdown of the modes the
-            // switch turns on (Model.batterySaverView's `modes`), showing
-            // the daemon's mode while on and the remembered one while off
-            // (a mode the plugin does not offer is shown read-only). Then
-            // what is in force now (the end of the daemon's description),
-            // why it is greyed, and the daemon's notice when the running
-            // camera does not match yet.
-            Column {
-              id: batteryBlock
-              objectName: "batteryBlock"
-              width: parent.width
-              spacing: Style.space(2)
-              visible: root.batterySaver.visible
-
-              Item {
-                id: batteryLine
-                objectName: "batteryRow"
-                width: parent.width
-                implicitHeight: Math.max(batteryLabel.implicitHeight, batterySwitch.implicitHeight)
-                height: implicitHeight
-
-                Text {
-                  id: batteryLabel
-                  objectName: "batteryLabel"
-                  textFormat: Text.PlainText
-                  anchors.left: parent.left
-                  anchors.right: batterySwitch.left
-                  anchors.rightMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  elide: Text.ElideRight
-                  text: Model.BATTERY_SAVER_LABEL
-                  color: root.batterySaver.enabled ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-                ToggleSwitch {
-                  id: batterySwitch
-                  objectName: "batterySwitch"
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  opacity: root.batterySaver.enabled ? 1.0 : root.greyedOpacity
-                  interactive: root.batterySaver.enabled
-                  checked: root.batterySaver.on
-                  busy: Daemon.setupBusy
-                  hasCursor: root.hasCursor("battery", -1)
-                  foreground: root.foreground
-                  accent: root.accent
-                  onHovered: function(on) { if (on) root.setCursor("battery", -1) }
-                  onToggled: root.toggleBatterySaver()
-                  Accessible.role: Accessible.CheckBox
-                  Accessible.name: Model.BATTERY_SAVER_LABEL
-                  Accessible.description: root.batterySaver.reason !== "" ? root.batterySaver.reason : root.batterySaver.now
-                  Accessible.checkable: true
-                  Accessible.checked: root.batterySaver.on
-
-                  PanelToolTip {
-                    visible: batterySwitch.containsMouse
-                    text: root.batterySaver.reason !== "" ? root.batterySaver.reason
-                      : (root.batterySaver.on ? "Turn the battery saver off" : "Turn the battery saver on")
-                    fontFamily: root.fontFamily
-                  }
-                }
-              }
-              // The Mode row, laid out as the settings' dropdown rows
-              // (SettingsView): the label on the left, the shell's Dropdown
-              // on the right, as wide as its longest label. Greyed with the
-              // switch; a read-only mode is shown at full strength but takes
-              // no choice. The Dropdown sets its own value on a choice: it
-              // is bound to the view's again, so what the daemon (or the
-              // remembered mode) says is what shows.
-              Item {
-                id: batteryModeLine
-                objectName: "batteryModeRow"
-                width: parent.width
-                implicitHeight: Math.max(batteryModeLabel.implicitHeight, batteryModeBox.implicitHeight)
-                height: implicitHeight
-
-                Text {
-                  id: batteryModeLabel
-                  objectName: "batteryModeLabel"
-                  textFormat: Text.PlainText
-                  anchors.left: parent.left
-                  anchors.right: batteryModeBox.left
-                  anchors.rightMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  elide: Text.ElideRight
-                  text: Model.BATTERY_SAVER_MODE_ROW_LABEL
-                  color: root.batterySaver.enabled ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-
-                Item {
-                  id: batteryModeBox
-                  // The dropdown takes a choice: the view says so and no
-                  // setup write is running (as the switch shows busy), so a
-                  // choice is never dropped silently.
-                  readonly property bool takesChoice: root.batterySaver.modeEnabled && !Daemon.setupBusy
-                  readonly property var options: root.batterySaver.modeReadOnly
-                    ? [{ value: root.batterySaver.modeValue, label: root.batterySaver.modeLabel }] : root.batterySaver.modes
-                  // Wide enough for the longest label, never less than 220,
-                  // held within the line (as SettingsView's dropdown).
-                  readonly property real labelsWidth: widestLabel()
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  implicitWidth: Math.max(Style.space(220), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
-                  implicitHeight: batteryModeList.implicitHeight
-                  width: Math.min(implicitWidth, parent.width - Style.space(72))
-                  height: implicitHeight
-
-                  // Measured without writing to the metrics (a TextMetrics'
-                  // text set inside this binding would loop).
-                  FontMetrics {
-                    id: batteryModeProbe
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                  }
-
-                  function widestLabel() {
-                    var widest = 0
-                    for (var i = 0; i < options.length; i++)
-                      widest = Math.max(widest, batteryModeProbe.advanceWidth(options[i].label))
-                    return widest
-                  }
-
-                  // The Dropdown takes no input while it takes no choice:
-                  // hovering it then moves the cursor from here.
-                  HoverHandler {
-                    enabled: !batteryModeBox.takesChoice
-                    onHoveredChanged: if (hovered) root.setCursor("battery-mode", -1)
-                  }
-
-                  // A list open when the dropdown stops taking a choice
-                  // (greyed, read-only, hidden, a setup write running)
-                  // closes, choosing nothing.
-                  Connections {
-                    target: root
-                    function onBatterySaverChanged() { batteryModeBox.closeIfIdle() }
-                  }
-                  Connections {
-                    target: Daemon
-                    function onSetupBusyChanged() { batteryModeBox.closeIfIdle() }
-                  }
-                  function closeIfIdle() {
-                    if (batteryModeList.popupOpen && (!root.batterySaver.visible || !takesChoice)) batteryModeList.close()
-                  }
-
-                  Dropdown {
-                    id: batteryModeList
-                    objectName: "batteryModeDropdown"
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    enabled: batteryModeBox.takesChoice
-                    opacity: root.batterySaver.enabled ? 1.0 : root.greyedOpacity
-                    showLabel: false
-                    options: batteryModeBox.options
-                    value: root.batterySaver.modeValue
-                    hasCursor: root.hasCursor("battery-mode", -1)
-                    foreground: root.foreground
-                    accent: root.accent
-                    fontFamily: root.fontFamily
-                    Accessible.role: Accessible.ComboBox
-                    Accessible.name: Model.BATTERY_SAVER_MODE_NAME
-                    Accessible.description: root.batterySaver.reason !== "" ? root.batterySaver.reason : root.batterySaver.modeLabel
-                    onHovered: function(isHovered) { if (isHovered) root.setCursor("battery-mode", -1) }
-                    onChanged: function(value) {
-                      batteryModeList.value = Qt.binding(function() { return root.batterySaver.modeValue })
-                      root.chooseBatteryMode(value)
-                    }
-                    onPopupOpenChanged: if (!popupOpen) catcher.forceActiveFocus()
-                  }
-                }
-              }
-              Text {
-                objectName: "batteryReason"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.batterySaver.reason
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                objectName: "batteryNow"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== "" && root.batterySaver.enabled
-                text: root.batterySaver.now
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                objectName: "batteryNotice"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.batterySaver.notice
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                objectName: "batteryError"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.batteryWritten ? Daemon.setupError : ""
-                color: root.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
-            Repeater {
-              model: root.effectRows
-              delegate: InfoRow {
-                required property var modelData
-                label: modelData.label
-                value: modelData.value
-                // A path keeps its file name in view.
-                valueElide: Text.ElideMiddle
-              }
-            }
-
-            // Why the choices are greyed (the daemon's reason), or why
-            // there are none: a daemon below revision 9, an old CLI or
-            // plugin, no module with a background effect.
-            Text {
-              objectName: "effectHint"
-              textFormat: Text.PlainText
-              width: parent.width
-              wrapMode: Text.Wrap
-              visible: text !== ""
-              text: root.effectMode.visible ? root.effectMode.reason : root.effectMode.hint
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            // ---- the daemon's other global settings (the effect's strength,
-            // noise removal and whatever the modules add), drawn by the same
-            // renderer as the camera's; the effect choice above is not among
-            // them. None while the daemon publishes none.
-            Column {
-              id: effectSettingsArea
-              objectName: "effectSettingsArea"
-              width: parent.width
-              spacing: Style.space(10)
-              visible: root.genericEffect
-
-              SettingsView {
-                id: effectSettingsBlock
-                objectName: "effectSettingsView"
-                namePrefix: "effect-"
-                readonly property real areaTop: tabBlock.y + effectTab.y + effectSettingsArea.y + y
-                width: parent.width
-                room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
-                bar: root.bar
-                view: root.effectSettings
-                // Only the tab shown has a cursor (both views number their stops from 0).
-                cursorStop: root.tab === "effect" ? root.currentStop : null
-                choiceCursor: root.choiceCursor
-                keyCatcher: catcher
-                slidersHeld: root.slidersHeld
-                foreground: root.foreground
-                dim: root.dim
-                faint: root.faint
-                accent: root.accent
-                hoverFill: root.hoverFill
-                fontFamily: root.fontFamily
-                onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
-                onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
-                onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
-              }
-            }
+            visible: previewBlock.parent === narrowSlot && root.previewPlace.mode === "frame"
+            implicitHeight: visible ? previewBlock.implicitHeight : 0
+            height: implicitHeight
           }
 
-          // ---- Camera: the cameras, then the camera's settings
-          Column {
-            id: cameraTab
-            objectName: "cameraTab"
+          // ---- the strip: one line while there is no frame to show
+          Item {
+            id: previewStrip
+            objectName: "previewStrip"
             width: parent.width
-            spacing: Style.space(10)
-            visible: root.tab === "camera"
+            visible: root.previewPlace.mode === "strip" && !root.detailsOpen
+            implicitHeight: visible ? Math.max(stripText.implicitHeight, stripButton.visible ? stripButton.implicitHeight : 0) : 0
+            height: implicitHeight
 
-            Column {
-              objectName: "camerasBlock"
-              width: parent.width
-              spacing: Style.space(6)
-
-              PanelSectionHeader {
-                text: "CAMERAS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                width: parent.width
-                visible: root.cameras.length === 0
-                text: "No cameras found"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Repeater {
-                id: cameraRepeater
-                objectName: "cameraRepeater"
-                model: root.cameras
-                delegate: CursorSurface {
-                  id: cameraRow
-                  required property var modelData
-                  required property int index
-                  readonly property bool isActive: Model.isActiveCamera(root.record, modelData)
-                  readonly property bool selectable: modelData.selectId !== "" && !isActive
-                  width: parent ? parent.width : 0
-                  implicitHeight: rowText.implicitHeight + Style.spacing.xl
-                  // Visuals from the panel cursor and the active camera only,
-                  // never from containsMouse (the CursorSurface contract).
-                  hasCursor: root.hasCursor("camera", index)
-                  current: isActive
-                  foreground: root.foreground
-                  fill: root.hoverFill
-                  currentFill: root.selectedFill
-                  Accessible.role: Accessible.RadioButton
-                  Accessible.name: modelData.label
-                  Accessible.checkable: true
-                  Accessible.checked: isActive
-
-                  function choose() {
-                    if (cameraRow.selectable && root.available) return Daemon.selectCamera(cameraRow.modelData.selectId)
-                    return false
-                  }
-
-                  Text {
-                    id: rowMark
-                    textFormat: Text.PlainText
-                    x: Style.space(6)
-                    width: Style.space(22)
-                    horizontalAlignment: Text.AlignHCenter
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: cameraRow.isActive ? Model.GLYPH_RADIO_ON : Model.GLYPH_RADIO_OFF
-                    color: cameraRow.isActive ? root.accent : root.faint
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                  }
-                  Column {
-                    id: rowText
-                    anchors.left: rowMark.right
-                    anchors.leftMargin: Style.space(8)
-                    anchors.right: rowUsb.left
-                    anchors.rightMargin: Style.space(8)
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: cameraRow.modelData.label
-                      color: cameraRow.modelData.selectId !== "" || cameraRow.isActive ? root.foreground : root.faint
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: cameraRow.isActive
-                    }
-                    Text {
-                      objectName: "cameraNote"
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      wrapMode: Text.Wrap
-                      visible: text !== ""
-                      text: cameraRow.modelData.selectNote
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-                  Text {
-                    id: rowUsb
-                    textFormat: Text.PlainText
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.space(6)
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: cameraRow.modelData.usb
-                    color: root.faint
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                  MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: cameraRow.selectable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onEntered: root.setCursor("camera", cameraRow.index)
-                    onClicked: cameraRow.choose()
-                  }
-                }
-              }
-
-              Text {
-                objectName: "camerasTruncated"
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.truncation
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
+            Text {
+              id: stripText
+              objectName: "previewNote"
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.right: stripButton.visible ? stripButton.left : parent.right
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              wrapMode: Text.Wrap
+              text: root.previewPlace.text
+              color: root.previewPlace.error ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
-
-            // Shown only when there is a camera to move to.
             Button {
-              id: nextButton
-              objectName: "nextCameraButton"
-              visible: Model.canNext(root.record)
-              text: "Next camera"
-              iconText: Model.GLYPH_NEXT
+              id: stripButton
+              objectName: "previewToggle"
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.previewPlace.button !== ""
+              text: root.previewPlace.button === "hide" ? Model.PREVIEW_HIDE_LABEL : Model.PREVIEW_SHOW_LABEL
+              tooltipText: root.previewPlace.button === "hide" ? "Hide the preview" : "Show what apps receive (starts the camera)"
               bordered: true
-              hasCursor: root.hasCursor("next", -1)
+              hasCursor: root.hasCursor("preview", -1)
               foreground: root.foreground
+              background: Commons.Color.background
               accent: root.accent
               fontFamily: root.fontFamily
               Accessible.role: Accessible.Button
-              Accessible.name: "Next camera"
-              onHovered: function(on) { if (on) root.setCursor("next", -1) }
-              onClicked: Daemon.nextCamera()
+              Accessible.name: text
+              onHovered: function(on) { if (on) root.setCursor("preview", -1) }
+              onClicked: root.togglePreview()
             }
+          }
 
-            // ---- the active camera's health (interface revision 20): the
-            // rate it really delivers when short of its mode's, the daemon's
-            // warnings about it (as the daemon's own warning: the normal text
-            // colour behind a caution sign), and effect suggestions, each
-            // with its button: the first, then a line that opens the rest
-            // (Model.healthView folds them, so the settings' groups keep
-            // their room). Nothing for another camera, or before the daemon
-            // reports it; a button writes only on a click, and what it
-            // changed shows when the daemon next reports. Count models, as
-            // SettingsView's: a new report changes what a row shows.
-            PanelSeparator {
-              objectName: "healthSeparator"
-              visible: root.health.visible
-              foreground: root.foreground
-            }
+          // A choice the shell did not store: it holds until the shell is
+          // restarted, and nothing else says so.
+          Text {
+            objectName: "previewUnsaved"
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            visible: root.previewControls && Preview.unsaved && root.previewPlace.mode !== "none"
+            text: Model.PREVIEW_UNSAVED_TEXT
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
 
+        // ---- the body: the only part that scrolls, once the card is at
+        // its cap (the content is never taller than the card otherwise)
+        Flickable {
+          id: bodyFlick
+          objectName: "panelFlick"
+          // 2 px wider than the column on each side: the body inside it is
+          // inset 2 px from the clip (so a border is never shaved) and lines
+          // up with the tab row and the header.
+          x: -Style.space(2)
+          y: rightPinned.implicitHeight > 0 ? rightPinned.implicitHeight + root.gap : 0
+          width: parent.width + Style.space(4)
+          height: Math.max(0, parent.height - y)
+          contentWidth: width
+          contentHeight: body.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+          interactive: contentHeight > height + 0.5 && root.slidersHeld === 0
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: body
+            objectName: "body"
+            // Inset from the clipped edges, so a control's border is never
+            // shaved; clear of the scroll bar while there is one.
+            x: Style.space(2)
+            width: bodyFlick.width - Style.space(4) - (bodyFlick.interactive ? Style.space(12) : 0)
+            spacing: root.gap
+            // Only while the daemon is available (the header says why not).
+            visible: root.available
+
+            // ---- the Details view, from the header's (i): what a bug report needs,
+            // with Copy (the rows as text, Model.detailsText)
             Column {
-              id: healthBlock
-              objectName: "healthBlock"
+              id: detailsView
+              objectName: "detailsView"
               width: parent.width
-              spacing: Style.space(6)
-              visible: root.health.visible
+              spacing: Style.space(8)
+              visible: root.detailsOpen
 
-              // The camera's status lines (revision 26); a closed shutter, which
-              // explains a black or away picture, is the foreground colour in
-              // bold behind a caution sign. Not cursor stops.
-              Repeater {
-                objectName: "healthStatus"
-                model: root.health.status.length
-                delegate: Text {
-                  required property int index
-                  readonly property var line: root.health.status[index] || ({ text: "", strong: false })
-                  objectName: "healthStatus-" + index
-                  Accessible.role: Accessible.StaticText
-                  Accessible.name: line.strong ? "Warning: " + line.text : line.text
-                  textFormat: Text.PlainText
-                  width: parent ? parent.width : 0
-                  wrapMode: Text.Wrap
-                  text: line.strong ? Model.GLYPH_WARNING + " " + line.text : line.text
-                  color: line.strong ? root.foreground : root.dim
-                  font.bold: line.strong
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-
-              Text {
-                objectName: "healthDelivers"
-                textFormat: Text.PlainText
+              Item {
+                id: detailsHeader
+                objectName: "detailsHeader"
                 width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.health.delivers
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
+                implicitHeight: Math.max(detailsBack.implicitHeight, detailsCopyButton.implicitHeight)
 
-              Repeater {
-                objectName: "healthWarnings"
-                model: root.health.warnings.length
-                delegate: Text {
-                  required property int index
-                  readonly property string warning: root.health.warnings[index] || ""
-                  objectName: "healthWarning-" + index
-                  Accessible.role: Accessible.StaticText
-                  Accessible.name: "Warning: " + warning
+                Button {
+                  id: detailsBack
+                  objectName: "detailsBack"
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.DETAILS_BACK_LABEL
+                  iconText: "‹"
+                  bordered: true
+                  hasCursor: root.hasCursor("details-back", -1)
+                  foreground: root.foreground
+                  background: Commons.Color.background
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  Accessible.role: Accessible.Button
+                  Accessible.name: Model.DETAILS_BACK_LABEL
+                  onHovered: function(on) { if (on) root.setCursor("details-back", -1) }
+                  onClicked: root.toggleDetails()
+                }
+                Text {
+                  objectName: "detailsTitle"
                   textFormat: Text.PlainText
-                  width: parent ? parent.width : 0
-                  wrapMode: Text.Wrap
-                  text: Model.GLYPH_WARNING + " " + warning
+                  anchors.left: detailsBack.right
+                  anchors.leftMargin: Style.space(12)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.DETAILS_TITLE
                   color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.body
+                  font.bold: true
                 }
-              }
+                Row {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(8)
 
-              Repeater {
-                id: suggestionRepeater
-                objectName: "healthSuggestions"
-                model: root.health.shownSuggestions
-                delegate: Item {
-                  id: suggestionRow
-                  required property int index
-                  readonly property var suggestion: root.health.suggestions[index] || ({ label: "", reason: "", action: "" })
-                  objectName: "healthSuggestion-" + index
-                  width: parent ? parent.width : 0
-                  implicitHeight: Math.max(suggestionText.implicitHeight, suggestionButton.implicitHeight)
-                  height: implicitHeight
-
-                  Column {
-                    id: suggestionText
-                    anchors.left: parent.left
-                    anchors.right: suggestionButton.left
-                    anchors.rightMargin: Style.space(10)
+                  Text {
+                    objectName: "detailsCopied"
+                    textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
-
-                    Text {
-                      objectName: "healthSuggestionLabel-" + suggestionRow.index
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      wrapMode: Text.Wrap
-                      text: suggestionRow.suggestion.label
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                    }
-                    Text {
-                      objectName: "healthSuggestionReason-" + suggestionRow.index
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      wrapMode: Text.Wrap
-                      visible: text !== ""
-                      text: suggestionRow.suggestion.reason
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
+                    visible: root.copied
+                    text: Model.DETAILS_COPIED_TEXT
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
                   }
-
                   Button {
-                    id: suggestionButton
-                    objectName: "healthSuggestionButton-" + suggestionRow.index
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: suggestionRow.suggestion.action
-                    hasCursor: root.hasCursor("suggestion", suggestionRow.index)
+                    id: detailsCopyButton
+                    objectName: "detailsCopy"
+                    text: Model.DETAILS_COPY_LABEL
+                    tooltipText: "Copy these details, for a bug report"
                     bordered: true
+                    hasCursor: root.hasCursor("details-copy", -1)
                     foreground: root.foreground
                     background: Commons.Color.background
                     accent: root.accent
                     fontFamily: root.fontFamily
                     Accessible.role: Accessible.Button
-                    Accessible.name: suggestionRow.suggestion.label + ": " + suggestionRow.suggestion.action
-                    Accessible.description: suggestionRow.suggestion.reason
-                    onHovered: function(on) { if (on) root.setCursor("suggestion", suggestionRow.index) }
-                    onClicked: root.applySuggestion(suggestionRow.index)
+                    Accessible.name: "Copy the details"
+                    onHovered: function(on) { if (on) root.setCursor("details-copy", -1) }
+                    onClicked: root.copyDetails()
                   }
                 }
               }
 
-              // "+2 more" / "Fewer suggestions": opens or folds the
-              // suggestions past the first, as a settings group's header
-              // (the chevron at the right edge).
-              CursorSurface {
-                id: suggestionsMore
-                objectName: "healthSuggestionsMore"
+              PanelSeparator { foreground: root.foreground }
+
+              Repeater {
+                objectName: "detailsRepeater"
+                model: root.detailsRows
+                delegate: InfoRow {
+                  required property var modelData
+                  label: modelData.label
+                  value: modelData.value
+                }
+              }
+
+              // The text Copy puts on the clipboard: read-only and never shown, its
+              // whole text selected and copied at once.
+              TextEdit {
+                id: detailsCopy
+                objectName: "detailsCopyText"
+                textFormat: TextEdit.PlainText
+                visible: false
+                readOnly: true
+                selectByMouse: false
+                width: 0
+                height: 0
+              }
+            }
+
+            // ---- Effects: the background effect's choices and what follows them,
+            // then the other global settings, the "Not available now" line, "More"
+            Column {
+              id: effectTab
+              objectName: "effectTab"
+              width: parent.width
+              spacing: Style.space(10)
+              visible: root.tab === "effect" && !root.detailsOpen
+
+              // The background effect's section heading, in the one style of
+              // the tab's group headings (SettingsView's: small capitals).
+              Text {
+                objectName: "effectTitle"
+                textFormat: Text.PlainText
                 width: parent.width
-                visible: root.health.more.visible
-                implicitHeight: suggestionsMoreText.implicitHeight + Style.space(6)
-                hasCursor: root.hasCursor("suggestions-more", -1)
+                visible: root.effectMode.visible
+                text: Model.BACKGROUND_ROW_LABEL
+                color: Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.capitalization: Font.AllUppercase
+              }
+
+              Flow {
+                id: effectChoices
+                objectName: "effectChoices"
+                width: parent.width
+                spacing: Style.spacing.md
+                visible: root.effectMode.visible
+
+                Repeater {
+                  id: effectRepeater
+                  objectName: "effectRepeater"
+                  model: root.effectMode.options
+                  delegate: Button {
+                    id: effectChip
+                    required property var modelData
+                    required property int index
+                    objectName: "effectChoice-" + index
+                    text: modelData.label
+                    tooltipText: modelData.tooltip
+                    selected: modelData.selected
+                    // One highlight: the panel cursor, which the mouse moves too.
+                    hasCursor: root.hasCursor("effect", -1) && root.effectCursor === index
+                    bordered: true
+                    // Faded while the daemon greys the setting out; the
+                    // reason is the hint below.
+                    opacity: modelData.faded ? 0.45 : 1.0
+                    foreground: root.foreground
+                    // The fill the shell's ButtonGroup gives its chips.
+                    background: Commons.Color.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onHovered: function(on) { if (on) root.setEffectCursor(effectChip.index) }
+                    onClicked: root.chooseEffect(effectChip.index)
+                  }
+                }
+              }
+
+              // ---- the Background row: the image in force (a 16:9
+              // thumbnail, decoded at twice its drawn size; a faint image
+              // glyph when there is none or it does not load) and its name,
+              // then Gallery... and Add...
+              Item {
+                id: backgroundLine
+                objectName: "backgroundLine"
+                width: parent.width
+                visible: root.backgroundRow.visible
+                implicitHeight: visible ? Math.max(backgroundThumb.height, backgroundButtons.implicitHeight, backgroundText.implicitHeight) : 0
+                height: implicitHeight
+
+                MediaThumbnail {
+                  id: backgroundThumb
+                  objectName: "background"
+                  anchors.verticalCenter: parent.verticalCenter
+                  name: "Background image: " + root.backgroundRow.label
+                  // Only the checked path's URL (Model.mediaImageSource: the
+                  // image, or a video's poster from the read gallery), and
+                  // only while the panel is open.
+                  source: root.opened && root.backgroundRow.visible ? root.backgroundRow.source : ""
+                  video: root.backgroundRow.video
+                  fill: root.hoverFill
+                  faint: root.faint
+                  fontFamily: root.fontFamily
+                }
+
+                Column {
+                  id: backgroundText
+                  anchors.left: backgroundThumb.right
+                  anchors.leftMargin: Style.space(10)
+                  anchors.right: backgroundButtons.left
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(2)
+
+                  // The image's name only: the section's heading says
+                  // "Background" already.
+                  Text {
+                    objectName: "backgroundLabel"
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    elide: Text.ElideMiddle
+                    text: root.backgroundRow.label
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                }
+
+                Row {
+                  id: backgroundButtons
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.spacing.md
+
+                  Repeater {
+                    model: root.backgroundRow.buttons.length
+                    delegate: Button {
+                      id: backgroundButton
+                      required property int index
+                      readonly property var button: root.backgroundRow.buttons[index]
+                      objectName: "backgroundButton-" + index
+                      text: button ? button.label : ""
+                      tooltipText: button ? button.tooltip : ""
+                      hasCursor: root.hasCursor("background", -1) && root.backgroundCursor === index
+                      bordered: true
+                      // Faded and inert while its tool is not on PATH or a
+                      // flow runs (the tooltip and the hint below say why);
+                      // kept enabled so the tooltip still shows.
+                      opacity: button && button.enabled ? 1.0 : 0.45
+                      foreground: root.foreground
+                      background: Commons.Color.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      Accessible.name: button ? button.label : ""
+                      Accessible.description: button ? button.tooltip : ""
+                      onHovered: function(on) { if (on) root.setBackgroundCursor(backgroundButton.index) }
+                      onClicked: root.activateBackground(backgroundButton.index)
+                    }
+                  }
+                }
+              }
+
+              // What a running flow waits for (the buttons are faded
+              // meanwhile), else which of the gallery's tools is not on PATH.
+              Text {
+                objectName: "backgroundHint"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: Model.backgroundHint(root.backgroundRow, Daemon.mediaFlow)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                model: root.effectRows
+                delegate: InfoRow {
+                  required property var modelData
+                  label: modelData.label
+                  value: modelData.value
+                  // A path keeps its file name in view.
+                  valueElide: Text.ElideMiddle
+                }
+              }
+
+              // Why the choices are greyed (the daemon's reason), or why
+              // there are none: a daemon below revision 9, an old CLI or
+              // plugin, no module with a background effect.
+              Text {
+                objectName: "effectHint"
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: root.effectMode.visible ? root.effectMode.reason : root.effectMode.hint
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              // ---- the daemon's other global settings (what follows the background
+              // effect's choice first, then one switch per effect and its dependents),
+              // drawn by the same renderer as the camera's, with the tab's "Not
+              // available now" line; the effect choice above is not among them.
+              Column {
+                id: effectSettingsArea
+                objectName: "effectSettingsArea"
+                // Above what follows it, for its rows' help tips.
+                z: 1
+                width: parent.width
+                spacing: Style.space(10)
+                visible: root.effectSettings.visible
+
+                SettingsView {
+                  id: effectSettingsBlock
+                  objectName: "effectSettingsView"
+                  namePrefix: "effect-"
+                  width: parent.width
+                  bar: root.bar
+                  view: root.effectSettings
+                  notAvailable: root.tab === "effect" ? root.notAvailable : Model.notAvailableView(root.effectSettings, false)
+                  // Only the tab shown has a cursor (both views number their stops from 0).
+                  cursorStop: root.tab === "effect" ? root.currentStop : null
+                  choiceCursor: root.choiceCursor
+                  keyCatcher: catcher
+                  viewport: bodyFlick
+                  foreground: root.foreground
+                  dim: root.dim
+                  faint: root.faint
+                  accent: root.accent
+                  hoverFill: root.hoverFill
+                  fontFamily: root.fontFamily
+                  onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
+                  onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
+                  onNotAvailableToggled: root.toggleNotAvailable()
+                  onSetupRequested: function(index) { root.openSetupFor(index) }
+                  onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
+                }
+              }
+
+              // ---- "More": set-and-forget options, one row each (folded by default)
+              CursorSurface {
+                id: moreLine
+                objectName: "moreLine"
+                width: parent.width
+                visible: root.moreShown
+                implicitHeight: moreText.implicitHeight + Style.space(6)
+                hasCursor: root.hasCursor("more", -1)
                 foreground: root.foreground
                 fill: root.hoverFill
                 Accessible.role: Accessible.Button
-                Accessible.name: root.health.more.text
-                Accessible.description: root.health.shownSuggestions < root.health.suggestions.length ? "Collapsed" : "Expanded"
+                Accessible.name: Model.MORE_TEXT
+                Accessible.description: root.moreOpen ? "Expanded" : "Collapsed"
 
                 Text {
-                  id: suggestionsMoreText
-                  objectName: "healthSuggestionsMoreText"
+                  id: moreGlyph
                   textFormat: Text.PlainText
-                  anchors.left: parent.left
-                  anchors.right: suggestionsMoreGlyph.left
-                  anchors.rightMargin: Style.space(6)
-                  anchors.verticalCenter: parent.verticalCenter
-                  elide: Text.ElideRight
-                  text: root.health.more.text
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-                Text {
-                  id: suggestionsMoreGlyph
-                  textFormat: Text.PlainText
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(6)
                   width: Style.space(16)
                   anchors.verticalCenter: parent.verticalCenter
-                  horizontalAlignment: Text.AlignHCenter
-                  text: root.health.more.glyph
+                  text: root.moreOpen ? Model.GLYPH_EXPANDED : Model.GLYPH_COLLAPSED
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                Text {
+                  id: moreText
+                  textFormat: Text.PlainText
+                  anchors.left: moreGlyph.right
+                  anchors.leftMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.MORE_TEXT
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -1941,115 +1657,538 @@ Item {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onEntered: root.setCursor("suggestions-more", -1)
-                  onClicked: root.toggleHealthList("suggestions")
+                  onEntered: root.setCursor("more", -1)
+                  onClicked: root.toggleMore()
                 }
               }
-            }
 
-            // ---- camera settings: what the daemon publishes for the camera.
-            // While the daemon has the camera open (starting or active) a
-            // change applies at once and shows in the preview above;
-            // otherwise the daemon stores it for the next open (the note
-            // says which). Last in the tab, so its top is known before its
-            // height: past the screen's room its groups scroll, alone.
-            Column {
-              id: settingsArea
-              objectName: "settingsArea"
-              width: parent.width
-              spacing: Style.space(10)
-              visible: root.settingsView.visible || root.recommendedShown
-
-              PanelSeparator { foreground: root.foreground }
-
-              // ---- Use recommended settings (interface revision 20): its
-              // title, and on its line the button (as Reset to defaults sits
-              // on SETTINGS), then the changes the daemon's row for this
-              // camera would make as one line ("2 changes: Sharpness, ...")
-              // that opens the list (label: now -> then). Shown only while
-              // there are changes, applied only on the button's click.
               Column {
-                id: recommendedBlock
-                objectName: "recommendedBlock"
-                width: parent.width
-                spacing: Style.space(6)
-                visible: root.recommendedShown
+                id: moreBlock
+                objectName: "moreBlock"
+                x: Style.space(20)
+                width: parent.width - x
+                spacing: Style.space(10)
+                visible: root.moreShown && root.moreOpen
 
-                Item {
-                  objectName: "recommendedHeader"
+                // ---- the Battery saver (interface revision 22), one row: its label,
+                // the mode it turns on (a dropdown of Model.batterySaverView's `modes`,
+                // the daemon's mode while on and the remembered one while off; a mode
+                // the plugin does not offer is shown read-only), and the switch (the
+                // daemon's `video.battery_saver`, on while its mode is not off). What is
+                // in force now is the switch's tooltip; under the row only why it is
+                // greyed, the daemon's notice and a failed write.
+                Column {
+                  id: batteryBlock
+                  objectName: "batteryBlock"
                   width: parent.width
-                  height: Math.max(recommendedTitle.implicitHeight, recommendedButton.implicitHeight)
+                  spacing: Style.space(2)
+                  visible: root.batterySaver.visible
 
-                  PanelSectionHeader {
-                    id: recommendedTitle
-                    objectName: "recommendedTitle"
-                    anchors.left: parent.left
-                    anchors.right: recommendedButton.left
-                    anchors.rightMargin: Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideRight
-                    text: Model.RECOMMENDED_TITLE
+                  // The row draws the switch's cursor (the switch sits on
+                  // the shared right edge, with no ring of its own).
+                  CursorSurface {
+                    id: batteryLine
+                    objectName: "batteryRow"
+                    width: parent.width
+                    implicitHeight: Math.max(batteryLabel.implicitHeight, batterySwitch.implicitHeight, batteryModeBox.implicitHeight)
+                    height: implicitHeight
+                    hasCursor: root.hasCursor("battery", -1)
+                    outline: true
                     foreground: root.foreground
-                    fontFamily: root.fontFamily
+                    fill: root.hoverFill
+
+                    Text {
+                      id: batteryLabel
+                      objectName: "batteryLabel"
+                      textFormat: Text.PlainText
+                      anchors.left: parent.left
+                      anchors.right: batteryModeBox.left
+                      anchors.rightMargin: Style.space(10)
+                      anchors.verticalCenter: parent.verticalCenter
+                      elide: Text.ElideRight
+                      text: Model.BATTERY_SAVER_LABEL
+                      color: root.batterySaver.enabled ? root.foreground : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Item {
+                      id: batteryModeBox
+                      // The dropdown takes a choice: the view says so and no
+                      // setup write is running (as the switch shows busy), so a
+                      // choice is never dropped silently.
+                      readonly property bool takesChoice: root.batterySaver.modeEnabled && !Daemon.setupBusy
+                      readonly property var options: root.batterySaver.modeReadOnly
+                        ? [{ value: root.batterySaver.modeValue, label: root.batterySaver.modeLabel }] : root.batterySaver.modes
+                      // Wide enough for the longest label, never less than 180, held
+                      // within the line beside the label and the switch.
+                      readonly property real labelsWidth: widestLabel()
+                      anchors.right: batterySwitch.left
+                      anchors.rightMargin: Style.space(12)
+                      anchors.verticalCenter: parent.verticalCenter
+                      implicitWidth: Math.max(Style.space(180), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
+                      implicitHeight: batteryModeList.implicitHeight
+                      width: Math.min(implicitWidth, Math.max(0, parent.width - batteryLabel.implicitWidth - batterySwitch.width - Style.space(36)))
+                      height: implicitHeight
+
+                      // Measured without writing to the metrics (a TextMetrics'
+                      // text set inside this binding would loop).
+                      FontMetrics {
+                        id: batteryModeProbe
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+
+                      function widestLabel() {
+                        var widest = 0
+                        for (var i = 0; i < options.length; i++)
+                          widest = Math.max(widest, batteryModeProbe.advanceWidth(options[i].label))
+                        return widest
+                      }
+
+                      // The Dropdown takes no input while it takes no choice:
+                      // hovering it then moves the cursor from here.
+                      HoverHandler {
+                        enabled: !batteryModeBox.takesChoice
+                        onHoveredChanged: if (hovered) root.setCursor("battery-mode", -1)
+                      }
+
+                      // A list open when the dropdown stops taking a choice
+                      // (greyed, read-only, hidden, a setup write running)
+                      // closes, choosing nothing.
+                      Connections {
+                        target: root
+                        function onBatterySaverChanged() { batteryModeBox.closeIfIdle() }
+                      }
+                      Connections {
+                        target: Daemon
+                        function onSetupBusyChanged() { batteryModeBox.closeIfIdle() }
+                      }
+                      function closeIfIdle() {
+                        if (batteryModeList.popupOpen && (!root.batterySaver.visible || !takesChoice)) batteryModeList.close()
+                      }
+
+                      Dropdown {
+                        id: batteryModeList
+                        objectName: "batteryModeDropdown"
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        enabled: batteryModeBox.takesChoice
+                        opacity: root.batterySaver.enabled ? 1.0 : root.greyedOpacity
+                        showLabel: false
+                        options: batteryModeBox.options
+                        value: root.batterySaver.modeValue
+                        hasCursor: root.hasCursor("battery-mode", -1)
+                        foreground: root.foreground
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        Accessible.role: Accessible.ComboBox
+                        Accessible.name: Model.BATTERY_SAVER_MODE_NAME
+                        Accessible.description: root.batterySaver.reason !== "" ? root.batterySaver.reason : root.batterySaver.modeLabel
+                        onHovered: function(isHovered) { if (isHovered) root.setCursor("battery-mode", -1) }
+                        onChanged: function(value) {
+                          batteryModeList.value = Qt.binding(function() { return root.batterySaver.modeValue })
+                          root.chooseBatteryMode(value)
+                        }
+                        onPopupOpenChanged: if (!popupOpen) catcher.forceActiveFocus()
+                      }
+                    }
+
+                    ToggleSwitch {
+                      id: batterySwitch
+                      objectName: "batterySwitch"
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      opacity: root.batterySaver.enabled ? 1.0 : root.greyedOpacity
+                      interactive: root.batterySaver.enabled
+                      cursorRing: false
+                      checked: root.batterySaver.on
+                      busy: Daemon.setupBusy
+                      hasCursor: root.hasCursor("battery", -1)
+                      foreground: root.foreground
+                      accent: root.accent
+                      onHovered: function(on) { if (on) root.setCursor("battery", -1) }
+                      onToggled: root.toggleBatterySaver()
+                      Accessible.role: Accessible.CheckBox
+                      Accessible.name: Model.BATTERY_SAVER_LABEL
+                      Accessible.description: root.batterySaver.reason !== "" ? root.batterySaver.reason : root.batterySaver.now
+                      Accessible.checkable: true
+                      Accessible.checked: root.batterySaver.on
+
+                      PanelToolTip {
+                        visible: batterySwitch.containsMouse
+                        text: root.batterySaver.reason !== "" ? root.batterySaver.reason
+                          : (root.batterySaver.now !== "" ? root.batterySaver.now
+                            : (root.batterySaver.on ? "Turn the battery saver off" : "Turn the battery saver on"))
+                        fontFamily: root.fontFamily
+                      }
+                    }
                   }
-
-                  Button {
-                    id: recommendedButton
-                    objectName: "recommendedButton"
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: Model.RECOMMENDED_LABEL
-                    tooltipText: Model.RECOMMENDED_TOOLTIP
-                    bordered: true
-                    hasCursor: root.hasCursor("recommended", -1)
-                    foreground: root.foreground
-                    accent: root.accent
-                    fontFamily: root.fontFamily
-                    Accessible.role: Accessible.Button
-                    Accessible.name: Model.RECOMMENDED_LABEL
-                    Accessible.description: Model.RECOMMENDED_TOOLTIP
-                    onHovered: function(on) { if (on) root.setCursor("recommended", -1) }
-                    onClicked: root.applyRecommended()
-                  }
-                }
-
-                // The changes in one line, with the chevron of a settings
-                // group's header: a click, Enter or Space opens the list.
-                CursorSurface {
-                  id: recommendedChangesLine
-                  objectName: "recommendedChangesLine"
-                  width: parent.width
-                  implicitHeight: recommendedSummary.implicitHeight + Style.space(6)
-                  hasCursor: root.hasCursor("recommended-changes", -1)
-                  foreground: root.foreground
-                  fill: root.hoverFill
-                  Accessible.role: Accessible.Button
-                  Accessible.name: root.health.changes.text
-                  Accessible.description: root.health.changes.open ? "Expanded" : "Collapsed"
-
                   Text {
-                    id: recommendedSummary
-                    objectName: "recommendedSummary"
+                    objectName: "batteryReason"
                     textFormat: Text.PlainText
-                    anchors.left: parent.left
-                    anchors.right: recommendedGlyph.left
-                    anchors.rightMargin: Style.space(6)
-                    anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideRight
-                    text: root.health.changes.text
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    visible: text !== ""
+                    text: root.batterySaver.reason
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                   }
                   Text {
-                    id: recommendedGlyph
+                    objectName: "batteryNotice"
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    visible: text !== ""
+                    text: root.batterySaver.notice
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Text {
+                    objectName: "batteryError"
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    visible: text !== ""
+                    text: root.batteryWritten ? Daemon.setupError : ""
+                    color: root.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                // ---- the Away image row (interface revision 17): its label,
+                // then Setup... on the right. The watch's snapshot carries no
+                // config value (no file name here), so the button opens the
+                // setup dialog at the Away image row, where it is chosen.
+                Item {
+                  id: awayLine
+                  objectName: "awayLine"
+                  width: parent.width
+                  visible: root.awayShown
+                  implicitHeight: visible ? Math.max(awayButton.implicitHeight, awayLabel.implicitHeight) : 0
+                  height: implicitHeight
+
+                  Text {
+                    id: awayLabel
+                    objectName: "awayLabel"
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.right: awayButton.left
+                    anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: Model.AWAY_ROW_LABEL
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+
+                  Button {
+                    id: awayButton
+                    objectName: "awayButton"
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.AWAY_BUTTON_LABEL
+                    tooltipText: Model.AWAY_BUTTON_TOOLTIP
+                    hasCursor: root.hasCursor("away", -1)
+                    bordered: true
+                    foreground: root.foreground
+                    background: Commons.Color.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.name: Model.AWAY_ROW_LABEL + ": " + Model.AWAY_BUTTON_LABEL
+                    Accessible.description: Model.AWAY_BUTTON_TOOLTIP
+                    onHovered: function(on) { if (on) root.setCursor("away", -1) }
+                    onClicked: root.openAwayImage()
+                  }
+                }
+
+              }
+            }
+
+            // ---- Camera: the camera dropdown, the camera's health, then its settings
+            Column {
+              id: cameraTab
+              objectName: "cameraTab"
+              width: parent.width
+              spacing: Style.space(10)
+              visible: root.tab === "camera" && !root.detailsOpen
+
+              Column {
+                objectName: "camerasBlock"
+                width: parent.width
+                spacing: Style.space(6)
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  visible: !root.cameraPicker.visible
+                  text: "No cameras found"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                // One row: "Camera" and a dropdown of the cameras (the active one
+                // shown); a choice selects it (Model.cameraChoice). Its list takes the
+                // keyboard while open; the key catcher gets it back.
+                Item {
+                  id: cameraLine
+                  objectName: "cameraRow"
+                  width: parent.width
+                  visible: root.cameraPicker.visible
+                  implicitHeight: visible ? Math.max(cameraLabel.implicitHeight, cameraDropdown.implicitHeight) : 0
+                  height: implicitHeight
+
+                  Text {
+                    id: cameraLabel
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.CAMERA_PICKER_LABEL
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  Dropdown {
+                    id: cameraDropdown
+                    objectName: "cameraDropdown"
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(Style.space(160), parent.width - cameraLabel.implicitWidth - Style.space(24))
+                    showLabel: false
+                    options: root.cameraPicker.options
+                    value: root.cameraPicker.value
+                    hasCursor: root.hasCursor("camera", -1)
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    Accessible.role: Accessible.ComboBox
+                    Accessible.name: Model.CAMERA_PICKER_LABEL
+                    onHovered: function(isHovered) { if (isHovered) root.setCursor("camera", -1) }
+                    onChanged: function(value) {
+                      // The Dropdown sets its own value on a choice: bound to the
+                      // daemon's active camera again, so what the daemon says shows.
+                      cameraDropdown.value = Qt.binding(function() { return root.cameraPicker.value })
+                      root.chooseCamera(value)
+                    }
+                    onPopupOpenChanged: if (!popupOpen) catcher.forceActiveFocus()
+                  }
+                }
+
+                // Why a camera cannot be chosen.
+                Repeater {
+                  model: root.cameraPicker.notes
+                  delegate: Text {
+                    required property var modelData
+                    objectName: "cameraNote"
+                    textFormat: Text.PlainText
+                    width: parent ? parent.width : 0
+                    wrapMode: Text.Wrap
+                    text: modelData
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  objectName: "camerasTruncated"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  visible: text !== ""
+                  text: root.truncation
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              // ---- the active camera's health (interface revision 20): the
+              // rate it really delivers when short of its mode's, the daemon's
+              // warnings about it (as the daemon's own warning: the normal text
+              // colour behind a caution sign), and effect suggestions, each
+              // with its button: the first, then a line that opens the rest
+              // (Model.healthView folds them, so the settings' groups keep
+              // their room). Nothing for another camera, or before the daemon
+              // reports it; a button writes only on a click, and what it
+              // changed shows when the daemon next reports. Count models, as
+              // SettingsView's: a new report changes what a row shows.
+              PanelSeparator {
+                objectName: "healthSeparator"
+                visible: root.health.visible
+                foreground: root.foreground
+              }
+
+              Column {
+                id: healthBlock
+                objectName: "healthBlock"
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.health.visible
+
+                // The camera's status lines (revision 26); a closed shutter, which
+                // explains a black or away picture, is the foreground colour in
+                // bold behind a caution sign. Not cursor stops.
+                Repeater {
+                  objectName: "healthStatus"
+                  model: root.health.status.length
+                  delegate: Text {
+                    required property int index
+                    readonly property var line: root.health.status[index] || ({ text: "", strong: false })
+                    objectName: "healthStatus-" + index
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: line.strong ? "Warning: " + line.text : line.text
+                    textFormat: Text.PlainText
+                    width: parent ? parent.width : 0
+                    wrapMode: Text.Wrap
+                    text: line.strong ? Model.GLYPH_WARNING + " " + line.text : line.text
+                    color: line.strong ? root.foreground : root.dim
+                    font.bold: line.strong
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Text {
+                  objectName: "healthDelivers"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  visible: text !== ""
+                  text: root.health.delivers
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Repeater {
+                  objectName: "healthWarnings"
+                  model: root.health.warnings.length
+                  delegate: Text {
+                    required property int index
+                    readonly property string warning: root.health.warnings[index] || ""
+                    objectName: "healthWarning-" + index
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: "Warning: " + warning
+                    textFormat: Text.PlainText
+                    width: parent ? parent.width : 0
+                    wrapMode: Text.Wrap
+                    text: Model.GLYPH_WARNING + " " + warning
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Repeater {
+                  id: suggestionRepeater
+                  objectName: "healthSuggestions"
+                  model: root.health.shownSuggestions
+                  delegate: Item {
+                    id: suggestionRow
+                    required property int index
+                    readonly property var suggestion: root.health.suggestions[index] || ({ label: "", reason: "", action: "" })
+                    objectName: "healthSuggestion-" + index
+                    width: parent ? parent.width : 0
+                    implicitHeight: Math.max(suggestionText.implicitHeight, suggestionButton.implicitHeight)
+                    height: implicitHeight
+
+                    Column {
+                      id: suggestionText
+                      anchors.left: parent.left
+                      anchors.right: suggestionButton.left
+                      anchors.rightMargin: Style.space(10)
+                      anchors.verticalCenter: parent.verticalCenter
+
+                      Text {
+                        objectName: "healthSuggestionLabel-" + suggestionRow.index
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: suggestionRow.suggestion.label
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                      }
+                      Text {
+                        objectName: "healthSuggestionReason-" + suggestionRow.index
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        visible: text !== ""
+                        text: suggestionRow.suggestion.reason
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+
+                    Button {
+                      id: suggestionButton
+                      objectName: "healthSuggestionButton-" + suggestionRow.index
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: suggestionRow.suggestion.action
+                      hasCursor: root.hasCursor("suggestion", suggestionRow.index)
+                      bordered: true
+                      foreground: root.foreground
+                      background: Commons.Color.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      Accessible.role: Accessible.Button
+                      Accessible.name: suggestionRow.suggestion.label + ": " + suggestionRow.suggestion.action
+                      Accessible.description: suggestionRow.suggestion.reason
+                      onHovered: function(on) { if (on) root.setCursor("suggestion", suggestionRow.index) }
+                      onClicked: root.applySuggestion(suggestionRow.index)
+                    }
+                  }
+                }
+
+                // "+2 more" / "Fewer suggestions": opens or folds the
+                // suggestions past the first, as a settings group's header
+                // (the chevron at the right edge).
+                CursorSurface {
+                  id: suggestionsMore
+                  objectName: "healthSuggestionsMore"
+                  width: parent.width
+                  visible: root.health.more.visible
+                  implicitHeight: suggestionsMoreText.implicitHeight + Style.space(6)
+                  hasCursor: root.hasCursor("suggestions-more", -1)
+                  foreground: root.foreground
+                  fill: root.hoverFill
+                  Accessible.role: Accessible.Button
+                  Accessible.name: root.health.more.text
+                  Accessible.description: root.health.shownSuggestions < root.health.suggestions.length ? "Collapsed" : "Expanded"
+
+                  Text {
+                    id: suggestionsMoreText
+                    objectName: "healthSuggestionsMoreText"
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.right: suggestionsMoreGlyph.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: root.health.more.text
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Text {
+                    id: suggestionsMoreGlyph
                     textFormat: Text.PlainText
                     anchors.right: parent.right
                     anchors.rightMargin: Style.space(6)
                     width: Style.space(16)
                     anchors.verticalCenter: parent.verticalCenter
                     horizontalAlignment: Text.AlignHCenter
-                    text: root.health.changes.glyph
+                    text: root.health.more.glyph
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
@@ -2058,251 +2197,518 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onEntered: root.setCursor("recommended-changes", -1)
-                    onClicked: root.toggleHealthList("changes")
-                  }
-                }
-
-                Repeater {
-                  objectName: "recommendedChanges"
-                  model: root.health.changes.open ? root.health.recommended.length : 0
-                  delegate: Text {
-                    required property int index
-                    objectName: "recommendedChange-" + index
-                    textFormat: Text.PlainText
-                    width: parent ? parent.width : 0
-                    wrapMode: Text.Wrap
-                    text: (root.health.recommended[index] || { text: "" }).text
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                    onEntered: root.setCursor("suggestions-more", -1)
+                    onClicked: root.toggleHealthList("suggestions")
                   }
                 }
               }
 
-              SettingsView {
-                id: settingsBlock
-                objectName: "settingsView"
-                // Where this section starts in the panel's column: everything
-                // above it is laid out first, so this never depends on the
-                // section's own height.
-                readonly property real areaTop: tabBlock.y + cameraTab.y + settingsArea.y + y
+              // ---- camera settings: what the daemon publishes for the camera.
+              // While the daemon has the camera open (starting or active) a change
+              // applies at once and shows in the preview; otherwise the daemon stores
+              // it for the next open (the note says which). One group is open at a
+              // time; past the card's cap the body scrolls.
+              Column {
+                id: settingsArea
+                objectName: "settingsArea"
+                // Above what follows it, for its rows' help tips.
+                z: 1
                 width: parent.width
-                room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
-                bar: root.bar
-                view: root.settingsView
-                cursorStop: root.tab === "camera" ? root.currentStop : null
-                choiceCursor: root.choiceCursor
-                keyCatcher: catcher
-                slidersHeld: root.slidersHeld
-                foreground: root.foreground
-                dim: root.dim
-                faint: root.faint
-                accent: root.accent
-                hoverFill: root.hoverFill
-                fontFamily: root.fontFamily
-                onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
-                onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
-                onGroupToggled: function(id) { root.toggleGroup(id) }
-                onResetRequested: root.resetSettings()
-                onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
-              }
-            }
-          }
+                spacing: Style.space(10)
+                visible: root.settingsView.visible || root.recommendedShown
 
-          // ---- Mic: the microphone's own switch and state, then its
-          // settings (processing, input device, the default microphone and
-          // the audio modules' effects), or why there are none
-          Column {
-            id: micTab
-            objectName: "micTab"
-            width: parent.width
-            spacing: Style.space(10)
-            visible: root.tab === "mic"
+                PanelSeparator { foreground: root.foreground }
 
-            // A daemon (or CLI) that predates the microphone.
-            Text {
-              objectName: "micHint"
-              textFormat: Text.PlainText
-              width: parent.width
-              wrapMode: Text.Wrap
-              visible: !root.micView.visible && text !== ""
-              text: root.micView.hint
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
+                // ---- Use recommended settings (interface revision 20): its
+                // title, and on its line the button (as Reset to defaults sits
+                // on SETTINGS), then the changes the daemon's row for this
+                // camera would make as one line ("2 changes: Sharpness, ...")
+                // that opens the list (label: now -> then). Shown only while
+                // there are changes, applied only on the button's click.
+                Column {
+                  id: recommendedBlock
+                  objectName: "recommendedBlock"
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.recommendedShown
 
-            // The microphone itself, on or off (`mic on|off`).
-            Item {
-              id: micHostLine
-              objectName: "micHostRow"
-              width: parent.width
-              visible: root.micView.visible
-              implicitHeight: Math.max(micHostLabel.implicitHeight, micSwitch.implicitHeight)
+                  Item {
+                    objectName: "recommendedHeader"
+                    width: parent.width
+                    height: Math.max(recommendedTitle.implicitHeight, recommendedButton.implicitHeight)
 
-              Text {
-                id: micHostLabel
-                textFormat: Text.PlainText
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: Model.MIC_PRODUCT
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-              ToggleSwitch {
-                id: micSwitch
-                objectName: "micSwitch"
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                checked: root.micView.hostOn
-                busy: Daemon.micBusy
-                hasCursor: root.hasCursor("mic-host", -1)
-                foreground: root.foreground
-                accent: root.accent
-                onHovered: function(on) { if (on) root.setCursor("mic-host", -1) }
-                onToggled: root.toggleMic()
-                Accessible.role: Accessible.CheckBox
-                Accessible.name: Model.MIC_PRODUCT
-                Accessible.checkable: true
-                Accessible.checked: root.micView.hostOn
+                    PanelSectionHeader {
+                      id: recommendedTitle
+                      objectName: "recommendedTitle"
+                      anchors.left: parent.left
+                      anchors.right: recommendedButton.left
+                      anchors.rightMargin: Style.space(10)
+                      anchors.verticalCenter: parent.verticalCenter
+                      elide: Text.ElideRight
+                      text: Model.RECOMMENDED_TITLE
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                    }
 
-                PanelToolTip {
-                  visible: micSwitch.containsMouse
-                  text: root.micView.hostOn ? "Turn the microphone off; the previous default microphone comes back if Omarchy Broadcast Mic was the default"
-                    : "Turn the microphone on; it starts again at every login"
+                    Button {
+                      id: recommendedButton
+                      objectName: "recommendedButton"
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: Model.RECOMMENDED_LABEL
+                      tooltipText: Model.RECOMMENDED_TOOLTIP
+                      bordered: true
+                      hasCursor: root.hasCursor("recommended", -1)
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      Accessible.role: Accessible.Button
+                      Accessible.name: Model.RECOMMENDED_LABEL
+                      Accessible.description: Model.RECOMMENDED_TOOLTIP
+                      onHovered: function(on) { if (on) root.setCursor("recommended", -1) }
+                      onClicked: root.applyRecommended()
+                    }
+                  }
+
+                  // The changes in one line, with the chevron of a settings
+                  // group's header: a click, Enter or Space opens the list.
+                  CursorSurface {
+                    id: recommendedChangesLine
+                    objectName: "recommendedChangesLine"
+                    width: parent.width
+                    implicitHeight: recommendedSummary.implicitHeight + Style.space(6)
+                    hasCursor: root.hasCursor("recommended-changes", -1)
+                    foreground: root.foreground
+                    fill: root.hoverFill
+                    Accessible.role: Accessible.Button
+                    Accessible.name: root.health.changes.text
+                    Accessible.description: root.health.changes.open ? "Expanded" : "Collapsed"
+
+                    Text {
+                      id: recommendedSummary
+                      objectName: "recommendedSummary"
+                      textFormat: Text.PlainText
+                      anchors.left: parent.left
+                      anchors.right: recommendedGlyph.left
+                      anchors.rightMargin: Style.space(6)
+                      anchors.verticalCenter: parent.verticalCenter
+                      elide: Text.ElideRight
+                      text: root.health.changes.text
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Text {
+                      id: recommendedGlyph
+                      textFormat: Text.PlainText
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(6)
+                      width: Style.space(16)
+                      anchors.verticalCenter: parent.verticalCenter
+                      horizontalAlignment: Text.AlignHCenter
+                      text: root.health.changes.glyph
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onEntered: root.setCursor("recommended-changes", -1)
+                      onClicked: root.toggleHealthList("changes")
+                    }
+                  }
+
+                  Repeater {
+                    objectName: "recommendedChanges"
+                    model: root.health.changes.open ? root.health.recommended.length : 0
+                    delegate: Text {
+                      required property int index
+                      objectName: "recommendedChange-" + index
+                      textFormat: Text.PlainText
+                      width: parent ? parent.width : 0
+                      wrapMode: Text.Wrap
+                      text: (root.health.recommended[index] || { text: "" }).text
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+
+                SettingsView {
+                  id: settingsBlock
+                  objectName: "settingsView"
+                  width: parent.width
+                  bar: root.bar
+                  view: root.settingsView
+                  notAvailable: root.tab === "camera" ? root.notAvailable : Model.notAvailableView(root.settingsView, false)
+                  cursorStop: root.tab === "camera" ? root.currentStop : null
+                  choiceCursor: root.choiceCursor
+                  keyCatcher: catcher
+                  viewport: bodyFlick
+                  foreground: root.foreground
+                  dim: root.dim
+                  faint: root.faint
+                  accent: root.accent
+                  hoverFill: root.hoverFill
                   fontFamily: root.fontFamily
+                  onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
+                  onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
+                  onGroupToggled: function(id) { root.toggleGroup(id) }
+                  onResetRequested: root.resetSettings()
+                  onNotAvailableToggled: root.toggleNotAvailable()
+                  onSetupRequested: function(index) { root.openSetupFor(index) }
+                  onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
                 }
               }
             }
 
+            // ---- Mic: the microphone's own switch; off, what it is; on, its state,
+            // then its settings (the input device, the default microphone, the audio
+            // modules' effects), or why there are none
             Column {
-              objectName: "micStatusBlock"
+              id: micTab
+              objectName: "micTab"
               width: parent.width
-              spacing: Style.space(8)
-              visible: root.micView.visible
+              spacing: Style.space(10)
+              visible: root.tab === "mic" && !root.detailsOpen
 
-              Repeater {
-                objectName: "micStatusRepeater"
-                model: root.micView.rows
-                delegate: InfoRow {
-                  required property var modelData
-                  label: modelData.label
-                  value: modelData.value
-                }
-              }
-              // The modules processing it, as the daemon words them.
+              // A daemon (or CLI) that predates the microphone.
               Text {
-                objectName: "micRunsOn"
+                objectName: "micHint"
                 textFormat: Text.PlainText
                 width: parent.width
                 wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.micView.runsOn
+                visible: !root.micView.visible && text !== ""
+                text: root.micView.hint
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
               }
-              Text {
-                objectName: "micError"
-                textFormat: Text.PlainText
+
+              // The microphone itself, on or off (`mic on|off`): a row as the
+              // settings' switch rows are (the row draws the cursor, the
+              // switch sits on the shared right edge), and it owns its click.
+              CursorSurface {
+                id: micHostLine
+                objectName: "micHostRow"
                 width: parent.width
-                wrapMode: Text.Wrap
-                visible: text !== ""
-                text: root.micView.error
-                color: root.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
-            // ---- the microphone's settings, by the same renderer as the
-            // camera's and the effects'; its note says when no audio module
-            // is installed. Last in the tab: past the screen's room it
-            // scrolls, alone.
-            Column {
-              id: micSettingsArea
-              objectName: "micSettingsArea"
-              width: parent.width
-              spacing: Style.space(10)
-              visible: root.micSettings.visible
-
-              PanelSeparator { foreground: root.foreground }
-
-              SettingsView {
-                id: micSettingsBlock
-                objectName: "micSettingsView"
-                namePrefix: "mic-"
-                readonly property real areaTop: tabBlock.y + micTab.y + micSettingsArea.y + y
-                width: parent.width
-                room: root.contentRoom > 0 ? root.contentRoom - areaTop : 0
-                bar: root.bar
-                view: root.micSettings
-                cursorStop: root.tab === "mic" ? root.currentStop : null
-                choiceCursor: root.choiceCursor
-                keyCatcher: catcher
-                slidersHeld: root.slidersHeld
+                visible: root.micView.visible
+                implicitHeight: Math.max(micHostLabel.implicitHeight, micSwitch.implicitHeight) + Style.space(4)
+                hasCursor: root.hasCursor("mic-host", -1)
+                outline: true
                 foreground: root.foreground
-                dim: root.dim
-                faint: root.faint
-                accent: root.accent
-                hoverFill: root.hoverFill
-                fontFamily: root.fontFamily
-                onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
-                onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
-                onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
+                fill: root.hoverFill
+
+                MouseArea {
+                  id: micHostMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onEntered: root.setCursor("mic-host", -1)
+                  onClicked: root.toggleMic()
+                }
+
+                Text {
+                  id: micHostLabel
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.MIC_PRODUCT
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                ToggleSwitch {
+                  id: micSwitch
+                  objectName: "micSwitch"
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  checked: root.micView.hostOn
+                  busy: Daemon.micBusy
+                  // The row draws the cursor.
+                  cursorRing: false
+                  hasCursor: root.hasCursor("mic-host", -1)
+                  foreground: root.foreground
+                  accent: root.accent
+                  onHovered: function(on) { if (on) root.setCursor("mic-host", -1) }
+                  onToggled: root.toggleMic()
+                  Accessible.role: Accessible.CheckBox
+                  Accessible.name: Model.MIC_PRODUCT
+                  Accessible.checkable: true
+                  Accessible.checked: root.micView.hostOn
+
+                  PanelToolTip {
+                    visible: micSwitch.containsMouse || micHostMouse.containsMouse
+                    text: root.micView.hostOn ? "Turn the microphone off; the previous default microphone comes back if Omarchy Broadcast Mic was the default"
+                      : "Turn the microphone on; it starts again at every login"
+                    fontFamily: root.fontFamily
+                  }
+                }
               }
-            }
-          }
 
-          // ---- Status: what the daemon reports, then the live figures
-          Column {
-            id: statusTab
-            objectName: "statusTab"
-            width: parent.width
-            spacing: Style.space(10)
-            visible: root.tab === "status"
+              // Off: what the microphone is, and nothing else. On: its state in
+              // words, and its error.
+              Column {
+                objectName: "micStatusBlock"
+                width: parent.width
+                spacing: Style.space(4)
+                visible: root.micView.visible
 
-            Column {
-              objectName: "statusBlock"
-              width: parent.width
-              spacing: Style.space(8)
+                Text {
+                  objectName: "micExplainer"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  visible: text !== ""
+                  text: root.micView.explainer
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  objectName: "micState"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  visible: text !== ""
+                  text: root.micView.stateLine
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  objectName: "micError"
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  visible: text !== ""
+                  text: root.micView.error
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
 
-              Repeater {
-                objectName: "statusRepeater"
-                model: root.statusRows
-                delegate: InfoRow {
-                  required property var modelData
-                  label: modelData.label
-                  value: modelData.value
+              // ---- the microphone's settings, by the same renderer as the camera's
+              // and the effects', while it is on; its note says when no audio module is
+              // installed.
+              Column {
+                id: micSettingsArea
+                objectName: "micSettingsArea"
+                // Above what follows it, for its rows' help tips.
+                z: 1
+                width: parent.width
+                spacing: Style.space(10)
+                visible: root.micSettings.visible
+
+                SettingsView {
+                  id: micSettingsBlock
+                  objectName: "micSettingsView"
+                  namePrefix: "mic-"
+                  width: parent.width
+                  bar: root.bar
+                  view: root.micSettings
+                  notAvailable: root.tab === "mic" ? root.notAvailable : Model.notAvailableView(root.micSettings, false)
+                  cursorStop: root.tab === "mic" ? root.currentStop : null
+                  choiceCursor: root.choiceCursor
+                  keyCatcher: catcher
+                  viewport: bodyFlick
+                  foreground: root.foreground
+                  dim: root.dim
+                  faint: root.faint
+                  accent: root.accent
+                  hoverFill: root.hoverFill
+                  fontFamily: root.fontFamily
+                  onCursorRequested: function(kind, index) { root.setCursor(kind, index) }
+                  onChoiceHovered: function(stop, index) { root.setChoiceCursor(stop, index) }
+                  onNotAvailableToggled: root.toggleNotAvailable()
+                  onSetupRequested: function(index) { root.openSetupFor(index) }
+                  onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }
                 }
               }
             }
-
-            // ---- live figures, only while active
-            Column {
-              objectName: "statsBlock"
-              width: parent.width
-              spacing: Style.space(8)
-              visible: root.statsRows.length > 0
-
-              PanelSeparator { foreground: root.foreground }
-              PanelSectionHeader {
-                text: "LIVE"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-              Repeater {
-                model: root.statsRows
-                delegate: InfoRow {
-                  required property var modelData
-                  label: modelData.label
-                  value: modelData.value
-                }
-              }
-            }
           }
+        }
+      }
+    }
+
+    // ---- the preview's frame: 16:9, what apps receive, its controls drawn
+    // over it. In the left column (wide) or above the tabs (narrow).
+    Item {
+      id: previewBlock
+      objectName: "previewBlock"
+      parent: root.layout.wide ? wideSlot : narrowSlot
+      width: parent ? parent.width : 0
+      implicitHeight: root.previewPlace.mode === "frame" ? previewFrame.height : 0
+      height: implicitHeight
+      visible: root.previewPlace.mode === "frame"
+
+      // 16:9, as the frames are (480x270). The theme's fill while the
+      // preview starts; black only behind a frame.
+      Rectangle {
+        id: previewFrame
+        objectName: "previewFrame"
+        width: parent.width
+        height: Math.round(width * 9 / 16)
+        color: root.preview.mode === "image" ? "black" : root.hoverFill
+        border.width: 1
+        border.color: root.faint
+        clip: true
+        Accessible.role: Accessible.Graphic
+        Accessible.name: root.preview.mode === "image" ? "Camera preview" : root.preview.text
+
+        // The source is built from the validated path only (see
+        // Model.previewSource); a new frame is a new URL, never cached.
+        // Loaded off the UI thread, and the last frame stays up while the
+        // next one loads, so a reload does not flash the black fill. Bound
+        // only while this panel is open: a closed panel (its content is
+        // kept once built) loads nothing while another one previews.
+        // Decoded at most at the frame size, whatever the file holds.
+        Image {
+          id: previewImage
+          objectName: "previewImage"
+          anchors.fill: parent
+          anchors.margins: 1
+          fillMode: Image.PreserveAspectCrop
+          cache: false
+          asynchronous: true
+          retainWhileLoading: true
+          sourceSize.width: 480
+          sourceSize.height: 270
+          visible: root.opened && root.preview.mode === "image"
+          source: root.opened && root.preview.mode === "image" ? Preview.frameSource : ""
+        }
+
+        // While the preview starts, or (wide) why it failed.
+        Text {
+          objectName: "previewPlaceholder"
+          textFormat: Text.PlainText
+          anchors.centerIn: parent
+          width: parent.width - Style.space(24)
+          horizontalAlignment: Text.AlignHCenter
+          wrapMode: Text.Wrap
+          visible: text !== ""
+          text: root.preview.mode === "box" ? root.preview.text : root.previewPlace.text
+          color: root.previewPlace.error ? root.urgent : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+
+        // The rule-of-thirds grid (the panel's choice of the session).
+        Repeater {
+          objectName: "previewGrid"
+          model: root.gridOn && root.preview.mode === "image" ? 4 : 0
+          delegate: Rectangle {
+            required property int index
+            readonly property bool vertical: index < 2
+            x: vertical ? Math.round(previewFrame.width * (index + 1) / 3) : 0
+            y: vertical ? 0 : Math.round(previewFrame.height * (index - 1) / 3)
+            width: vertical ? 1 : previewFrame.width
+            height: vertical ? previewFrame.height : 1
+            color: root.foreground
+            opacity: 0.45
+          }
+        }
+
+        // The controls over the frame: the grid and the refresh rate on the
+        // left, Hide on the right; only where the preview can run. Each
+        // group on a solid backing of the theme's background, so it reads
+        // over any picture (the chips' own fills are see-through), and the
+        // chosen rate's selected fill stands out against it.
+        Rectangle {
+          objectName: "previewOverlayBacking"
+          visible: overlayLeft.visible
+          x: overlayLeft.x - Style.space(4)
+          y: overlayLeft.y - Style.space(4)
+          width: overlayLeft.width + Style.space(8)
+          height: overlayLeft.height + Style.space(8)
+          radius: Style.cornerRadius
+          color: Commons.Color.background
+        }
+        Rectangle {
+          objectName: "previewHideBacking"
+          visible: hideButton.visible
+          x: hideButton.x - Style.space(4)
+          y: hideButton.y - Style.space(4)
+          width: hideButton.width + Style.space(8)
+          height: hideButton.height + Style.space(8)
+          radius: Style.cornerRadius
+          color: Commons.Color.background
+        }
+        Row {
+          id: overlayLeft
+          objectName: "previewOverlay"
+          anchors.left: parent.left
+          anchors.bottom: parent.bottom
+          anchors.margins: Style.space(8)
+          spacing: Style.space(8)
+          visible: root.previewControls
+
+          Button {
+            id: gridButton
+            objectName: "gridToggle"
+            text: Model.PREVIEW_GRID_LABEL
+            tooltipText: Model.PREVIEW_GRID_TOOLTIP
+            selected: root.gridOn
+            bordered: true
+            fontSize: Style.font.bodySmall
+            hasCursor: root.hasCursor("grid", -1)
+            foreground: root.foreground
+            background: Commons.Color.background
+            accent: root.accent
+            fontFamily: root.fontFamily
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: Model.PREVIEW_GRID_TOOLTIP
+            Accessible.checkable: true
+            Accessible.checked: root.gridOn
+            onHovered: function(on) { if (on) root.setCursor("grid", -1) }
+            onClicked: root.toggleGrid()
+          }
+
+          // The rate the preview asks for: one stop, Left/Right walk it.
+          // The shell's ButtonGroup, driven by the panel cursor
+          // (cursorIndex and hovered), never by Tab focus.
+          ButtonGroup {
+            id: fpsChoices
+            objectName: "fpsChoices"
+            options: root.fpsOptions
+            value: String(Preview.fps)
+            focusable: false
+            cursorIndex: root.hasCursor("fps", -1) ? root.fpsCursor : -1
+            foreground: root.foreground
+            background: Commons.Color.background
+            accent: root.accent
+            fontFamily: root.fontFamily
+            Accessible.name: Model.PREVIEW_RATE_TOOLTIP
+            onHovered: function(index, isHovered) { if (isHovered) root.setFpsCursor(index) }
+            onChanged: function(value) { root.chooseFps(Model.PREVIEW_FPS_CHOICES.indexOf(Number(value))) }
+          }
+        }
+
+        Button {
+          id: hideButton
+          objectName: "previewHide"
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          anchors.margins: Style.space(8)
+          visible: root.previewControls
+          text: Model.PREVIEW_HIDE_LABEL
+          tooltipText: "Hide the preview (it stops; the panel remembers)"
+          bordered: true
+          fontSize: Style.font.bodySmall
+          hasCursor: root.hasCursor("preview", -1)
+          foreground: root.foreground
+          background: Commons.Color.background
+          accent: root.accent
+          fontFamily: root.fontFamily
+          Accessible.role: Accessible.Button
+          Accessible.name: Model.PREVIEW_HIDE_LABEL
+          onHovered: function(on) { if (on) root.setCursor("preview", -1) }
+          onClicked: root.togglePreview()
         }
       }
     }

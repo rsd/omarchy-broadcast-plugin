@@ -66,9 +66,18 @@ widget would hide.
     Model.panelTabValue (anything but a word of Model.PANEL_TABS reads as the
     default), written only by the panel's chooseTab as a word of
     Model.PANEL_TABS through Model.settingsEntry, and the manifest's enum
-    options are exactly Model.PANEL_TABS; each tab page is drawn only for its
-    own word; the card is 520 wide and as tall as its content (the screen's
-    available height is the only cap; past it the Flickable scrolls);
+    options are exactly Model.PANEL_TABS (three: the Status tab is the
+    header's Details view, drawn only while open, with Copy through a
+    read-only text edit); each tab page is drawn only for its own word; the
+    card is Model.panelLayout's width (920 for two columns, 520 for one, from
+    the `narrowPanel` setting and the user's preview switch, never the
+    preview's placeholder) and as tall as its content,
+    capped at 860 and by the screen; past it only the body (one Flickable,
+    none in the renderer) scrolls;
+  - the visibility rule: `enabled` is the daemon's word; `enabled_when` and
+    `disabled_kind` are read for layout only (settingPlacement, rowMaster),
+    never to decide a row's `enabled` or a write;
+  - the plugin's version in Model.PLUGIN_VERSION is the manifest's;
   - the battery saver: the panel's switch and its Mode dropdown are drawn
     from Model.batterySaverView only, the panel holds the configuration read
     only while it is open (Daemon.holdConfig/releaseConfig), writes the row
@@ -192,8 +201,8 @@ check("entry point is BarWidget.qml", manifest.get("entryPoints", {}).get("barWi
 check("allowMultiple is false", manifest.get("barWidget", {}).get("allowMultiple") is False)
 schema = manifest.get("barWidget", {}).get("schema", [])
 schema_keys = [s.get("key") for s in schema]
-check("settings: cliPath, previewEnabled, previewFps, panelTab, batterySaverMode",
-      schema_keys == ["cliPath", "previewEnabled", "previewFps", "panelTab", "batterySaverMode"], str(schema_keys))
+check("settings: cliPath, previewEnabled, previewFps, panelTab, batterySaverMode, narrowPanel",
+      schema_keys == ["cliPath", "previewEnabled", "previewFps", "panelTab", "batterySaverMode", "narrowPanel"], str(schema_keys))
 by_key = {s.get("key"): s for s in schema}
 defaults = manifest.get("barWidget", {}).get("defaults", {})
 check("previewEnabled is a boolean, default false",
@@ -205,6 +214,14 @@ check("previewFps is an integer 15..30 in steps of 15, default 15",
       and fps_schema.get("step") == 15 and fps_schema.get("defaultValue") == 15 and defaults.get("previewFps") == 15,
       str(fps_schema))
 check("defaults hold exactly the schema keys", sorted(defaults) == sorted(schema_keys), str(sorted(defaults)))
+check("narrowPanel is a boolean, default false, read only through Model.narrowPanelValue (a real true)",
+      by_key.get("narrowPanel", {}).get("type") == "boolean" and by_key["narrowPanel"].get("defaultValue") is False
+      and defaults.get("narrowPanel") is False
+      and re.search(r'function narrowPanelValue\(value\)\s*\{\s*return value === true\s*\}', (PLUGIN / "Model.js").read_text(encoding="utf-8")) is not None,
+      str(by_key.get("narrowPanel")))
+_version = re.search(r'^var PLUGIN_VERSION = "([^"]+)"$', (PLUGIN / "Model.js").read_text(encoding="utf-8"), re.M)
+check("Model.PLUGIN_VERSION (the Details view's) is the manifest's version",
+      _version is not None and _version.group(1) == manifest.get("version"), f"{_version.group(1) if _version else None} vs {manifest.get('version')}")
 tab_schema = by_key.get("panelTab", {})
 model_src = (PLUGIN / "Model.js").read_text(encoding="utf-8")
 tabs_match = re.search(r'^var PANEL_TABS = (\[[^\]]*\])$', model_src, re.M)
@@ -351,11 +368,25 @@ check("the image path is isolated (LRI U+2066 ... PDI U+2069) after sanitising",
       'return "\\u2066" + record.backgroundImage + "\\u2069"' in model)
 check("the image gate reads the raw field, not the display copy",
       re.search(r"function hasBackgroundImage\(record\)\s*\{\s*return !!record && record\.backgroundImageSet === true\s*\}", model) is not None)
-check("camera rows are CursorSurfaces", re.search(r"delegate:\s*CursorSurface\s*\{", panel) is not None)
-check("the panel scrolls (Flickable)", "Flickable {" in panel)
-check("the card is 520 wide and as tall as its content (the screen is the only cap)",
-      "contentWidth: panel.fittedContentWidth(Style.space(520))" in sources[PLUGIN / "BarWidget.qml"]
-      and "contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)" in sources[PLUGIN / "BarWidget.qml"])
+check("the camera is chosen from one dropdown of Model.cameraPickerView, its choice through Model.cameraChoice",
+      "readonly property var cameraPicker: Model.cameraPickerView(record)" in panel
+      and "options: root.cameraPicker.options" in panel[panel.find("id: cameraDropdown"):panel.find("onPopupOpenChanged", panel.find("id: cameraDropdown"))]
+      and "root.chooseCamera(value)" in panel[panel.find("id: cameraDropdown"):panel.find("onPopupOpenChanged", panel.find("id: cameraDropdown"))]
+      and "var id = Model.cameraChoice(root.record, value)" in block(panel, "function chooseCamera")
+      and re.findall(r"Daemon\.selectCamera\(([^)]*)\)", panel) == ["id"]
+      and "Daemon.nextCamera" not in panel)
+check("the panel's body scrolls (one Flickable), the renderer has none",
+      panel.count("Flickable {") == 1 and "Flickable" not in sources[PLUGIN / "SettingsView.qml"]
+      and re.search(r'Flickable \{\s*id: bodyFlick\s*objectName: "panelFlick"', panel) is not None)
+check("the card is Model.panelLayout's width (920 two columns, 520 one) and as tall as its content, capped at 860 and by the screen",
+      "contentWidth: panel.fittedContentWidth(Style.space(root.layout.width))" in sources[PLUGIN / "BarWidget.qml"]
+      and "contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(Model.PANEL_HEIGHT_CAP))" in sources[PLUGIN / "BarWidget.qml"]
+      and re.search(r"readonly property var layout: Model\.panelLayout\(storedNarrow, Preview\.switchOn,\s*Model\.previewControlsShown\(Daemon\.record, Preview\.pathReason\)\)",
+                    sources[PLUGIN / "BarWidget.qml"]) is not None
+      and "placeholder" not in block(model, "function panelLayout")
+      and 'readonly property bool storedNarrow: Model.narrowPanelValue(Model.settingValue(settings, "narrowPanel"))' in sources[PLUGIN / "BarWidget.qml"]
+      and "var PANEL_WIDE_WIDTH = 920" in model and "var PANEL_NARROW_WIDTH = 520" in model and "var PANEL_HEIGHT_CAP = 860" in model
+      and "return { wide: wide, width: wide ? PANEL_WIDE_WIDTH : PANEL_NARROW_WIDTH }" in block(model, "function panelLayout"))
 check("no stale reference to check-source.sh (comments included)",
       all("check-source.sh" not in p.read_text(encoding="utf-8") for p in list(everything) + [PLUGIN / "manifest.json"]))
 
@@ -390,12 +421,17 @@ check("a global setting is written as `settings set -- ID VALUE`, the id and the
       re.search(r'function settingArgvGlobal\(cli, id, word\)\s*\{\s*'
                 r'if \(!cliUsable\(cli\) \|\| settingId\(id\) === "" \|\| typeof word !== "string" \|\| !SETTING_VALUE_RE\.test\(word\)\)\s*'
                 r'return null\s*return \[cli, "settings", "set", "--", id, word\]', model) is not None)
-check("Model.js names one setting, the background effect's choice, and the Effect tab skips only that one",
+# The Effect tab now also draws the rows whose rule names the choice under
+# it (effectSettingsView's `follows`), and lists the choice in "Not available
+# now" when it cannot run: still the one setting named.
+check("Model.js names one setting, the background effect's choice: its row, and the Effect tab's rows that follow it",
       'var EFFECT_MODE_SETTING = "effect.background.mode"' in model
-      and model.count("EFFECT_MODE_SETTING") == 3
+      and model.count("EFFECT_MODE_SETTING") == 5
+      and block(model, "function effectSettingsView").count("EFFECT_MODE_SETTING") == 3
+      and "var follows = function(row) { return rowMaster(row) === EFFECT_MODE_SETTING }" in block(model, "function effectSettingsView")
       and "findSetting(record, EFFECT_MODE_SETTING)" in block(model, "function effectModeRow")
-      and re.findall(r"[a-z0-9]+\.[a-z0-9_]+\.[a-z0-9_]+", " ".join(re.findall(r'"([^"\n]*)"', model)))
-          == ["effect.background.mode"])
+      and [x for x in re.findall(r"[a-z0-9]+\.[a-z0-9_]+\.[a-z0-9_]+", " ".join(re.findall(r'"([^"\n]*)"', model)))
+           if x != manifest.get("version")] == ["effect.background.mode"])
 check("a change of the set's camera drops the queued setting writes; cameras compared raw",
       'if ((after ? after.camera : "") !== (before ? before.camera : "")) dropQueuedSettings()' in block(daemon, "function ingest")
       and "var before = record.settings" in block(daemon, "function ingest")
@@ -451,7 +487,8 @@ check("the panel resets the settings only from resetSettings",
       panel.count("Daemon.resetSettings()") == 1 and "Daemon.resetSettings()" in block(panel, "function resetSettings")
       and "Daemon.resetSettings" not in settings_view)
 check("the renderer's repeaters have count models (a delta never rebuilds a row)",
-      re.findall(r"^\s*model:\s*([^\n]+)$", settings_view, re.M) == ["root.view.groups.length", "groupBlock.group.rows.length"],
+      re.findall(r"^\s*model:\s*([^\n]+)$", settings_view, re.M) == ["root.view.groups.length", "groupBlock.group.rows.length",
+                                                                   "root.notAvailable.open ? root.notAvailable.entries.length : 0"],
       str(re.findall(r"^\s*model:\s*([^\n]+)$", settings_view, re.M)))
 check("the sliders are the shell's PanelSlider, integer, only in the renderer",
       sum(len(re.findall(r"\bPanelSlider\s*\{", sources[p])) for p in plugin_qml) == 1
@@ -460,18 +497,19 @@ check("the sliders are the shell's PanelSlider, integer, only in the renderer",
 check("the renderer hands no daemon text to PanelActionButton or PanelToolTip",
       "PanelActionButton" not in settings_view and "PanelToolTip" not in settings_view
       and all(re.search(r"\bsettingText\(" + f, model) for f in (r"o\.label", r"s\.label", r"s\.disabled_reason", r"s\.unit", r"g\.label", r"c\.disabled_reason")))
-check("a held slider keeps both Flickables from taking the drag",
+check("a held slider keeps the body (the one Flickable) from taking the drag",
       panel.count("interactive: contentHeight > height + 0.5 && root.slidersHeld === 0") == 1
-      and settings_view.count("interactive: contentHeight > height + 0.5 && root.slidersHeld === 0") == 1
-      and "slidersHeld: root.slidersHeld" in panel
-      and "onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }" in panel)
+      and "interactive:" not in block(settings_view, "PanelSlider {")
+      and panel.count("onHeldChanged: function(delta) { root.slidersHeld = Math.max(0, root.slidersHeld + delta) }") == 3
+      and settings_view.count("root.heldChanged(") == 2)
 check("the settings section is drawn only from Model.settingsView",
       "readonly property var settingsView: Model.settingsView(record, settingsOpen, Daemon.settingDrafts)" in panel
       and re.search(r'objectName: "settingsArea"[^}]*visible: root\.settingsView\.visible \|\| root\.recommendedShown\n', panel) is not None
       and "view: root.settingsView" in panel
       and "readonly property var effectSettings: Model.effectSettingsView(record, Daemon.settingDrafts)" in panel
-      and "readonly property var stops: Model.cursorStops(record, cameraRepeater.count, previewControls, tab, settingsView, effectSettings, micSettings, health, batterySaver)" in panel
-      and re.search(r'objectName: "effectSettingsArea"[^}]*visible: root\.genericEffect', panel) is not None
+      and "readonly property var stops: Model.cursorStops(record, {" in panel
+      and "settings: settingsView, effectSettings: effectSettings, micSettings: micSettings, health: health, batterySaver: batterySaver," in panel
+      and re.search(r'objectName: "effectSettingsArea"[^}]*visible: root\.effectSettings\.visible', panel) is not None
       and "view: root.effectSettings" in panel)
 check("the set's lines, options and changes are capped before they are walked",
       "var n = Math.min(src.length, SETTINGS_LINE_LOOK)" in block(model, "function settingsGroupLine")
@@ -491,7 +529,7 @@ check("the Mic tab is drawn only from Model.micView and Model.micSettingsView",
 check("the mic groups are routed by the group's surface, only for global settings",
       re.search(r'function groupSurface\(g, scope\)\s*\{\s*return scope === "global" && isPlainObject\(g\) && g\.surface === MIC_SURFACE \? MIC_SURFACE : ""\s*\}', model) is not None
       and 'var MIC_SURFACE = "mic"' in model
-      and "if (group.scope !== \"global\" || group.surface === MIC_SURFACE) continue" in block(model, "function effectSettingsView")
+      and "if (set.groups[a].scope === \"global\" && set.groups[a].surface !== MIC_SURFACE) effectGroups.push(set.groups[a])" in block(model, "function effectSettingsView")
       and "if (group.surface !== MIC_SURFACE) continue" in block(model, "function micSettingsView"))
 check("the microphone's switch runs only `mic on|off`, as an intent from Daemon.setMicHost",
       re.search(r'function micHostArgv\(cli, on\)\s*\{\s*return cliUsable\(cli\) && typeof on === "boolean" \? \[cli, "mic", on \? "on" : "off"\] : null\s*\}', model) is not None
@@ -630,9 +668,27 @@ check("a stored tab is read only through Model.panelTabValue",
       and 'readonly property string storedTab: Model.panelTabValue(Model.settingValue(settings, "panelTab"))' in bar_src
       and "var next = Model.panelTabValue(value)" in block(panel, "function showTab")
       and re.findall(r"root\.tab = ([^\n]*)", panel) == ["next"])
-for word, name in (("effect", "effectTab"), ("camera", "cameraTab"), ("mic", "micTab"), ("status", "statusTab")):
-    check(f"the {word} tab is drawn only while it is the tab shown",
-          re.search(r'objectName: "' + name + r'"[^}]*visible: root\.tab === "' + word + r'"', panel) is not None)
+for word, name in (("effect", "effectTab"), ("camera", "cameraTab"), ("mic", "micTab")):
+    check(f"the {word} tab is drawn only while it is the tab shown (and the Details view is not)",
+          re.search(r'objectName: "' + name + r'"[^}]*visible: root\.tab === "' + word + r'" && !root\.detailsOpen', panel) is not None)
+check("the Status tab is gone: no `status` tab word; its rows are the Details view's (Model.detailsRows), drawn only while open",
+      '"status"' not in re.search(r'^var PANEL_TABS = (\[[^\]]*\])$', model, re.M).group(1)
+      and "statusRows" not in model + panel
+      and "readonly property var detailsRows: Model.detailsRows(record)" in panel
+      and re.search(r'objectName: "detailsView"[^}]*visible: root\.detailsOpen', panel) is not None)
+check("Copy puts Model.detailsText on the clipboard through a read-only, plain-text TextEdit, only from copyDetails",
+      "detailsCopy.text = Model.detailsText(root.detailsRows)" in block(panel, "function copyDetails")
+      and "detailsCopy.copy()" in block(panel, "function copyDetails")
+      and panel.count(".copy()") == 1
+      and re.search(r"TextEdit \{\s*id: detailsCopy\s*objectName: \"detailsCopyText\"\s*textFormat: TextEdit\.PlainText[^}]*readOnly: true", panel) is not None)
+check("enabled_when and disabled_kind are read for layout only: `enabled` is the daemon's, never the rule's",
+      "enabled = s.enabled === true" in block(model, "function settingEntry")
+      and re.findall(r"whenHolds\(", model) == ["whenHolds(", "whenHolds("]
+      and "whenHolds(" in block(model, "function settingPlacement")
+      and "when" not in block(model, "function settingIntentArgv")
+      and "placement" not in block(model, "function settingIntentArgv").lower()
+      and "kind" not in block(model, "function settingIntentArgv")
+      and re.search(r"\.enabled\s*=\s*[^=\n]*(when|kind|placement)", model, re.I) is None)
 check("the clicks go through Model.clickAction: middle toggles through Model.middleClickAction, right opens the setup, left the panel",
       re.search(r'var action = Model\.clickAction\(buttonCode === Qt\.MiddleButton \? "middle" : \(buttonCode === Qt\.RightButton \? "right" : "left"\),\s*'
                 r'root\.record, Daemon\.toggleBusy\)\s*if \(action === "setup"\) root\.openSetup\(\)\s*'
@@ -647,9 +703,11 @@ check("the clicks go through Model.clickAction: middle toggles through Model.mid
 check("settings are written only through Model.settingsEntry, by persistSettings",
       bar_src.count("updateEntryInline(") == 1 and "var entry = Model.settingsEntry(root.moduleName, root.settings, values)"
       in block(bar_src, "function persistSettings") and "updateEntryInline" in block(bar_src, "function persistSettings"))
-check("a widget configures the preview only from onSettingsChanged (never with the base's empty default)",
+check("a widget configures the preview only from onSettingsChanged, for the bar's hand-over only (never with the base's empty default)",
       re.findall(r"Preview\.configure\(([^)]*)\)", bar_src) == ["root, root.settings"]
-      and re.search(r"onSettingsChanged:\s*Preview\.configure\(root, root\.settings\)", bar_src) is not None
+      and re.search(r"onSettingsChanged:\s*if \(Model\.barHandOver\(root\.completed\)\) Preview\.configure\(root, root\.settings\)", bar_src) is not None
+      and "return completed === true" in block(model, "function barHandOver")
+      and "root.completed = true" in block(bar_src, "Component.onCompleted")
       and "Preview.configure" not in block(bar_src, "Component.onCompleted"),
       str(re.findall(r"Preview\.configure\(([^)]*)\)", bar_src)))
 check("persistSettings checks what updateEntryInline answered",

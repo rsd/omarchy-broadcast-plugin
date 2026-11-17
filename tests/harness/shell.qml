@@ -132,7 +132,7 @@ ShellRoot {
 
   FloatingWindow {
     id: window
-    implicitWidth: 620
+    implicitWidth: 960
     implicitHeight: 1200
     color: Commons.Color.background
 
@@ -328,8 +328,13 @@ ShellRoot {
         // Strings: a colour read off a property is a live reference in Qt 6,
         // and would come back as the light value.
         savedPalette = { foreground: String(C.foreground), background: String(C.background), accent: String(C.accent),
-                         urgent: String(C.urgent), muted: String(C.muted), shellValues: C.shellValues }
+                         urgent: String(C.urgent), muted: String(C.muted), shellValues: C.shellValues,
+                         styleOverrides: Commons.Style.styleOverrides }
         C.shellValues = ({})
+        // The installed theme's control state colours are hex values of its
+        // own palette (a dark theme's foreground as the selected text): a
+        // light theme's file names its own, so they follow the palette here.
+        Commons.Style.styleOverrides = ({})
         C.foreground = "#2b2f33"
         C.background = "#f4f1ea"
         C.accent = "#2a6fb0"
@@ -342,6 +347,7 @@ ShellRoot {
         C.urgent = savedPalette.urgent
         C.muted = savedPalette.muted
         C.shellValues = savedPalette.shellValues
+        Commons.Style.styleOverrides = savedPalette.styleOverrides
         savedPalette = null
       }
     }
@@ -661,16 +667,21 @@ ShellRoot {
       h.eq("Effect tab shown", h.find(A(), "effectTab").visible, true)
       h.eq("Camera tab hidden", h.find(A(), "cameraTab").visible, false)
       h.eq("Mic tab hidden", h.find(A(), "micTab").visible, false)
-      h.eq("Status tab hidden", h.find(A(), "statusTab").visible, false)
-      h.eq("tab labels", ["effect", "camera", "mic", "status"].map(function(t) { return h.find(A(), "tab-" + t).text }).join(","), "Effect,Camera,Mic,Status")
-      h.eq("camera rows", h.find(A(), "cameraRepeater").count, 3)
+      h.eq("no Status tab", h.find(A(), "tab-status"), null)
+      h.eq("tab labels", ["effect", "camera", "mic"].map(function(t) { return h.find(A(), "tab-" + t).text }).join(","), "Effects,Camera,Mic")
+      h.eq("cameras in the dropdown", h.find(A(), "cameraDropdown").options.length, 3)
       h.eq("switch shown", h.find(A(), "enableSwitch").visible, true)
+      h.eq("the switch is labelled", h.find(A(), "enableLabel").text, "Virtual camera")
+      h.eq("the (i) shown", h.find(A(), "infoButton").visible, true)
+      h.eq("preview off: a one-line strip", h.find(A(), "previewStrip").visible, true)
+      h.eq("no frame area", h.find(A(), "previewBlock").visible, false)
+      h.eq("one column", A().layout.wide, false)
       h.eq("a revision-4 daemon: no effect choices", h.find(A(), "effectChoices").visible, false)
       h.eq("the Effect tab says the daemon needs updating", h.find(A(), "effectHint").text, h.model.DAEMON_NO_EFFECTS)
       h.eq("no generic effect rows", h.find(A(), "effectSettingsArea").visible, false)
-      h.eq("hero status line", h.content(A()).heroMeta, "idle")
-      h.check("active row marked", h.row(A(), 0).isActive && !h.row(A(), 1).isActive)
-      h.check("active row painted as current", h.row(A(), 0).current && !h.row(A(), 1).current)
+      h.eq("hero status line", h.content(A()).heroMeta, "Ready: starts when an app uses the camera")
+      h.eq("in words, as drawn", h.find(A(), "heroState").text, "Ready: starts when an app uses the camera")
+      h.eq("the active camera shown", h.find(A(), "cameraDropdown").value, brioId)
       h.eq("no cursor before a key", h.content(A()).cursorActive, false)
       h.check("panel took the keyboard focus", h.catcher(A()) && h.catcher(A()).activeFocus)
       h.fits(A(), "Effect tab, idle")
@@ -678,22 +689,36 @@ ShellRoot {
     h.grabStep(function() { return A().popup }, "panel-idle.png")
     h.tabStep(A, "camera", "idle", function() {
       h.eq("cameras block shown on the Camera tab", h.find(A(), "camerasBlock").visible, true)
-      h.eq("next camera shown", h.find(A(), "nextCameraButton").visible, true)
+      h.eq("one camera row: a dropdown", h.find(A(), "cameraRow").visible, true)
+      h.eq("no Next camera button", h.find(A(), "nextCameraButton"), null)
       h.eq("the effect hint on the Effect tab only", h.find(A(), "effectHint").visible && h.find(A(), "effectTab").visible, false)
       h.fits(A(), "Camera tab, idle")
     })
-    h.tabStep(A, "status", "idle", function() {
-      h.eq("stats hidden while idle", h.find(A(), "statsBlock").visible, false)
-      h.eq("status rows", h.find(A(), "statusRepeater").count, 6)
-      h.fits(A(), "Status tab, idle")
+    h.step("the (i): the Details view in place of the tabs", function() {
+      h.check("opened", h.content(A()).toggleDetails())
+    }, function() { return h.find(A(), "detailsView").visible })
+    h.wait(250)
+    h.step("Details: the rows, Copy, no tab", function() {
+      h.eq("tab row hidden", h.find(A(), "tabRow").visible, false)
+      h.eq("Camera tab hidden", h.find(A(), "cameraTab").visible, false)
+      h.eq("rows", h.find(A(), "detailsRepeater").count, h.model.detailsRows(S().record).length)
+      h.eq("the camera's USB id is a row", h.model.detailsRows(S().record).filter(function(r) { return r.label === "USB id" })[0].value, "046d:0944")
+      h.eq("the plugin's version is a row", h.model.detailsRows(S().record).slice(-1)[0].value, h.model.PLUGIN_VERSION)
+      h.check("Copy", h.content(A()).copyDetails())
+      h.eq("the text copied", h.find(A(), "detailsCopyText").text, h.model.detailsText(h.model.detailsRows(S().record)))
+      h.eq("said so", h.find(A(), "detailsCopied").visible, true)
+      h.eq("stops: the header, Back and Copy", h.content(A()).stops.map(function(st) { return st.kind }).join(","), "switch,info,details-back,details-copy")
+      h.fits(A(), "Details view")
+      h.check("closed again", h.content(A()).toggleDetails())
+      h.eq("the tabs back", h.find(A(), "tabRow").visible, true)
       h.tab(A(), "effect")
-      h.eq("nothing written by showing a tab", fakeShell.calls.length, 0)
+      h.eq("nothing written by showing a tab or the details", fakeShell.calls.length, 0)
     })
 
-    // camera selection by clicking a row
-    h.step("select FHD by its row", function() {
+    // camera selection by a choice of the dropdown
+    h.step("select FHD from the dropdown", function() {
       h.markLog()
-      h.row(A(), 1).choose()
+      h.check("chosen", h.content(A()).chooseCamera(fhdId))
     }, function() { return h.newLogArgs().length >= 1 })
     h.step("select argv", function() {
       h.eq("argv", JSON.stringify(h.newLogArgs()[0]), JSON.stringify(["camera", "--", fhdId]))
@@ -701,24 +726,19 @@ ShellRoot {
       h.feed([stateLine({ active_camera: fhdId, active_camera_name: "FHD Camera" }), camerasLine(fhdId)])
     }, function() { return S().record.activeCamera === fhdId })
     h.step("selection arrives on the stream", function() {
-      h.check("row 1 now marked", h.row(A(), 1).isActive && !h.row(A(), 0).isActive)
+      h.eq("the dropdown shows FHD", h.find(A(), "cameraDropdown").value, fhdId)
+      h.eq("choosing the active one runs nothing", h.content(A()).chooseCamera(fhdId), false)
       h.eq("tooltip names FHD", A().iconButton.tooltipText, "Omarchy Broadcast: idle · FHD Camera · 0 consumers")
     })
 
     h.step("hostile id stays one argv element after --", function() {
       h.markLog()
-      h.row(A(), 2).choose()
+      h.check("chosen", h.content(A()).chooseCamera(hostileId))
     }, function() { return h.newLogArgs().length >= 1 })
     h.step("hostile argv", function() {
       h.eq("argv", JSON.stringify(h.newLogArgs()[0]), JSON.stringify(["camera", "--", hostileId]))
     }, function() { return !S().commandBusy })
 
-    h.step("next camera", function() {
-      h.markLog()
-      h.find(A(), "nextCameraButton").clicked()
-    }, function() { return h.newLogArgs().length >= 1 })
-    h.step("next argv", function() { h.eq("argv", JSON.stringify(h.newLogArgs()[0]), JSON.stringify(["camera", "next"])) },
-           function() { return !S().commandBusy })
 
     // ---- keyboard: real key events through the panel's PanelKeyCatcher
     h.step("key: first Down shows the cursor on the switch", function() {
@@ -729,7 +749,11 @@ ShellRoot {
       var c = h.content(A())
       h.eq("stop", c.currentStop.kind, "switch")
       h.eq("switch has the cursor", h.find(A(), "enableSwitch").hasCursor, true)
-      h.eq("stops = switch + tab row (the Effect tab of a revision-4 daemon has no control)", c.stops.length, 2)
+      h.eq("stops = switch, (i), the strip's Show preview, the tab row (the Effect tab of a revision-4 daemon has no control)",
+           c.stops.map(function(st) { return st.kind }).join(","), "switch,info,tabs")
+      h.key(Qt.Key_Down)
+      h.eq("Down: the (i)", c.currentStop.kind, "info")
+      h.eq("the (i) has the cursor", h.find(A(), "infoButton").hasCursor, true)
       h.key(Qt.Key_Down)
     })
     h.step("Down: the tab row, on the tab shown", function() {
@@ -737,7 +761,7 @@ ShellRoot {
       h.eq("stop", c.currentStop.kind, "tabs")
       h.eq("tab cursor on Effect", c.tabCursor, 0)
       h.eq("Effect chip has the cursor", h.find(A(), "tab-effect").hasCursor, true)
-      h.eq("the other chips have none", h.find(A(), "tab-camera").hasCursor || h.find(A(), "tab-status").hasCursor, false)
+      h.eq("the other chips have none", h.find(A(), "tab-camera").hasCursor || h.find(A(), "tab-mic").hasCursor, false)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
       h.check("no effect verb is left to call", c.toggleDenoise === undefined && S().setEffect === undefined && S().setDenoise === undefined)
       h.check("an effect choice with no options runs nothing", !c.chooseEffect(0))
@@ -765,49 +789,25 @@ ShellRoot {
            JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, panelTab: "camera" }))
       h.eq("both widgets hold the stored tab", A().storedTab + "," + B().storedTab, "camera,camera")
       h.eq("no command ran", h.newLogArgs().length, 0)
-      h.eq("stops = switch + tab row + rendered rows + next (the Camera tab)", c.stops.length, h.find(A(), "cameraRepeater").count + 3)
+      h.eq("stops = switch, (i), tab row, the camera dropdown (the Camera tab)", c.stops.map(function(st) { return st.kind }).join(","), "switch,info,tabs,camera")
       h.key(Qt.Key_Right)
       h.eq("Right: Mic", c.tab, "mic")
       h.key(Qt.Key_Right)
-      h.key(Qt.Key_Right)
-      h.eq("Right twice more: Status, and no further", c.tab, "status")
+      h.eq("Right once more: Mic, and no further", c.tab, "mic")
       h.key(Qt.Key_Left)
-      h.key(Qt.Key_Left)
-      h.eq("Left twice: Camera again", c.tab, "camera")
-      h.eq("a write per change", fakeShell.calls.length, h.notes.calls + 5)
+      h.eq("Left: Camera again", c.tab, "camera")
+      h.eq("a write per change", fakeShell.calls.length, h.notes.calls + 3)
       h.key(Qt.Key_Down)
     })
-    h.step("Down: first camera row", function() {
-      h.eq("row 0 has the cursor", h.row(A(), 0).hasCursor, true)
+    h.step("Down: the camera dropdown", function() {
+      h.eq("the dropdown has the cursor", h.find(A(), "cameraDropdown").hasCursor, true)
       h.eq("switch lost it", h.find(A(), "enableSwitch").hasCursor, false)
-      h.eq("one highlight", [0, 1, 2].filter(function(i) { return h.row(A(), i).hasCursor }).length, 1)
     })
     h.grabStep(function() { return A().popup }, "panel-cursor-row.png")
-    h.step("Enter selects the row under the cursor", function() {
-      h.markLog()
-      h.key(Qt.Key_Return)
-    }, function() { return h.newLogArgs().length >= 1 })
-    h.step("keyboard select argv", function() {
-      h.eq("argv", lastArgs(), JSON.stringify(["camera", "--", brioId]))
-      h.feed([stateLine({ active_camera: brioId, active_camera_name: "Logitech MX Brio" }), camerasLine(brioId)])
-    }, function() { return S().record.activeCamera === brioId && !S().commandBusy })
-    h.step("j, j, j, Down: to Next camera and no further", function() {
-      h.key("j")
-      h.key("j")
-      h.key("j")
+    h.step("Down from the last stop stays; k x3 back to the switch, Enter turns off", function() {
       h.key(Qt.Key_Down)
-    })
-    h.step("cursor on Next camera", function() {
-      h.eq("stop", h.content(A()).currentStop.kind, "next")
-      h.eq("Next camera has the cursor", h.find(A(), "nextCameraButton").hasCursor, true)
-      h.markLog()
-      h.key(Qt.Key_Space)
-    }, function() { return h.newLogArgs().length >= 1 })
-    h.step("Space runs Next camera", function() {
-      h.eq("argv", lastArgs(), JSON.stringify(["camera", "next"]))
-    }, function() { return !S().commandBusy })
-    h.step("k x6 back to the switch, Enter turns off", function() {
-      for (var i = 0; i < 6; i++) h.key("k")
+      h.eq("still the dropdown", h.content(A()).currentStop.kind, "camera")
+      for (var i = 0; i < 3; i++) h.key("k")
       h.eq("on the switch", h.content(A()).currentStop.kind, "switch")
       h.markLog()
       h.key(Qt.Key_Enter)
@@ -824,9 +824,9 @@ ShellRoot {
       h.eq("argv", lastArgs(), JSON.stringify(["on"]))
       h.feed([stateLine({ state: "idle", enabled: true, active_camera: fhdId, active_camera_name: "FHD Camera" }), camerasLine(fhdId)])
     }, function() { return S().record.state === "idle" && S().record.activeCamera === fhdId && !S().commandBusy })
-    h.step("hovering a row moves the same cursor", function() {
-      h.content(A()).setCursor("camera", 2)
-      h.eq("row 2 has the cursor", h.row(A(), 2).hasCursor, true)
+    h.step("hovering the dropdown moves the same cursor", function() {
+      h.content(A()).setCursor("camera", -1)
+      h.eq("the dropdown has the cursor", h.find(A(), "cameraDropdown").hasCursor, true)
       h.eq("switch has none", h.find(A(), "enableSwitch").hasCursor, false)
       h.key(Qt.Key_Escape)
     }, function() { return !A().opened })
@@ -843,7 +843,7 @@ ShellRoot {
       var c = h.content(A())
       h.notes.calls = fakeShell.calls.length
       h.key("4")
-      h.eq("4: Status", c.tab, "status")
+      h.eq("4: nothing (three tabs)", c.tab, "camera")
       h.eq("a number key shows no cursor", c.cursorActive, false)
       h.key("3")
       h.eq("3: Mic", c.tab, "mic")
@@ -856,19 +856,19 @@ ShellRoot {
       h.key("9")
       h.eq("other digits do nothing", c.tab, "camera")
       h.key("2")
-      h.eq("a write per change, none for the tab shown", fakeShell.calls.length, h.notes.calls + 4)
+      h.eq("a write per change, none for the tab shown", fakeShell.calls.length, h.notes.calls + 3)
     })
     h.step("tabs: a click on a chip", function() {
-      var chip = h.find(A(), "tab-status")
+      var chip = h.find(A(), "tab-mic")
       keys.mouseClick(chip, chip.width / 2, chip.height / 2)
-    }, function() { return h.content(A()).tab === "status" })
+    }, function() { return h.content(A()).tab === "mic" })
     h.step("tabs: hovering moves the cursor, not the tab; Enter shows the tab under it", function() {
       var c = h.content(A())
-      h.eq("written", JSON.stringify(fakeShell.calls[fakeShell.calls.length - 1].entry.panelTab), JSON.stringify("status"))
+      h.eq("written", JSON.stringify(fakeShell.calls[fakeShell.calls.length - 1].entry.panelTab), JSON.stringify("mic"))
       c.setTabCursor(0)
       h.eq("Effect chip has the cursor", h.find(A(), "tab-effect").hasCursor, true)
-      h.eq("Status still shown", c.tab, "status")
-      h.eq("Status still selected", h.find(A(), "tab-status").selected, true)
+      h.eq("Mic still shown", c.tab, "mic")
+      h.eq("Mic still selected", h.find(A(), "tab-mic").selected, true)
       h.key(Qt.Key_Return)
       h.eq("Enter: Effect", c.tab, "effect")
       h.key("2")
@@ -899,10 +899,12 @@ ShellRoot {
       h.eq("Effect tab shown", h.find(w, "effectTab").visible, true)
       w.settings = { cliPath: shellRoot.cli, panelTab: 2 }
       h.eq("a number reads as the default", h.content(w).tab, "effect")
-      w.settings = { cliPath: shellRoot.cli, panelTab: ["status"] }
+      w.settings = { cliPath: shellRoot.cli, panelTab: ["mic"] }
       h.eq("an array reads as the default", h.content(w).tab, "effect")
       w.settings = { cliPath: shellRoot.cli, panelTab: "status" }
-      h.eq("a valid stored change is followed", h.content(w).tab, "status")
+      h.eq("the Status tab of an older version reads as the default", h.content(w).tab, "effect")
+      w.settings = { cliPath: shellRoot.cli, panelTab: "mic" }
+      h.eq("a valid stored change is followed", h.content(w).tab, "mic")
       h.eq("nothing written back", fakeShell.calls.length, h.notes.calls)
       w.close()
       w.destroy()
@@ -913,14 +915,14 @@ ShellRoot {
     }, function() { return A().opened })
     h.step("tabs: a refused write holds for the session", function() {
       var c = h.content(A())
-      h.check("chosen", c.chooseTab(3))
+      h.check("chosen", c.chooseTab(2))
       h.eq("one refused write", fakeShell.refused.length, 1)
       h.eq("the refused entry", JSON.stringify(fakeShell.refused[0].entry),
-           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, panelTab: "status" }))
-      h.eq("shown", c.tab, "status")
+           JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, panelTab: "mic" }))
+      h.eq("shown", c.tab, "mic")
       h.eq("the settings stay as the bar gave them", A().settings.panelTab, "camera")
       A().settings = JSON.parse(JSON.stringify(A().settings))
-      h.eq("re-injected stale settings do not undo it", c.tab, "status")
+      h.eq("re-injected stale settings do not undo it", c.tab, "mic")
       h.eq("the preview's note does not claim it", h.find(A(), "previewUnsaved").visible, false)
       fakeShell.refuse = false
       fakeShell.refused = []
@@ -1007,26 +1009,27 @@ ShellRoot {
       A().open()
     }, function() { return S().record.state === "active" && S().record.stats !== null })
     h.wait(300)
-    h.step("the Status tab", function() { h.tab(A(), "status") })
+    h.step("the Details view", function() { h.content(A()).toggleDetails() })
     h.wait(250)
     h.step("active icon and panel", function() {
       h.eq("active glyph", A().iconButton.text, glyphOf("active"))
       h.eq("active accent", A().iconButton.active, true)
       h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: active · FHD Camera · 1 consumer")
-      h.eq("stats block shown", h.find(A(), "statsBlock").visible, true)
-      h.eq("hero status line", h.content(A()).heroMeta, "active")
+      h.eq("the live figures are Details rows", h.model.detailsRows(S().record).filter(function(r) { return r.label === "Frame rate" }).length, 1)
+      h.eq("hero status line", h.content(A()).heroMeta, "In use, 30 fps")
       var rows = h.model.statsRows(S().record)
       h.eq("fps", rows[0].value, "30.0 fps")
       h.eq("latency", rows[1].value, "41.2 ms")
       h.eq("cpu", rows[2].value, "6.5 %")
       h.eq("gpu -1 is unknown", rows[3].value, "—")
-      h.eq("Status tab shown", h.find(A(), "statusTab").visible, true)
-      h.fits(A(), "Status tab, active with figures")
+      h.eq("Details shown", h.find(A(), "detailsView").visible, true)
+      h.fits(A(), "Details, active with figures")
     })
     h.grabStep(function() { return strip }, "bar-active.png")
     h.grabStep(function() { return A().popup }, "panel-active.png")
 
     h.step("error state", function() {
+      if (h.content(A()).detailsOpen) h.content(A()).toggleDetails()
       h.feed([stateLine({ state: "error", consumers: 1, active_camera: fhdId, active_camera_name: "FHD Camera",
                           error: "loopback device <b>Omarchy Broadcast</b> not found & retrying\nevery 2 s" })])
     }, function() { return S().record.state === "error" })
@@ -1036,7 +1039,7 @@ ShellRoot {
       h.eq("error uses urgent", String(A().iconButton.activeColor), String(barA.urgent))
       h.eq("error active", A().iconButton.active, true)
       h.eq("stats cleared on leaving active", S().record.stats, null)
-      h.eq("stats block hidden", h.find(A(), "statsBlock").visible, false)
+      h.eq("no live figures in the Details", h.model.detailsRows(S().record).filter(function(r) { return r.label === "Frame rate" }).length, 0)
       var e = h.find(A(), "daemonError")
       h.eq("daemon error shown", e.visible, true)
       h.check("daemon error sanitised", !/[<>&\n]/.test(e.text), e.text)
@@ -1055,7 +1058,7 @@ ShellRoot {
       h.check("not the error glyph", A().iconButton.text !== glyphOf("error"))
       h.eq("not urgent", String(A().iconButton.activeColor), String(Commons.Color.accent))
       h.eq("visual key stays active", h.model.visualKey(S().record), "active")
-      h.eq("no ERROR status", h.content(A()).heroMeta, "active")
+      h.eq("no error status", h.content(A()).heroMeta, "In use")
       h.eq("daemon error line hidden", h.find(A(), "daemonError").visible, false)
       var w = h.find(A(), "daemonWarning")
       h.eq("warning line shown", w.visible, true)
@@ -1080,7 +1083,7 @@ ShellRoot {
       h.check("not elided or truncated", !w.truncated, "truncated")
       h.check("the Text is as tall as its lines", w.height >= w.contentHeight - 0.5, w.height + " for " + w.contentHeight)
       h.check("within its column", w.width <= w.parent.width + 0.5, w.width + " of " + w.parent.width)
-      h.fits(A(), "Status tab with a long warning")
+      h.fits(A(), "Effects tab with a long warning")
     })
     h.grabStep(function() { return A().popup }, "panel-long-warning.png")
     h.step("back to the error state", function() {
@@ -1190,7 +1193,7 @@ ShellRoot {
       h.eq("unavailable dimmed", A().iconButton.dimmed, true)
       h.check("distinct from off", glyphOf("unavailable") !== glyphOf("off"))
       h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: daemon not running")
-      h.eq("hero status line", h.content(A()).heroMeta, "unavailable")
+      h.eq("hero status line", h.content(A()).heroMeta, "Unavailable")
       h.eq("unavailable title", h.find(A(), "unavailableTitle").text, "omarchy-broadcastd is not running")
       h.eq("start command as text", h.find(A(), "unavailableCommand").text, "systemctl --user start omarchy-broadcastd")
       h.eq("switch hidden", h.find(A(), "enableSwitch").visible, false)
@@ -1518,39 +1521,40 @@ ShellRoot {
     h.countStep(1, "after the setting is restored")
 
     // 12 cameras (the producer's maximum) and a truncation flag on a screen
-    // too short for the card: the screen caps its height, the content scrolls
-    // (the fallback), and the cursor row is kept in view
+    // too short for the card: the screen caps its height, only the body (the
+    // tab's content) scrolls, and the cursor's row is kept in view
     h.step("12 cameras", function() {
       h.feed([manyCamerasLine(12, true)])
       A().open()
     }, function() { return S().record.cameras.length === 12 && h.content(A()) !== null })
     h.step("on a short screen", function() {
       h.tab(A(), "camera")
-      A().popup.availableCardHeight = 600
+      A().popup.availableCardHeight = 230
     })
     h.wait(400)
-    h.step("panel capped and scrollable", function() {
+    h.step("panel capped; the body scrolls, the header and the tabs stay", function() {
       var flick = h.find(A(), "panelFlick")
-      h.eq("rows", h.find(A(), "cameraRepeater").count, 12)
-      h.check("card height capped by the screen", A().popup.height <= 600, A().popup.height + " > 600")
-      h.check("content taller than the card", flick.contentHeight > flick.height, flick.contentHeight + " vs " + flick.height)
+      h.eq("cameras in the dropdown", h.find(A(), "cameraDropdown").options.length, 12)
+      h.check("card height capped by the screen", A().popup.height <= 230, A().popup.height + " > 230")
+      h.check("body taller than its room", flick.contentHeight > flick.height, flick.contentHeight + " vs " + flick.height)
       h.eq("scrolls", flick.interactive, true)
+      h.eq("the tab row is not in the scroller", h.content(A()).inBody(h.find(A(), "tabRow")), false)
       h.eq("truncation row", h.find(A(), "camerasTruncated").text, "More cameras are connected; they are not shown")
-      h.eq("stops", h.content(A()).stops.length, 15)
+      h.eq("stops", h.content(A()).stops.map(function(st) { return st.kind }).join(","), "switch,info,tabs,camera")
+      flick.contentY = flick.contentHeight - flick.height
     })
     h.grabStep(function() { return A().popup }, "panel-12-cameras.png")
-    h.step("cursor to the last camera row", function() {
+    h.step("cursor to the camera dropdown", function() {
       h.key(Qt.Key_Down)
-      for (var i = 0; i < 13; i++) h.key(Qt.Key_Down)
+      for (var i = 0; i < 3; i++) h.key(Qt.Key_Down)
     })
     h.wait(400)
     h.step("cursor row kept in view", function() {
       var flick = h.find(A(), "panelFlick")
-      var row = h.row(A(), 11)
-      h.eq("row 11 has the cursor", row.hasCursor, true)
-      h.check("scrolled", flick.contentY > 0, flick.contentY)
+      var row = h.find(A(), "cameraRow")
+      h.eq("the dropdown has the cursor", h.find(A(), "cameraDropdown").hasCursor, true)
       var top = row.mapToItem(flick, 0, 0).y
-      h.check("row inside the viewport", top >= 0 && top + row.height <= flick.height, top + " / " + flick.height)
+      h.check("row inside the viewport", top >= -0.5 && top + row.height <= flick.height + 0.5, top + " / " + flick.height)
     })
     h.grabStep(function() { return A().popup }, "panel-12-cameras-cursor.png")
     h.step("back to three cameras", function() {
@@ -1565,6 +1569,7 @@ ShellRoot {
     healthScenario()
     setupScenario()
     mediaScenario()
+    measureScenario()
 
     // the resolver itself: omarchy-broadcast on PATH, nothing else
     var resolverCase = function(label, argv, path, wantOut, wantExit) {
@@ -1735,29 +1740,21 @@ ShellRoot {
       h.eq("held by the open panel", P().heldCount, 1)
       h.eq("not wanted", P().wanted, false)
       h.eq("never started", P().starts, 0)
-      h.eq("note", h.find(A(), "previewNote").text, "Camera idle; turn on Preview to start it")
+      h.eq("note", h.find(A(), "previewNote").text, "Preview off")
       h.eq("note shown", h.find(A(), "previewNote").visible, true)
-      h.eq("in the 16:9 frame area, which keeps its place", h.find(A(), "previewFrame").visible
-           && h.find(A(), "previewNote").parent === h.find(A(), "previewFrame"), true)
+      h.eq("a one-line strip, no frame area", h.find(A(), "previewStrip").visible && !h.find(A(), "previewFrame").visible, true)
+      h.eq("the strip is one line", h.find(A(), "previewStrip").height < h.find(A(), "previewNote").font.pixelSize * 4, true)
       h.eq("image hidden", h.find(A(), "previewImage").visible, false)
       h.eq("note in the dim colour", h.find(A(), "previewNote").color, h.content(A()).dim)
-      h.eq("switch shown, off", h.find(A(), "previewToggle").visible && !h.find(A(), "previewToggle").checked, true)
-      h.eq("rate label", h.find(A(), "fpsRow") !== null, true)
-      h.eq("15 fps selected", h.fpsChip(A(), 15).selected, true)
+      h.eq("Show preview offered", h.find(A(), "previewToggle").visible && h.find(A(), "previewToggle").text === "Show preview", true)
+      h.eq("one column, 520", A().layout.wide + "," + A().popup.contentWidth, "false,520")
       h.eq("nothing written on open", fakeShell.calls.length, 0)
       h.eq("nothing unsaved", h.find(A(), "previewUnsaved").visible, false)
-      // Column order (hidden items keep no place, so order, not y)
-      var block = h.find(A(), "previewBlock")
-      var kids = block.parent.children
-      var at = function(name) { for (var i = 0; i < kids.length; i++) if (kids[i].objectName === name) return i; return -1 }
-      h.check("the preview follows the header and the error blocks, before the tabs",
-              at("previewBlock") > at("daemonError") && at("previewBlock") > at("commandErrorBlock")
-              && at("daemonError") > at("hero") && at("previewBlock") < at("tabBlock"),
-              [at("hero"), at("daemonError"), at("commandErrorBlock"), at("previewBlock"), at("tabBlock")].join(","))
-      var row = h.find(A(), "previewControls")
-      h.check("the switch and the rate share one row under the frame",
-              row.visible && h.find(A(), "previewRow").parent === row && h.find(A(), "fpsRow").parent === row
-              && row.y > h.find(A(), "previewFrame").y, String(row.y))
+      // the strip under the tab row (narrow: the tabs stay put from tab to tab)
+      var strip = h.find(A(), "previewStrip")
+      h.check("the strip follows the tab row",
+              strip.mapToItem(null, 0, 0).y > h.find(A(), "tabRow").mapToItem(null, 0, 0).y, String(strip.y))
+      h.eq("stops", h.content(A()).stops.map(function(st) { return st.kind }).join(","), "switch,info,tabs,preview")
     })
     h.previewCountStep(0, "panel open, idle, switch off")
     h.grabStep(function() { return A().popup }, "v1-preview-off.png")
@@ -1770,14 +1767,27 @@ ShellRoot {
       h.eq("not wanted", P().wanted, false)
       h.eq("never started", P().starts, 0)
       h.eq("note", h.find(A(), "previewNote").text, "Preview off")
-      h.eq("the frame area keeps its place", h.find(A(), "previewFrame").visible, true)
+      h.eq("still the strip", h.find(A(), "previewStrip").visible, true)
     })
     h.previewCountStep(0, "active for preview leases only")
 
-    h.step("preview: an app opens the loopback: shown at once", function() {
+    h.step("preview: an app opens the loopback: hidden stays hidden", function() {
       h.feed([stateLine(rev5({ state: "active", consumers: 2, loopback_consumers: 1 }))])
+    }, function() { return S().record.loopbackConsumers === 1 })
+    h.wait(600)
+    h.step("preview: hidden, nothing runs whoever uses the camera", function() {
+      h.eq("not wanted", P().wanted, false)
+      h.eq("never started", P().starts, 0)
+      h.eq("still the strip", h.find(A(), "previewStrip").visible, true)
+    })
+    h.previewCountStep(0, "hidden, active with a loopback consumer")
+
+    // Show preview: a user's action, persisted through updateEntryInline
+    h.step("preview: Show preview", function() {
+      h.find(A(), "previewToggle").clicked()
     }, function() { return P().frames >= 3 && h.find(A(), "previewImage").status === Image.Ready }, 8000)
-    h.step("preview: frames", function() {
+    h.wait(300)
+    h.step("preview: frames, beside the settings", function() {
       var img = h.find(A(), "previewImage")
       h.eq("started once", P().starts, 1)
       h.eq("argv", JSON.stringify(P().lastArgv), JSON.stringify([shellRoot.cli, "preview", "--json", "--fps", "15"]))
@@ -1788,9 +1798,14 @@ ShellRoot {
       h.eq("frame size", img.implicitWidth + "x" + img.implicitHeight, "480x270")
       h.eq("decoded at most at the frame size", img.sourceSize.width + "x" + img.sourceSize.height, "480x270")
       h.eq("frame area is 16:9", Math.abs(h.find(A(), "previewFrame").height - h.find(A(), "previewFrame").width * 9 / 16) <= 1, true)
-      h.eq("note hidden", h.find(A(), "previewNote").visible, false)
+      h.eq("the strip gone", h.find(A(), "previewStrip").visible, false)
+      h.eq("two columns, 920", A().layout.wide + "," + A().popup.contentWidth, "true,920")
+      h.eq("the frame in the left column", h.find(A(), "previewColumn").visible && h.find(A(), "previewBlock").parent.parent === h.find(A(), "previewColumn"), true)
+      h.eq("the summary under it", h.find(A(), "previewSummary").visible, true)
+      h.eq("its controls over the frame", h.find(A(), "previewOverlay").visible && h.find(A(), "previewHide").visible, true)
       h.check("source is the expected path", String(img.source).indexOf("file://" + framePath + "?") === 0, String(img.source))
       h.eq("no frame dropped", P().droppedFrames, 0)
+      h.eq("stops", h.content(A()).stops.map(function(st) { return st.kind }).join(","), "switch,info,preview,grid,fps,tabs")
       h.notes.seq = P().seq
       h.notes.source = String(img.source)
     })
@@ -1802,25 +1817,23 @@ ShellRoot {
       h.note("preview at 15 fps: " + P().frames + " frames, " + h.notes.loads + " image loads")
       h.check("one load per frame shown", h.notes.loads >= 3, h.notes.loads)
     })
-    h.previewCountStep(1, "active with a loopback consumer", 15)
+    h.previewCountStep(1, "shown, active with a loopback consumer", 15)
     h.grabStep(function() { return A().popup }, "v1-preview-active.png")
-
-    h.step("preview: the loopback consumer leaves", function() {
-      h.feed([stateLine(rev5({ state: "active", consumers: 1, loopback_consumers: 0 }))])
-    }, function() { return !P().running })
-    h.step("preview: its own lease does not hold it (R1)", function() {
-      h.eq("note", h.find(A(), "previewNote").text, "Preview off")
-      h.eq("image hidden", h.find(A(), "previewImage").visible, false)
-      h.eq("no error", P().exitError, "")
+    h.step("preview: the grid over the frame", function() {
+      h.check("on", h.content(A()).toggleGrid())
+      h.eq("four lines", h.find(A(), "previewGrid").count, 4)
     })
-    h.previewCountStep(0, "after the other consumer left")
-
-    // the switch: a user's action, persisted through updateEntryInline
-    h.step("preview: click the Preview switch", function() {
-      h.find(A(), "previewToggle").toggled()
-    }, function() { return P().running && P().frames >= 1 }, 8000)
-    h.step("preview: a frame shown with the switch on", null,
-           function() { return P().frames >= 3 && h.find(A(), "previewImage").status === Image.Ready }, 8000)
+    h.grabStep(function() { return A().popup }, "v1-preview-grid.png")
+    h.step("preview: the grid off; the loopback consumer leaves", function() {
+      h.check("off", h.content(A()).toggleGrid())
+      h.eq("no lines", h.find(A(), "previewGrid").count, 0)
+      h.feed([stateLine(rev5({ state: "active", consumers: 1, loopback_consumers: 0 }))])
+    }, function() { return S().record.loopbackConsumers === 0 })
+    h.wait(400)
+    h.step("preview: shown, it runs on (the switch holds it)", function() {
+      h.eq("running", P().running, true)
+      h.eq("no restart", P().starts, 1)
+    })
     h.grabStep(function() { return A().popup }, "v1-preview-on.png")
     h.step("preview: a light palette", function() { h.lightPalette(true) })
     h.wait(300)
@@ -1835,21 +1848,21 @@ ShellRoot {
       h.lightPalette(false)
       h.check("the accent is back", String(Commons.Color.accent) !== h.notes.lightAccent, String(Commons.Color.accent))
     })
-    h.step("preview: the switch is persisted and starts it", function() {
+    h.step("preview: the shown state is persisted (restored at the next open)", function() {
       h.eq("one write", fakeShell.calls.length, 1)
       var call = fakeShell.calls[0]
       h.eq("entry id", call.id, shellRoot.moduleName)
       h.eq("entry", JSON.stringify(call.entry), JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: true }))
       h.eq("switch on", P().switchOn, true)
-      h.eq("switch drawn on", h.find(A(), "previewToggle").checked, true)
-      h.eq("second start", P().starts, 2)
+      h.eq("Hide offered over the frame", h.find(A(), "previewHide").visible, true)
+      h.eq("still the first start", P().starts, 1)
       // the other monitor's panel
       B().open()
     }, function() { return h.content(B()) !== null })
     h.wait(400)
     h.step("preview: two panels, one process", function() {
       h.eq("held twice", P().heldCount, 2)
-      h.eq("still the second start", P().starts, 2)
+      h.eq("still the first start", P().starts, 1)
       h.eq("B shows the frame too", h.find(B(), "previewImage").visible, true)
       var bimg = h.find(B(), "previewImage")
       h.notes.bLoads = 0
@@ -1864,7 +1877,7 @@ ShellRoot {
     h.step("preview: A closed, B still holds it", function() {
       h.eq("held once", P().heldCount, 1)
       h.eq("running", P().running, true)
-      h.eq("no restart", P().starts, 2)
+      h.eq("no restart", P().starts, 1)
       // A's content is kept once built: its Image must not follow the frames.
       h.eq("the closed panel's Image has no source", String(h.find(A(), "previewImage").source), "")
       h.eq("the closed panel loads nothing", h.notes.loads - h.notes.loadsAtClose, 0)
@@ -1876,7 +1889,7 @@ ShellRoot {
     h.previewCountStep(0, "every panel closed")
     h.step("preview: no stray frame file left by the fake", function() {
       h.eq("held by nobody", P().heldCount, 0)
-      h.eq("no restart", P().starts, 2)
+      h.eq("no restart", P().starts, 1)
     })
 
     // hostile lines on the stream, delivered by the next start
@@ -1892,8 +1905,8 @@ ShellRoot {
       ])
     }, function() { return h.writerIdle() })
     h.step("preview: reopen the panel (switch on)", function() { A().open() }, function() { return P().running && P().frames >= 1 }, 8000)
-    h.step("preview: reopened, the switch persisted, it restarts", function() {
-      h.eq("third start", P().starts, 3)
+    h.step("preview: reopened, the shown state persisted, it restarts", function() {
+      h.eq("second start", P().starts, 2)
       h.eq("one panel", P().heldCount, 1)
     })
     h.wait(300)
@@ -1914,7 +1927,7 @@ ShellRoot {
       h.eq("entry", JSON.stringify(fakeShell.calls[1].entry),
            JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: true, previewFps: 30 }))
       h.eq("argv", JSON.stringify(P().lastArgv), JSON.stringify([shellRoot.cli, "preview", "--json", "--fps", "30"]))
-      h.eq("fourth start", P().starts, 4)
+      h.eq("third start", P().starts, 3)
       h.eq("30 fps selected", h.fpsChip(A(), 30).selected, true)
       h.eq("argv in the fake's log", h.logLines().some(function(l) { return l.indexOf(" [preview] [--json] [--fps] [30]") !== -1 }), true)
     })
@@ -1951,14 +1964,17 @@ ShellRoot {
 
     // keyboard: the preview switch and the frame-rate row are cursor stops
     h.step("preview: first Down shows the cursor", function() { h.key(Qt.Key_Down) }, function() { return h.content(A()).cursorActive })
-    h.step("preview: Down to the Preview switch", function() {
+    h.step("preview: Down to Hide", function() {
       h.eq("on the on/off switch first", h.content(A()).currentStop.kind, "switch")
       h.key(Qt.Key_Down)
+      h.key(Qt.Key_Down)
     }, function() { return h.content(A()).currentStop.kind === "preview" })
-    h.step("preview: the switch has the cursor; Down to the frame rate", function() {
-      h.eq("preview switch has the cursor", h.find(A(), "previewToggle").hasCursor, true)
-      h.eq("stops = switch + preview + fps + tab row (the Effect tab of a revision-5 daemon has no control)",
-           h.content(A()).stops.length, 4)
+    h.step("preview: Hide has the cursor; Down to the grid, then the rate", function() {
+      h.eq("Hide has the cursor", h.find(A(), "previewHide").hasCursor, true)
+      h.eq("stops (the Effect tab of a revision-5 daemon has no control)",
+           h.content(A()).stops.map(function(st) { return st.kind }).join(","), "switch,info,preview,grid,fps,tabs")
+      h.key(Qt.Key_Down)
+      h.eq("the grid has the cursor", h.find(A(), "gridToggle").hasCursor, true)
       h.key(Qt.Key_Down)
     }, function() { return h.content(A()).currentStop.kind === "fps" })
     h.step("preview: lands on the current rate; Left, Enter: 15 fps", function() {
@@ -1970,25 +1986,28 @@ ShellRoot {
     }, function() { return P().running && P().lastArgv[4] === "15" && P().frames >= 1 }, 8000)
     h.step("preview: 15 fps from the keyboard", function() {
       h.eq("third write", fakeShell.calls.length, 3)
-      h.eq("fifth start", P().starts, 5)
+      h.eq("fourth start", P().starts, 4)
       h.key(Qt.Key_Down)
       h.eq("then the tab row", h.content(A()).currentStop.kind, "tabs")
       h.key(Qt.Key_Up)
       h.key(Qt.Key_Up)
-      h.eq("back on the Preview switch", h.content(A()).currentStop.kind, "preview")
+      h.key(Qt.Key_Up)
+      h.eq("back on Hide", h.content(A()).currentStop.kind, "preview")
       h.key(Qt.Key_Return)
     }, function() { return !P().running })
-    h.step("preview: Enter turned it off (active for previews only)", function() {
+    h.step("preview: Enter hid it", function() {
       h.eq("fourth write", fakeShell.calls.length, 4)
       h.eq("entry", JSON.stringify(fakeShell.calls[3].entry),
            JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: false, previewFps: 15 }))
       h.eq("note", h.find(A(), "previewNote").text, "Preview off")
+      h.eq("the strip back, one column", h.find(A(), "previewStrip").visible + "," + A().layout.wide, "true,false")
+      h.eq("the cursor stays on the strip's button", h.content(A()).currentStop.kind, "preview")
     })
-    h.previewCountStep(0, "switched off from the keyboard")
+    h.previewCountStep(0, "hidden from the keyboard")
 
     // an unexpected exit: shown, and not respawned until the rule re-arms
-    h.step("preview: PipeWire consumer: shown at once", function() {
-      h.feed([stateLine(rev5({ state: "active", consumers: 2, pipewire_consumers: 1 }))])
+    h.step("preview: shown again", function() {
+      h.check("shown", h.content(A()).togglePreview())
     }, function() { return P().running && P().frames >= 1 }, 8000)
     h.step("preview: kill the preview child (SIGKILL)", function() {
       h.notes.starts = P().starts
@@ -1998,10 +2017,12 @@ ShellRoot {
     h.step("preview: the exit is shown, nothing respawns", function() {
       h.eq("no restart", P().starts, h.notes.starts)
       h.eq("failed", P().failed, true)
-      var t = h.find(A(), "previewNote").text
+      var t = h.find(A(), "previewPlaceholder").text
       h.check("the reason", t.indexOf("stopped by signal 9") !== -1 && t.indexOf("Reopen the panel to retry.") !== -1, t)
-      h.eq("drawn as an error", h.find(A(), "previewNote").color, Commons.Color.urgent)
-      h.eq("in the frame area", h.find(A(), "previewFrame").visible, true)
+      h.eq("drawn as an error", h.find(A(), "previewPlaceholder").color, Commons.Color.urgent)
+      h.eq("wide (the layout does not follow the error): in the frame area, with Hide",
+           A().layout.wide + "," + h.find(A(), "previewBlock").visible + "," + h.find(A(), "previewStrip").visible + "," + h.find(A(), "previewHide").visible,
+           "true,true,false,true")
     })
     h.previewCountStep(0, "after the crash")
     h.step("preview: the next start exits on its own", function() { h.writeFile("preview-exit", ["1"]) },
@@ -2011,15 +2032,21 @@ ShellRoot {
       Qt.callLater(function() { A().open() })
     }, function() { return P().starts === h.notes.starts + 1 && !P().running && P().failed }, 8000)
     h.step("preview: an exit status is shown too", function() {
-      var t = h.find(A(), "previewNote").text
+      var t = h.find(A(), "previewPlaceholder").text
       h.check("status 1", t.indexOf("exited with status 1") !== -1, t)
       h.removeFile("preview-exit")
     }, function() { return h.writerIdle() })
 
     // a choice the shell cannot store (S7: an entry over the key cap; S8: no
     // layout entry): in force for the session, said so, and not undone by a
-    // widget re-injected with the same entry. Here the switch moves nothing
-    // (a PipeWire consumer already wants the preview).
+    // widget re-injected with the same entry, nor by a widget made then (a
+    // monitor plugged in: its creation emits the base widget's empty
+    // settings before the bar hands it the entry). From the shown state, as
+    // stored, so the choice is to hide it: an empty hand-over taken as one
+    // would read as hidden, and the entry after it would show it again.
+    h.step("preview: shown, stored", function() {
+      if (!(P().switchOn && A().settings.previewEnabled === true)) h.content(A()).togglePreview()
+    }, function() { return P().switchOn && A().settings.previewEnabled === true && h.writerIdle() })
     h.step("preview: an entry over the key cap", function() {
       h.notes.calls = fakeShell.calls.length
       h.notes.saved = JSON.parse(JSON.stringify(A().settings))
@@ -2027,7 +2054,7 @@ ShellRoot {
       for (var i = 0; i <= 300; i++) huge["junk" + i] = i
       A().settings = huge
       h.notes.switchBefore = P().switchOn
-      h.find(A(), "previewToggle").toggled()
+      h.content(A()).togglePreview()
     })
     h.wait(200)
     h.step("preview: not written, in force, and said so", function() {
@@ -2036,7 +2063,7 @@ ShellRoot {
       h.eq("unsaved", P().unsaved, true)
       h.eq("message shown", h.find(A(), "previewUnsaved").visible, true)
       h.eq("message", h.find(A(), "previewUnsaved").text, "Could not save the preview setting")
-      h.find(A(), "previewToggle").toggled()
+      h.content(A()).togglePreview()
     })
     h.wait(200)
     h.step("preview: switched back, nothing unsaved", function() {
@@ -2045,7 +2072,7 @@ ShellRoot {
       h.eq("message hidden", h.find(A(), "previewUnsaved").visible, false)
       A().settings = h.notes.saved
       fakeShell.refuse = true
-      h.find(A(), "previewToggle").toggled()
+      h.content(A()).togglePreview()
     })
     h.wait(200)
     h.step("preview: the shell finds no entry (answers false)", function() {
@@ -2086,6 +2113,7 @@ ShellRoot {
       h.eq("switch", P().switchOn, h.notes.switchBefore)
       h.eq("nothing unsaved", P().unsaved, false)
       h.eq("no write but the refused one", fakeShell.calls.length, h.notes.calls)
+      if (!P().switchOn) h.check("shown again, stored", h.content(A()).togglePreview())
     })
 
     // an exit that lands once the panel is closed is no failure (S5): the
@@ -2137,9 +2165,9 @@ ShellRoot {
     h.step("preview: needs 0.18", function() {
       h.eq("note", h.find(A(), "previewNote").text, "Preview needs omarchy-broadcast 0.18 or newer")
       h.eq("note shown", h.find(A(), "previewNote").visible, true)
-      h.eq("the frame area keeps its place", h.find(A(), "previewFrame").visible, true)
-      h.eq("switch hidden", h.find(A(), "previewRow").visible, false)
-      h.eq("rate hidden", h.find(A(), "fpsRow").visible, false)
+      h.eq("a strip, no frame area", h.find(A(), "previewStrip").visible && !h.find(A(), "previewFrame").visible, true)
+      h.eq("no button", h.find(A(), "previewToggle").visible, false)
+      h.eq("no rate stop", h.content(A()).stops.map(function(st) { return st.kind }).indexOf("fps"), -1)
       h.eq("not supported", P().supported, false)
       h.eq("no restart", P().starts, h.notes.starts)
       h.eq("no preview stops", h.content(A()).stops.map(function(st) { return st.kind }).indexOf("preview"), -1)
@@ -2162,7 +2190,7 @@ ShellRoot {
   // c1-layout-<tab>-<kind>.png; `back`: the tab shown again afterwards.
   function layoutGrabs(kind, back) {
     var A = function() { return h.widgetA }
-    var tabs = ["effect", "camera", "mic", "status"]
+    var tabs = ["effect", "camera", "mic"]
     for (var i = 0; i < tabs.length; i++) {
       var t = tabs[i]
       h.step("layout: the " + t + " tab, " + kind, (function(t) { return function() { h.tab(A(), t) } })(t))
@@ -2188,19 +2216,43 @@ ShellRoot {
   // One settings-state line: group|label|id|type|label|value|default|stored|
   // min|max|step|unit|options|master|when|reason|fixed|scope ("global" for a
   // setting of the daemon's own, else empty)|surface (the group's: "mic" for
-  // the microphone's, else empty).
+  // the microphone's, else empty)|offset|scale|description|kind (a fixed
+  // row's disabled_kind, revision 28; default device).
   function stateRow(group, groupLabel, id, type, label, value, def, o) {
     var x = o || {}
     var f = function(v) { return v === undefined ? "" : String(v) }
     return [group, groupLabel, id, type, label, f(value), f(def), x.stored ? "1" : "0", f(x.min), f(x.max), f(x.step), f(x.unit),
-            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope), f(x.surface), f(x.offset), f(x.scale), f(x.description)].join("|")
+            f(x.options), f(x.master), f(x.when), f(x.reason), x.fixed ? "1" : "", f(x.scope), f(x.surface), f(x.offset), f(x.scale), f(x.description),
+            f(x.kind)].join("|")
   }
-  // The MX Brio as the daemon publishes it (its starting values).
-  function brioState() {
+  // The MX Brio as the daemon publishes it (its starting values). `current`
+  // true: as today's daemon (interface revision 28) orders its camera
+  // catalogue: "Framing & focus" first (after Capture, for a camera with
+  // modes; field of view, then zoom, first in it), then Image, White
+  // balance, Exposure. Else as an older daemon did: Image, White balance,
+  // Exposure, then "Focus & zoom" (the settings scenario's revision-7 daemon).
+  function brioState(current) {
     var img = function(id, label, v, d, o) {
       var m = { min: 0, max: 255, step: 1 }
       for (var k in o) m[k] = o[k]
       return stateRow("image", "Image", "camera.image." + id, "int", label, v, d, m)
+    }
+    if (current === true) {
+      var rows = brioState(false)
+      var framing = [
+        stateRow("focus", "Framing & focus", "camera.focus.field_of_view", "enum", "Field of view", "65", "90", { options: "90:90°,78:78°,65:65°" }),
+        stateRow("focus", "Framing & focus", "camera.focus.zoom_absolute", "int", "Zoom", 100, 100, { min: 100, max: 500, step: 1 }),
+        stateRow("focus", "Framing & focus", "camera.focus.focus_automatic_continuous", "bool", "Continuous autofocus", "true", "true"),
+        stateRow("focus", "Framing & focus", "camera.focus.focus_absolute", "int", "Focus", 40, 0,
+                 { min: 0, max: 255, step: 1, master: "camera.focus.focus_automatic_continuous", when: "false",
+                   reason: "Turn off continuous autofocus to change this" }),
+        stateRow("focus", "Framing & focus", "camera.focus.pan_absolute", "int", "Pan", 14400, 0, { min: -36000, max: 36000, step: 3600 }),
+        stateRow("focus", "Framing & focus", "camera.focus.tilt_absolute", "int", "Tilt", -14400, 0, { min: -36000, max: 36000, step: 3600 }),
+        stateRow("focus", "Framing & focus", "camera.focus.pan_reset", "action", "Recentre pan", "-", "-"),
+        stateRow("focus", "Framing & focus", "camera.focus.tilt_reset", "action", "Recentre tilt", "-", "-"),
+        stateRow("focus", "Framing & focus", "camera.focus.show_mode", "bool", "Show Mode", "true", "false")
+      ]
+      return framing.concat(rows.filter(function(r) { return r.indexOf("focus|") !== 0 }))
     }
     return [
       img("brightness", "Brightness", 128, 128), img("contrast", "Contrast", 128, 128), img("saturation", "Saturation", 128, 128),
@@ -2265,9 +2317,9 @@ ShellRoot {
       return null
     }
     var stopOf = function(id) { var r = row(id); return r ? r.row.stop : -1 }
-    // Scroll the settings so the item is inside the viewport, then click it.
+    // Scroll the body so the item is inside the viewport, then click it.
     var clickAt = function(id, item) {
-      var f = h.find(A(), "settingsFlick")
+      var f = h.find(A(), "panelFlick")
       var y = item.mapToItem(f, 0, 0).y
       if (y + item.height > f.height) f.contentY += y + item.height - f.height + 8
       else if (y < 0) f.contentY += y - 8
@@ -2275,11 +2327,12 @@ ShellRoot {
     }
     // The panel's choice of open group, as a header click makes it.
     var openOnly = function(ids) { C().settingsOpen = ids.length > 0 ? ids[0] : "" }
+    // The settings have no scroller of their own: the panel's body is the one.
     var noInnerScroll = function(label) {
-      var f = h.find(A(), "settingsFlick")
-      h.check(label + ": the settings do not scroll (" + Math.round(f.contentHeight) + " in " + Math.round(f.height) + ")",
+      h.eq(label + ": no scroller in the settings", h.find(A(), "settingsFlick"), null)
+      var f = h.find(A(), "panelFlick")
+      h.check(label + ": the body does not scroll (" + Math.round(f.contentHeight) + " in " + Math.round(f.height) + ")",
               !f.interactive && f.contentHeight <= f.height + 0.5, f.contentHeight + " in " + f.height)
-      h.eq(label + ": no scroll cue", h.find(A(), "settingsMoreBelow").visible, false)
     }
     var openGroups = function() { return C().settingsView.groups.filter(function(g) { return g.expanded }).map(function(g) { return g.id }).join(",") }
     // M3: the one highlight of the row at stop `id` ("row", "chip:<label>",
@@ -2322,17 +2375,20 @@ ShellRoot {
       var set = S().record.settings
       h.eq("assembled from seven lines into four groups", set.groups.map(function(g) { return g.id + ":" + g.rows.length }).join(","),
            "image:6,white_balance:3,exposure:6,focus:9")
-      h.eq("the section's title", h.find(A(), "settingsTitle").text + "/" + h.find(A(), "settingsTitle").visible, "SETTINGS/true")
+      h.eq("no section title", h.find(A(), "settingsTitle"), null)
       var hl = h.find(A(), "settingsGroupLabel-image"), rl = h.find(A(), "settingLabel-camera.image.brightness")
       h.eq("a group's label is aligned with its rows' labels", Math.round(hl.mapToItem(C(), 0, 0).x), Math.round(rl.mapToItem(C(), 0, 0).x))
-      h.check("Reset to defaults is outside the scrolling area", !within(h.find(A(), "settingsReset"), h.find(A(), "settingsFlick")))
-      h.check("on the settings' title line", Math.abs(h.find(A(), "settingsReset").mapToItem(C(), 0, h.find(A(), "settingsReset").height / 2).y
-              - h.find(A(), "settingsTitle").mapToItem(C(), 0, h.find(A(), "settingsTitle").height / 2).y) < 2)
+      var reset = h.find(A(), "settingsReset"), last = header("focus")
+      h.check("Reset to defaults: a quiet link at the bottom, under the groups",
+              reset.mapToItem(C(), 0, 0).y > last.mapToItem(C(), 0, 0).y && reset.bordered === false, String(reset.mapToItem(C(), 0, 0).y))
+      h.check("right-aligned", Math.abs(reset.mapToItem(C(), reset.width, 0).x - last.mapToItem(C(), last.width, 0).x) < 2)
       h.eq("area shown", h.find(A(), "settingsArea").visible, true)
       h.eq("group labels", ["image", "white_balance", "exposure", "focus"].map(function(g) {
         return h.find(A(), "settingsGroupLabel-" + g).text }).join(","), "Image,White balance,Exposure,Focus & zoom")
       h.eq("Image rows", ["brightness", "contrast", "saturation", "sharpness", "backlight_compensation"].map(function(n) {
         return shown("camera.image." + n) }).join(","), "true,true,true,true,true")
+      h.eq("an int of two values is a switch", !!h.find(A(), "settingSwitch-camera.image.backlight_compensation")
+           && h.find(A(), "settingSwitch-camera.image.backlight_compensation").checked, true)
       h.eq("closed groups draw no rows", row("camera.white_balance.white_balance_temperature"), null)
       h.eq("labels", h.find(A(), "settingLabel-camera.image.brightness").text + "," + h.find(A(), "settingLabel-camera.image.backlight_compensation").text,
            "Brightness,Backlight compensation")
@@ -2342,7 +2398,7 @@ ShellRoot {
       h.eq("no hint", h.find(A(), "settingsHint").visible, false)
       h.eq("reset shown", h.find(A(), "settingsReset").visible, true)
       h.eq("cursor stops: the rows drawn", kinds(),
-           "switch,preview,fps,tabs,camera0,camera1,camera2,next,reset,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
+           "switch,info,tabs,preview,camera,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3,reset")
       h.eq("accessible row", row("camera.image.brightness").Accessible.name, "Brightness")
       h.eq("accessible header", header("exposure").Accessible.name + "/" + header("exposure").Accessible.description, "Exposure/Collapsed")
       h.fits(A(), "Camera tab with the MX Brio, Image open")
@@ -2356,11 +2412,11 @@ ShellRoot {
       h.find(A(), "panelFlick").contentY = 0
       h.markLog()
       h.key(Qt.Key_Down)                              // shows the cursor
-      // preview, fps, the tab row, three cameras, Next camera, Reset, Image, brightness
-      for (var i = 0; i < 10; i++) h.key(Qt.Key_Down)
+      // the (i), the tab row, Show preview, the camera, Image, brightness
+      for (var i = 0; i < 6; i++) h.key(Qt.Key_Down)
     }, function() { return C().currentStop && C().currentStop.kind === "setting" })
     h.step("settings: Right nudges brightness, written once after the debounce, with -- before id and value", function() {
-      h.eq("cursor on brightness", JSON.stringify(C().currentStop), JSON.stringify({ kind: "setting", index: 0 }))
+      h.eq("cursor on brightness", JSON.stringify(C().currentStop), JSON.stringify({ kind: "setting", index: 0, id: "camera.image.brightness" }))
       h.eq("brightness row has the cursor", row("camera.image.brightness").hasCursor, true)
       h.key(Qt.Key_Right)
       h.key("l")
@@ -2377,12 +2433,12 @@ ShellRoot {
     // a group header opens and closes, by key and by click
     h.step("settings: Up to the Image header, Enter closes it", function() {
       h.key(Qt.Key_Up)
-      h.eq("on the header", JSON.stringify(C().currentStop), JSON.stringify({ kind: "group", index: 0 }))
+      h.eq("on the header", JSON.stringify(C().currentStop), JSON.stringify({ kind: "group", index: 0, id: "image" }))
       h.key(Qt.Key_Return)
     }, function() { return !shown("camera.image.brightness") })
     h.step("settings: closed; the stops follow; Space opens it again", function() {
-      h.eq("stops", kinds(), "switch,preview,fps,tabs,camera0,camera1,camera2,next,reset,group0,group1,group2,group3")
-      h.eq("cursor kept on the header", JSON.stringify(C().currentStop), JSON.stringify({ kind: "group", index: 0 }))
+      h.eq("stops", kinds(), "switch,info,tabs,preview,camera,group0,group1,group2,group3,reset")
+      h.eq("cursor kept on the header", JSON.stringify(C().currentStop), JSON.stringify({ kind: "group", index: 0, id: "image" }))
       h.key(Qt.Key_Space)
     }, function() { return shown("camera.image.brightness") })
     h.step("settings: Left closes, Right opens", function() {
@@ -2393,7 +2449,7 @@ ShellRoot {
       h.eq("nothing written by the headers", setArgs().length, 1)
     })
     h.step("settings: click White balance", function() { click(header("white_balance")) },
-           function() { return shown("camera.white_balance.white_balance_temperature") })
+           function() { return shown("camera.white_balance.white_balance_automatic") })
     h.wait(200)
     h.step("settings: one group open at a time: White balance closed Image", function() {
       h.eq("open", openGroups(), "white_balance")
@@ -2402,39 +2458,39 @@ ShellRoot {
       h.key(Qt.Key_Down)
       h.eq("a switch row draws the one highlight (not the switch)", highlights("camera.white_balance.white_balance_automatic"), "row")
     })
-    h.step("settings: the greyed temperature shows its reason and takes no input", function() {
-      var t = row("camera.white_balance.white_balance_temperature")
-      var reason = h.find(A(), "settingReason-camera.white_balance.white_balance_temperature")
-      h.eq("reason shown", reason.visible, true)
-      h.eq("reason", reason.text, "Turn off automatic white balance to change this")
-      h.eq("accessible description: unavailable, the value and the reason", t.Accessible.description,
-           "Unavailable. 2975 K. Turn off automatic white balance to change this")
-      h.eq("its widget is disabled", h.find(A(), "settingWidget-camera.white_balance.white_balance_temperature").enabled, false)
-      // M6: only the control fades; the label is dim (not faint), the value
-      // and the reason keep full opacity, the reason in the panel's hint size
-      var temp = "camera.white_balance.white_balance_temperature"
-      h.eq("the slider fades", h.find(A(), "settingSlider-" + temp).opacity, 0.45)
-      h.eq("the widget's box does not", h.find(A(), "settingWidget-" + temp).opacity, 1)
-      h.eq("the value does not", h.find(A(), "settingValue-" + temp).opacity, 1)
-      h.eq("the label is the dim colour (not faint)", String(h.find(A(), "settingLabel-" + temp).color), String(C().dim))
-      h.eq("the reason's size is the panel's hint size", reason.font.pixelSize, h.find(A(), "settingsNote").font.pixelSize)
-      h.eq("unit", h.find(A(), "settingValue-camera.white_balance.white_balance_temperature").text, "2975 K")
-      h.eq("the switch above it is on", h.find(A(), "settingSwitch-camera.white_balance.white_balance_automatic").checked, true)
-      h.eq("no reason under an enabled row", h.find(A(), "settingReason-camera.white_balance.white_balance_automatic").visible, false)
-      C().setCursor("setting", stopOf("camera.white_balance.white_balance_temperature"))
+    h.step("settings: the manual temperature is hidden while automatic white balance is on", function() {
+      h.eq("hidden (its master is on: parent_off)", row("camera.white_balance.white_balance_temperature"), null)
+      h.eq("the daemon's kind", h.model.findSetting(S().record, "camera.white_balance.white_balance_temperature").kind, "parent_off")
+      h.eq("no reason line under every row", h.find(A(), "settingReason-camera.white_balance.white_balance_automatic"), null)
+      h.eq("the switch is on", h.find(A(), "settingSwitch-camera.white_balance.white_balance_automatic").checked, true)
       h.markLog()
-      h.key(Qt.Key_Right)
-      h.eq("a key moves nothing", JSON.stringify(S().settingDrafts), "{}")
-      h.eq("a greyed write is refused", S().moveSetting("camera.white_balance.white_balance_temperature", 3000), false)
+      C().setCursor("setting", stopOf("camera.white_balance.white_balance_automatic"))
+      h.key(Qt.Key_Return)
+    }, function() { return value("camera.white_balance.white_balance_automatic") === false && !S().commandBusy }, 3000)
+    h.wait(250)
+    h.step("settings: automatic off reveals the temperature under it", function() {
+      var t = row("camera.white_balance.white_balance_temperature")
+      h.eq("shown", !!t && t.visible, true)
+      h.eq("enabled", t.row.enabled, true)
+      h.eq("under its master", t.row.depth, 1)
+      h.check("drawn in", h.find(A(), "settingLabel-camera.white_balance.white_balance_temperature").mapToItem(C(), 0, 0).x
+              > h.find(A(), "settingLabel-camera.white_balance.white_balance_automatic").mapToItem(C(), 0, 0).x + 4)
+      h.eq("unit", h.find(A(), "settingValue-camera.white_balance.white_balance_temperature").text, "2975 K")
+      h.markLog()
+      C().setCursor("setting", stopOf("camera.white_balance.white_balance_automatic"))
+      h.key(Qt.Key_Return)
+    }, function() { return value("camera.white_balance.white_balance_automatic") === true && !S().commandBusy }, 3000)
+    h.wait(250)
+    h.step("settings: automatic on hides it again", function() {
+      h.eq("hidden", row("camera.white_balance.white_balance_temperature"), null)
+      C().cursorActive = false
     })
 
     // Exposure: the greyed exposure time, then Manual enables it
-    h.step("settings: only Exposure open", function() { openOnly(["exposure"]) }, function() { return shown("camera.exposure.exposure_time_absolute") })
+    h.step("settings: only Exposure open", function() { openOnly(["exposure"]) }, function() { return shown("camera.exposure.auto_exposure") })
     h.wait(250)
-    h.step("settings: exposure time greyed with its reason", function() {
-      h.eq("reason", h.find(A(), "settingReason-camera.exposure.exposure_time_absolute").text, "Set exposure to manual to change this")
-      h.eq("reason shown", h.find(A(), "settingReason-camera.exposure.exposure_time_absolute").visible, true)
-      h.eq("unit", h.find(A(), "settingValue-camera.exposure.exposure_time_absolute").text, "1250 ×100 µs")
+    h.step("settings: the exposure time hidden while the mode is Auto", function() {
+      h.eq("hidden", row("camera.exposure.exposure_time_absolute"), null)
       h.eq("the mode is Auto", h.find(A(), "settingChoices-camera.exposure.auto_exposure").value, "aperture_priority")
       h.eq("anti-flicker: four choices", h.find(A(), "settingChoices-camera.exposure.power_line_frequency").options.length, 4)
       h.eq("keep framerate off", h.find(A(), "settingSwitch-camera.exposure.keep_framerate").checked, false)
@@ -2473,11 +2529,12 @@ ShellRoot {
     h.step("settings: click Manual", function() { click(chip("camera.exposure.auto_exposure", "Manual")) },
            function() { return value("camera.exposure.auto_exposure") === "manual" && !S().commandBusy }, 4000)
     h.wait(250)
-    h.step("settings: the fake's delta enabled exposure time", function() {
+    h.step("settings: the fake's delta enabled exposure time: revealed under the mode", function() {
       h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.exposure.auto_exposure", "manual")]))
       var t = h.model.findSetting(S().record, "camera.exposure.exposure_time_absolute")
       h.eq("enabled", t.enabled, true)
-      h.eq("reason gone", h.find(A(), "settingReason-camera.exposure.exposure_time_absolute").visible, false)
+      h.eq("shown under its master", row("camera.exposure.exposure_time_absolute").row.depth, 1)
+      h.eq("unit", h.find(A(), "settingValue-camera.exposure.exposure_time_absolute").text, "1250 ×100 µs")
       h.eq("widget enabled", h.find(A(), "settingWidget-camera.exposure.exposure_time_absolute").enabled, true)
       h.eq("Manual selected", h.find(A(), "settingChoices-camera.exposure.auto_exposure").value, "manual")
       h.eq("no draft left", JSON.stringify(S().settingDrafts), "{}")
@@ -2501,16 +2558,16 @@ ShellRoot {
     h.wait(250)
     h.step("settings: Focus & zoom alone open, with its two Recentre buttons", function() {
       h.eq("open", openGroups(), "focus")
-      h.eq("rows", C().settingsView.groups[3].rows.length, 9)
+      h.eq("rows (the manual focus hidden while autofocus is on)", C().settingsView.groups[3].rows.length, 8)
       h.eq("the buttons", h.find(A(), "settingAction-camera.focus.pan_reset").text + "," + h.find(A(), "settingAction-camera.focus.tilt_reset").text,
            "Recentre pan,Recentre tilt")
       C().setCursor("setting", stopOf("camera.focus.pan_reset"))
       h.eq("an action row: the button draws the one highlight", highlights("camera.focus.pan_reset"), "button")
       C().setCursor("setting", stopOf("camera.focus.zoom_absolute"))
       h.eq("a slider row: the row draws it", highlights("camera.focus.zoom_absolute"), "row")
-      h.check("a switch row's label takes the room the switch leaves",
-              h.find(A(), "settingLabel-camera.focus.focus_automatic_continuous").width > row("camera.focus.focus_automatic_continuous").width * 0.6,
-              h.find(A(), "settingLabel-camera.focus.focus_automatic_continuous").width + " of " + row("camera.focus.focus_automatic_continuous").width)
+      var cl = h.find(A(), "settingLabel-camera.focus.focus_automatic_continuous")
+      h.check("a switch row's label is never cut: its whole text fits", cl.implicitWidth <= cl.width + 0.5 && !cl.truncated,
+              cl.implicitWidth + " in " + cl.width)
       C().cursorActive = false
     })
     h.grabStep(function() { return A().popup }, "s1-focus-actions.png")
@@ -2519,16 +2576,11 @@ ShellRoot {
       h.eq("choices", fov.options.map(function(o) { return o.label }).join(","), "90°,78°,65°")
       h.eq("selected", fov.value, "65")
       h.eq("65 lit", chip("camera.focus.field_of_view", "65°").selected, true)
-      h.eq("focus greyed", h.find(A(), "settingReason-camera.focus.focus_absolute").text, "Turn off continuous autofocus to change this")
+      h.eq("the manual focus hidden", row("camera.focus.focus_absolute"), null)
       h.eq("pan value", h.find(A(), "settingValue-camera.focus.pan_absolute").text, "14400")
       h.eq("tilt value", h.find(A(), "settingValue-camera.focus.tilt_absolute").text, "-14400")
-      // nine rows outgrow the card:
-      // it stops at the screen's room and the settings scroll inside it
-      var fl = h.find(A(), "settingsFlick")
-      h.check("Focus & zoom open: the card stays within the screen's room (" + A().popup.contentHeight + " <= " + Math.round(A().popup.availableCardHeight) + ")",
-              A().popup.contentHeight <= A().popup.availableCardHeight + 0.5, A().popup.contentHeight + " vs " + A().popup.availableCardHeight)
-      h.check("Focus & zoom open: the settings scroll inside it", fl.interactive && fl.contentHeight > fl.height, fl.contentHeight + " in " + fl.height)
-      h.eq("Focus & zoom open: with a scroll cue", h.find(A(), "settingsMoreBelow").visible, true)
+      h.check("Focus & zoom open: the card stays within its cap and the screen's room (" + A().popup.contentHeight + ")",
+              A().popup.contentHeight <= Math.min(A().popup.availableCardHeight, 860) + 0.5, A().popup.contentHeight + " vs " + A().popup.availableCardHeight)
       h.note("height: card " + A().popup.contentHeight + " in " + Math.round(A().popup.availableCardHeight))
     })
     h.grabStep(function() { return A().popup }, "s1-focus-fov.png")
@@ -2547,6 +2599,7 @@ ShellRoot {
     h.step("settings: Enter flipped continuous autofocus; focus is enabled", function() {
       h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([write("camera.focus.focus_automatic_continuous", "false")]))
       h.eq("focus enabled", h.model.findSetting(S().record, "camera.focus.focus_absolute").enabled, true)
+      h.eq("revealed under autofocus", row("camera.focus.focus_absolute").row.depth, 1)
       h.eq("switch off", h.find(A(), "settingSwitch-camera.focus.focus_automatic_continuous").checked, false)
       h.markLog()
       click(chip("camera.focus.field_of_view", "90°"))
@@ -2557,7 +2610,7 @@ ShellRoot {
 
     // MX Brio: Show Mode is drawn by the generic renderer like any other row
     h.step("settings: the last Focus row is Show Mode, a switch, on", function() {
-      var ids = C().settingsView.groups[3].rows.map(function(r) { return r.id }).slice(8).join(",")
+      var ids = C().settingsView.groups[3].rows.map(function(r) { return r.id }).slice(-1).join(",")
       h.eq("order after the field of view", ids, "camera.focus.show_mode")
       h.eq("Show Mode is a switch, on", h.find(A(), "settingSwitch-camera.focus.show_mode").checked, true)
       h.markLog()
@@ -2574,7 +2627,7 @@ ShellRoot {
     h.step("settings: the camera reports a value Show Mode and the field of view do not know", function() {
       var st = brioState().map(function(line) {
         if (line.indexOf("|camera.focus.show_mode|") >= 0)
-          return stateRow("focus", "Focus & zoom", "camera.focus.show_mode", "bool", "Show Mode", "true", "false", { reason: "The camera reports a mode this version does not know", fixed: true })
+          return stateRow("focus", "Focus & zoom", "camera.focus.show_mode", "bool", "Show Mode", "true", "false", { reason: "The camera reports a mode this version does not know", fixed: true, kind: "device" })
         if (line.indexOf("|camera.focus.field_of_view|") >= 0)
           return stateRow("focus", "Focus & zoom", "camera.focus.field_of_view", "enum", "Field of view", "turbo", "90", { options: "90:90°,78:78°,65:65°" })
         return line
@@ -2587,7 +2640,18 @@ ShellRoot {
     h.step("settings: greyed row shows its reason and takes no input; unknown enum value lights nothing", function() {
       var sm = h.model.findSetting(S().record, "camera.focus.show_mode")
       h.eq("Show Mode greyed", sm.enabled, false)
-      h.eq("its reason", h.find(A(), "settingReason-camera.focus.show_mode").text, "The camera reports a mode this version does not know")
+      h.eq("kind device: greyed in place", sm.kind + "/" + row("camera.focus.show_mode").visible, "device/true")
+      var help = h.find(A(), "settingHelp-camera.focus.show_mode")
+      h.eq("its reason only under the cursor", help.visible, false)
+      h.eq("a help mark says there is one", h.find(A(), "settingHelpMark-camera.focus.show_mode").visible, true)
+      C().setCursor("setting", stopOf("camera.focus.show_mode"))
+      h.eq("its reason on focus", help.visible + "/" + help.text, "true/The camera reports a mode this version does not know")
+      h.eq("the reason's size: a caption", help.font.pixelSize, Commons.Style.font.caption)
+      h.eq("only the control fades", h.find(A(), "settingSwitch-camera.focus.show_mode").opacity + "/" + h.find(A(), "settingWidget-camera.focus.show_mode").opacity, "0.45/1")
+      h.eq("the label is the dim colour", String(h.find(A(), "settingLabel-camera.focus.show_mode").color), String(C().dim))
+      h.eq("accessible description: unavailable, the value and the reason", row("camera.focus.show_mode").Accessible.description,
+           "Unavailable. On. The camera reports a mode this version does not know")
+      C().cursorActive = false
       h.eq("its switch takes no input", h.find(A(), "settingSwitch-camera.focus.show_mode").enabled, false)
       h.markLog()
       clickAt("camera.focus.show_mode", h.find(A(), "settingSwitch-camera.focus.show_mode"))
@@ -2624,10 +2688,13 @@ ShellRoot {
     h.step("settings: Temperature compensation reads +280 K (raw 57), with its description, and steps by 5", function() {
       h.eq("value text", h.find(A(), "settingValue-camera.white_balance.temperature_compensation").text, "+280 K")
       h.eq("slider keeps the raw range", h.find(A(), "settingSlider-camera.white_balance.temperature_compensation").minimum + ".." + h.find(A(), "settingSlider-camera.white_balance.temperature_compensation").maximum, "0..100")
-      var d = h.find(A(), "settingDescription-camera.white_balance.temperature_compensation")
-      h.eq("description", d.text + "/" + d.visible, "Shifts the picture warmer or cooler/true")
+      var d = h.find(A(), "settingHelp-camera.white_balance.temperature_compensation")
+      h.eq("description: only under the cursor", d.text + "/" + d.visible, "Shifts the picture warmer or cooler/false")
+      C().setCursor("setting", stopOf("camera.white_balance.temperature_compensation"))
+      h.eq("shown on focus", d.visible, true)
+      C().cursorActive = false
       h.eq("plain text", d.textFormat, Text.PlainText)
-      h.eq("a row without one draws none", h.find(A(), "settingDescription-camera.white_balance.white_balance_automatic").visible, false)
+      h.eq("a row without one draws no mark", h.find(A(), "settingHelpMark-camera.white_balance.white_balance_automatic").visible, false)
       h.eq("accessible description", row("camera.white_balance.temperature_compensation").Accessible.description, "+280 K. Shifts the picture warmer or cooler")
       h.markLog()
       C().setCursor("setting", stopOf("camera.white_balance.temperature_compensation"))
@@ -2663,7 +2730,7 @@ ShellRoot {
     h.step("settings: release", function() {
       var sl = h.find(A(), "settingSlider-camera.focus.zoom_absolute")
       h.notes.dragged = h.model.clampSetting(h.model.findSetting(S().record, "camera.focus.zoom_absolute"), sl.liveValue)
-      h.eq("neither Flickable takes a held slider", h.find(A(), "panelFlick").interactive || h.find(A(), "settingsFlick").interactive, false)
+      h.eq("the body does not take a held slider", h.find(A(), "panelFlick").interactive, false)
       keys.mouseRelease(sl, sl.width * 0.8, sl.height / 2)
     }, function() { return value("camera.focus.zoom_absolute") === h.notes.dragged }, 3000)
     h.wait(400)
@@ -2851,46 +2918,39 @@ ShellRoot {
       h.removeFile("stderr")
     }, function() { return h.writerIdle() })
 
-    // M5: on a screen too short for the open group the groups scroll on
-    // their own, with a cue, and Reset stays pinned under them (the room is
-    // forced here; the panel's binding is put back after)
-    h.step("settings: a short screen: the groups scroll, Reset stays in reach", function() {
+    // M5: on a screen too short for the open group only the body scrolls
+    // (one scroller: the header and the tab row stay), and Reset at its
+    // bottom is reached by scrolling
+    h.step("settings: a short screen: the body scrolls, Reset at its end", function() {
       openOnly(["focus"])
-      h.find(A(), "settingsView").room = 300
-    }, function() { return h.find(A(), "settingsFlick").interactive })
+      A().popup.availableCardHeight = 420
+    }, function() { return h.find(A(), "panelFlick").interactive })
     h.wait(250)
-    h.step("settings: the scroll cue and the pinned Reset", function() {
-      var f = h.find(A(), "settingsFlick")
+    h.step("settings: one scroller, the header and the tabs pinned", function() {
+      var f = h.find(A(), "panelFlick")
       h.check("it scrolls", f.contentHeight > f.height + 0.5, f.contentHeight + " in " + f.height)
-      // ScrollBar.AlwaysOn is Qt.ScrollBarAlwaysOn, 2
-      h.eq("a scroll bar at rest", h.find(A(), "settingsScrollBar").policy, 2)
-      h.eq("shown", h.find(A(), "settingsScrollBar").visible, true)
-      h.eq("the fade says more is below", h.find(A(), "settingsMoreBelow").visible, true)
+      h.eq("no scroller in the settings", h.find(A(), "settingsFlick"), null)
+      h.eq("the tab row is pinned", C().inBody(h.find(A(), "tabRow")), false)
+      h.eq("Reset is in the body", C().inBody(h.find(A(), "settingsReset")), true)
+      // a key moves the cursor there (hovering never scrolls)
+      C().setCursor("reset", -1)
+      C().scrollCursorIntoView()
+    })
+    h.wait(250)
+    h.step("settings: the cursor on Reset scrolled it into view", function() {
+      var f = h.find(A(), "panelFlick")
       var b = h.find(A(), "settingsReset")
-      var bottom = b.mapToItem(h.find(A(), "settingsView"), 0, b.height).y
-      h.check("Reset is shown, inside the section's room", b.visible && bottom <= 300 + 0.5, bottom)
+      var top = b.mapToItem(f, 0, 0).y
+      h.check("scrolled", f.contentY > 0, f.contentY)
+      h.check("Reset inside the viewport", top >= -0.5 && top + b.height <= f.height + 0.5, top + " / " + f.height)
       C().cursorActive = false
     })
     h.grabStep(function() { return A().popup }, "s1-scroll-fallback.png")
-    h.step("settings: scroll to the end", function() {
-      var f = h.find(A(), "settingsFlick")
-      f.contentY = f.contentHeight - f.height
+    h.step("settings: the screen's room again", function() {
+      A().popup.availableCardHeight = shellRoot.card1080
+      h.find(A(), "panelFlick").contentY = 0
     })
-    h.wait(150)
-    h.step("settings: at the end the cue goes", function() { h.eq("no fade at the end", h.find(A(), "settingsMoreBelow").visible, false) })
-    h.step("settings: the room is the panel's again", function() {
-      var v = h.find(A(), "settingsView")
-      v.room = Qt.binding(function() { var c = C(); return c && c.contentRoom > 0 ? c.contentRoom - v.areaTop : 0 })
-      h.find(A(), "settingsFlick").contentY = 0
-    }, function() { var v = h.find(A(), "settingsView"); return Math.abs(v.room - (C().contentRoom - v.areaTop)) < 0.5 })
-    // (the refused write's error line above the tabs still takes room here:
-    // Focus & zoom may scroll until Reset clears it, with the cue)
-    h.step("settings: the room after it", function() {
-      var v = h.find(A(), "settingsView"), f = h.find(A(), "settingsFlick")
-      h.note("room " + Math.round(v.room) + ", groups " + Math.round(f.height) + " of " + Math.round(f.contentHeight)
-             + ", cue " + h.find(A(), "settingsMoreBelow").visible)
-      h.eq("a cue whenever it scrolls", h.find(A(), "settingsMoreBelow").visible || !f.interactive, true)
-    })
+    h.wait(250)
 
     // reset to defaults, by the button
     h.step("settings: Reset to defaults", function() {
@@ -2901,7 +2961,7 @@ ShellRoot {
     h.step("settings: reset ran and came back as deltas", function() {
       h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([["settings", "reset", "--camera=" + brioId]]))
       h.eq("nothing stored", S().record.settings.groups.some(function(g) { return g.rows.some(function(r) { return r.stored }) }), false)
-      h.eq("exposure time greyed again", h.model.findSetting(S().record, "camera.exposure.exposure_time_absolute").enabled, false)
+      h.eq("exposure time disabled again (hidden)", h.model.findSetting(S().record, "camera.exposure.exposure_time_absolute").enabled, false)
       h.eq("no error", S().commandError, "")
     })
 
@@ -2926,7 +2986,7 @@ ShellRoot {
       h.key(Qt.Key_Left)
       h.eq("Left/Right do nothing on a dropdown", JSON.stringify(S().settingDrafts), "{}")
       // the mouse away from where the list opens (its rows follow the mouse)
-      keys.mouseMove(h.find(A(), "settingsTitle"), 1, 1)
+      keys.mouseMove(h.find(A(), "hero"), 1, 1)
       h.key(Qt.Key_Return)
     }, function() { return h.find(A(), "settingDropdown-camera.other.mode").popupOpen })
     h.step("settings: the list is open; Down, Enter", function() {
@@ -2995,7 +3055,7 @@ ShellRoot {
       h.fits(A(), "Camera tab with the Capture group open")
       h.markLog()
       C().setCursor("setting", stopOf("camera.capture.mode"))
-      keys.mouseMove(h.find(A(), "settingsTitle"), 1, 1)
+      keys.mouseMove(h.find(A(), "hero"), 1, 1)
       h.key(Qt.Key_Return)
     }, function() { return h.find(A(), "settingDropdown-camera.capture.mode").popupOpen })
     h.step("settings: the capture list is open; Down, Enter", function() {
@@ -3036,28 +3096,26 @@ ShellRoot {
     h.wait(300)
     h.step("global settings: generic rows, no dedicated strength or noise removal", function() {
       h.eq("the camera's view has no global group", C().settingsView.groups.map(function(g) { return g.id }).join(","), "image,white_balance,exposure,focus")
-      h.eq("the Effect view's groups", C().effectSettings.groups.map(function(g) { return g.id }).join(","), "background,video")
+      h.eq("the Effect view's groups (the strength hidden while the effect is off)", C().effectSettings.groups.map(function(g) { return g.id }).join(","), "video")
       h.eq("no row for the effect choice", row("effect.background.mode"), null)
-      h.eq("the strength slider", shown("effect.background.blur_strength") && !!h.find(A(), "settingSlider-effect.background.blur_strength"), true)
+      h.eq("the strength hidden", row("effect.background.blur_strength"), null)
       h.eq("the noise removal switch", !!h.find(A(), "settingSwitch-effect.video.denoise"), true)
+      h.eq("the image row only under Replace", h.find(A(), "backgroundLine").visible, false)
       h.eq("the choices are the schema's options", [0, 1, 2].map(function(i) { return h.find(A(), "effectChoice-" + i).text }).join(","), "Off,Blur,Replace")
       h.eq("the current one selected", h.find(A(), "effectChoice-0").selected, true)
       h.eq("no fourth choice", h.find(A(), "effectChoice-3"), null)
       h.eq("no hint", h.find(A(), "effectHint").visible, false)
-      h.eq("group heading", h.find(A(), "effect-settingsGroupLabel-background").text, "BACKGROUND EFFECT", "small caps, as the section headers")
-      h.eq("no title, no reset, no note", h.find(A(), "effect-settingsTitle").visible || h.find(A(), "effect-settingsReset").visible, false)
-      h.eq("greyed with its reason", h.find(A(), "settingReason-effect.background.blur_strength").visible
-           && h.find(A(), "settingReason-effect.background.blur_strength").text === "Choose Blur to change this", true)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs,effect,setting0,setting1")
+      h.eq("a group that is one setting draws no heading", h.find(A(), "effect-settingsGroupHeader-video").visible, false)
+      h.eq("no title, no reset", h.find(A(), "effect-settingsTitle") === null && !h.find(A(), "effect-settingsReset").visible, true)
+      h.eq("stops", kinds(), "switch,info,tabs,preview,effect,setting0")
       h.fits(A(), "Effect tab with the generic rows")
     })
     h.grabStep(function() { return A().popup }, "e1-effect-generic.png")
-    h.step("global settings: a greyed row refuses the keyboard", function() {
+    h.step("global settings: a disabled row refuses a write", function() {
       h.markLog()
-      C().setCursor("setting", stopOf("effect.background.blur_strength"))
-      h.key(Qt.Key_Right)
-      h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
+      h.eq("no stop for a hidden row", stopOf("effect.background.blur_strength"), -1)
       h.check("refused", !S().moveSetting("effect.background.blur_strength", 70))
+      h.eq("no draft", JSON.stringify(S().settingDrafts), "{}")
     })
     h.wait(300)
     h.step("global settings: Enter on Blur writes the mode as a setting", function() {
@@ -3069,7 +3127,7 @@ ShellRoot {
       h.eq("Right: Blur", C().effectCursor, 1)
       h.key(Qt.Key_Return)
     }, function() { return setArgs().length >= 1 && value("effect.background.mode") === "blur" && !S().commandBusy }, 3000)
-    h.step("global settings: Blur chosen; the strength opens", function()  {
+    h.step("global settings: Blur chosen; the strength opens under it", function()  {
       h.eq("argv: the setting, no camera", JSON.stringify(setArgs()), JSON.stringify([gwrite("effect.background.mode", "blur")]))
       h.eq("Blur selected", h.find(A(), "effectChoice-1").selected, true)
       h.check("tooltip names it", A().iconButton.tooltipText.indexOf("background: Blur") !== -1, A().iconButton.tooltipText)
@@ -3077,6 +3135,14 @@ ShellRoot {
       h.key(Qt.Key_Return)
       h.eq("Enter on the current choice runs nothing", S().commandBusy, false)
     }, function() { return h.model.findSetting(S().record, "effect.background.blur_strength").enabled === true && h.writerIdle() })
+    h.wait(250)
+    h.step("global settings: the strength under the choice", function() {
+      h.eq("shown", shown("effect.background.blur_strength"), true)
+      h.eq("in the lead group, under the choice", C().effectSettings.groups[0].lead + "/" + row("effect.background.blur_strength").row.depth, "true/1")
+      h.check("between the choices and the effects",
+              row("effect.background.blur_strength").mapToItem(C(), 0, 0).y > h.find(A(), "effectChoices").mapToItem(C(), 0, 0).y
+              && row("effect.background.blur_strength").mapToItem(C(), 0, 0).y < row("effect.video.denoise").mapToItem(C(), 0, 0).y)
+    })
     h.grabStep(function() { return A().popup }, "e2-effect-blur.png")
     h.step("global settings: Right moves the slider; the write names no camera", function() {
       h.markLog()
@@ -3117,7 +3183,7 @@ ShellRoot {
     }, function() { return !!S().record.settings && S().record.settings.groups.length === 7 && h.writerIdle() && !!zoomLine() })
     h.wait(300)
     h.step("zoom readout: shown under the group's rows", function() {
-      h.eq("the group is drawn", C().effectSettings.groups.map(function(g) { return g.id }).join(","), "background,video,auto_frame")
+      h.eq("the group is drawn", C().effectSettings.groups.map(function(g) { return g.id }).join(","), "video,auto_frame")
       h.eq("text", zoomLine().text, "Zoom 1.24\u00d7")
       h.eq("visible", zoomLine().visible, true)
       h.eq("the Camera tab's groups carry none", C().settingsView.groups.map(function(g) { return g.live }).join(""), "")
@@ -3164,7 +3230,7 @@ ShellRoot {
       h.eq("no generic section", h.find(A(), "effectSettingsArea").visible, false)
       h.eq("no choices", h.find(A(), "effectChoices").visible, false)
       h.eq("the hint", h.find(A(), "effectHint").text, h.model.NO_BACKGROUND_TEXT)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs")
+      h.eq("stops", kinds(), "switch,info,tabs,preview")
     })
     h.grabStep(function() { return A().popup }, "e3-effect-no-module.png")
     h.step("global settings: back to the Camera tab", function() { h.tab(A(), "camera") }, function() { return h.find(A(), "settingsArea").visible })
@@ -3188,12 +3254,14 @@ ShellRoot {
         m("input", "Microphone", "mic.input.device", "enum", "Input device", "default", "default",
           { options: "default:System default," + micDevice + ":USB PnP Sound Device," + micLongDevice + ":K66" }),
         m("input", "Microphone", "mic.input.hardware_gain_db", "int", "Hardware gain", 6, 6, { min: -12, max: 36, step: 1, unit: "dB" }),
-        m("input", "Microphone", "mic.input.make_default", "action", "Use as default microphone", "-", "-", {}),
-        m("input", "Microphone", "mic.input.restore_default", "action", "Use the previous default microphone", "-", "-",
-          { fixed: true, reason: "The Omarchy Broadcast Mic was not made the default here" }),
+        // revision 28: one switch, on while the Omarchy Broadcast Mic is
+        // the default made here (the two actions are no longer published)
+        m("input", "Microphone", "mic.input.use_as_default", "bool", "Use as default microphone", "false", "false", {}),
         m("noise", "Noise removal", "mic.noise.enabled", "bool", "Noise removal", "true", "false", voiceOff),
+        // as the daemon's audio module publishes it: the strength follows
+        // noise removal (enabled_when mic.noise.enabled eq true)
         m("noise", "Noise removal", "mic.noise.strength", "int", "Strength", 100, 100,
-          { min: 0, max: 100, step: 1, unit: "%", master: voiceOff.master, when: voiceOff.when, reason: voiceOff.reason }),
+          { min: 0, max: 100, step: 1, unit: "%", master: "mic.noise.enabled", when: "true", reason: "Turn on noise removal to change this" }),
         m("voice", "Studio voice", "mic.voice.enabled", "bool", "Studio voice (adds noticeable delay)", "false", "false", {}),
         m("voice", "Studio voice", "mic.voice.profile", "enum", "Mic profile", "passthrough", "passthrough",
           { options: "passthrough:None,bright:Bright,warm:Warm", master: "mic.voice.enabled", when: "true", reason: "Turn on studio voice to change this" })
@@ -3230,19 +3298,21 @@ ShellRoot {
       h.eq("none in the Camera tab's", C().settingsView.groups.map(function(g) { return g.id }).join(","), "image,white_balance,exposure,focus")
       h.eq("no hint", h.find(A(), "micHint").visible, false)
       h.eq("the switch is on", h.find(A(), "micSwitch").checked, true)
-      h.eq("status rows", h.find(A(), "micStatusRepeater").count, 3)
-      h.eq("runs on", h.find(A(), "micRunsOn").text, "Runs on: mic-denoise: Example Denoiser (GPU)")
+      h.eq("its state in one line", h.find(A(), "micState").text, "Processing, 1 app recording, adds 20 ms")
+      h.eq("no explainer while on", h.find(A(), "micExplainer").visible, false)
       h.eq("no error", h.find(A(), "micError").visible, false)
       h.eq("processing switch", !!h.find(A(), "settingSwitch-mic.input.enabled"), true)
       h.eq("the device is a dropdown of node names", !!h.find(A(), "settingDropdown-mic.input.device"), true)
       h.eq("the device's choices", h.model.findSetting(S().record, "mic.input.device").options.map(function(o) { return o.value }).join(","),
            "default," + micDevice + "," + micLongDevice)
-      h.eq("Use as default microphone", h.find(A(), "settingAction-mic.input.make_default").text, "Use as default microphone")
-      h.eq("the restore greyed with its reason", h.find(A(), "settingReason-mic.input.restore_default").text,
-           "The Omarchy Broadcast Mic was not made the default here")
+      h.eq("Use as default microphone: one switch, drawn generically", h.find(A(), "settingLabel-mic.input.use_as_default").text
+           + "/" + !!h.find(A(), "settingSwitch-mic.input.use_as_default"), "Use as default microphone/true")
+      h.eq("no default-microphone buttons", h.find(A(), "settingAction-mic.input.make_default"), null)
       h.eq("studio voice says what it costs", h.find(A(), "settingLabel-mic.voice.enabled").text, "Studio voice (adds noticeable delay)")
+      h.eq("the profile hidden while studio voice is off", row("mic.voice.profile"), null)
       h.eq("no modules note", h.find(A(), "mic-settingsNote").visible, false)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs,mic-host,setting0,setting1,setting2,setting3,setting4,setting5,setting6,setting7,setting8")
+      h.eq("stops", kinds(), "switch,info,tabs,mic-host,setting0,setting1,setting2,setting3,setting4,setting5,setting6")
+      h.eq("no preview on the Mic tab (narrow)", h.find(A(), "previewStrip").visible || h.find(A(), "previewBlock").visible, false)
       h.eq("the bar's mic glyph", A().micButton.visible + "/" + A().micButton.text, "true/" + String.fromCodePoint(0xF036C))
       h.eq("its tooltip", A().micButton.tooltipText, "Omarchy Broadcast Mic: processing · 1 app recording")
       h.check("beside the camera's", A().micButton.x >= A().iconButton.x + A().iconButton.width - 0.5, A().micButton.x)
@@ -3252,7 +3322,7 @@ ShellRoot {
     // revision 25: the hardware gain, a dB slider over the device's own range
     h.step("mic: the hardware gain sits between the device and the default button, a slider reading 6 dB", function() {
       var ids = C().micSettings.groups[0].rows.map(function(r) { return r.id }).join(",")
-      h.eq("order", ids, "mic.input.enabled,mic.input.device,mic.input.hardware_gain_db,mic.input.make_default,mic.input.restore_default")
+      h.eq("order", ids, "mic.input.enabled,mic.input.device,mic.input.hardware_gain_db,mic.input.use_as_default")
       var g = h.model.findSetting(S().record, "mic.input.hardware_gain_db")
       h.eq("range kept, negative min", g.min + "," + g.max + "," + g.unit, "-12,36,dB")
       h.eq("a slider", !!h.find(A(), "settingSlider-mic.input.hardware_gain_db"), true)
@@ -3294,11 +3364,11 @@ ShellRoot {
       C().setCursor("setting", stopOf("mic.voice.enabled"))
       h.key(Qt.Key_Return)
     }, function() { return setArgs().length >= 1 && value("mic.voice.enabled") === true && !S().commandBusy }, 3000)
-    h.step("mic: the write names no camera; the conflict greys", function() {
+    h.step("mic: the write names no camera; the conflict hides noise removal", function() {
       h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.voice.enabled", true)]))
-      h.eq("noise removal greyed", h.model.findSetting(S().record, "mic.noise.enabled").enabled, false)
-      h.eq("its reason", h.find(A(), "settingReason-mic.noise.enabled").text, "Studio voice already removes noise and echo")
-      h.eq("the profile open", h.model.findSetting(S().record, "mic.voice.profile").enabled, true)
+      h.eq("noise removal disabled", h.model.findSetting(S().record, "mic.noise.enabled").enabled, false)
+      h.eq("and hidden (its rule fails)", row("mic.noise.enabled"), null)
+      h.eq("the profile open, under studio voice", h.model.findSetting(S().record, "mic.voice.profile").enabled + "/" + row("mic.voice.profile").row.depth, "true/1")
       h.markLog()
       h.check("the device, written as a node name", S().commitSetting("mic.input.device", micDevice))
     }, function() { return setArgs().length >= 1 && value("mic.input.device") === micDevice && !S().commandBusy }, 3000)
@@ -3307,10 +3377,11 @@ ShellRoot {
       h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.device", micDevice)]))
       h.eq("the box shows the daemon's word", h.find(A(), "settingDropdown-mic.input.device").value, micDevice)
       h.markLog()
-      click(h.find(A(), "settingAction-mic.input.make_default"))
-    }, function() { return setArgs().length >= 1 && !S().commandBusy }, 3000)
-    h.step("mic: the action's argv; the switch off by the keyboard", function() {
-      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.make_default", true)]))
+      clickAt("mic.input.use_as_default", row("mic.input.use_as_default"))
+    }, function() { return setArgs().length >= 1 && value("mic.input.use_as_default") === true && !S().commandBusy }, 3000)
+    h.step("mic: the switch's argv; the microphone off by the keyboard", function() {
+      h.eq("argv", JSON.stringify(setArgs()), JSON.stringify([gwrite("mic.input.use_as_default", true)]))
+      h.eq("on", h.find(A(), "settingSwitch-mic.input.use_as_default").checked, true)
       h.markLog()
       C().setCursor("mic-host", -1)
       h.eq("the switch has the cursor", h.find(A(), "micSwitch").hasCursor, true)
@@ -3319,8 +3390,9 @@ ShellRoot {
     h.step("mic: off", function() {
       h.eq("argv", JSON.stringify(micArgs()), JSON.stringify([["mic", "off"]]))
       h.eq("the switch follows the daemon", h.find(A(), "micSwitch").checked, false)
-      h.eq("state row", h.find(A(), "micStatusRepeater").itemAt(0).value, "Off")
-      h.eq("no runs-on line", h.find(A(), "micRunsOn").visible, false)
+      h.eq("off: what it is, one sentence", h.find(A(), "micExplainer").text, h.model.MIC_EXPLAINER_TEXT)
+      h.eq("and nothing else", h.find(A(), "micState").visible || h.find(A(), "micSettingsArea").visible, false)
+      h.eq("stops: only its switch", kinds(), "switch,info,tabs,mic-host")
       h.eq("no bar glyph", A().micButton.visible, false)
       h.eq("the camera's icon takes the widget back", A().iconButton.width, A().width)
       h.eq("the camera's switch never waited", S().toggleBusy, false)
@@ -3330,7 +3402,7 @@ ShellRoot {
     h.step("mic: on, not processed; an app starts recording", function() {
       h.eq("argv", JSON.stringify(micArgs()), JSON.stringify([["mic", "on"]]))
       h.eq("the switch", h.find(A(), "micSwitch").checked, true)
-      h.eq("state row", h.find(A(), "micStatusRepeater").itemAt(0).value, "On, not processed")
+      h.eq("state line", h.find(A(), "micState").text, "On, not processed, no app recording")
       h.eq("nobody records: no glyph", A().micButton.visible, false)
       h.feed([micLine({ consumers: 2, state: "error", error: "The audio worker stopped; the microphone passes through" })])
     }, function() { return S().record.mic.consumers === 2 })
@@ -3351,8 +3423,7 @@ ShellRoot {
     }, function() { return A().opened && h.content(A()) !== null })
     h.grabStep(function() { return A().popup }, "m3-mic-error.png")
     h.step("mic: error shows no delay and no module; a long node name is written as any other", function() {
-      h.eq("no added delay in an error", h.find(A(), "micStatusRepeater").itemAt(2).value, "None")
-      h.eq("no runs-on line in an error", h.find(A(), "micRunsOn").visible, false)
+      h.eq("no added delay in an error", h.find(A(), "micState").text, "Error, 2 apps recording")
       h.markLog()
       h.check("the long device, written as a node name", S().commitSetting("mic.input.device", micLongDevice))
     }, function() { return setArgs().length >= 1 && value("mic.input.device") === micLongDevice && !S().commandBusy }, 3000)
@@ -3397,7 +3468,7 @@ ShellRoot {
       h.eq("no switch", h.find(A(), "micHostRow").visible, false)
       h.eq("no state", h.find(A(), "micStatusBlock").visible, false)
       h.eq("no settings", h.find(A(), "micSettingsArea").visible, false)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs")
+      h.eq("stops", kinds(), "switch,info,tabs")
       h.check("the switch runs nothing", !C().toggleMic() && !S().setMicHost(true))
       h.eq("no bar glyph", A().micButton.visible, false)
       h.fits(A(), "Mic tab, old daemon")
@@ -3533,29 +3604,25 @@ ShellRoot {
       h.eq("the button", h.find(A(), "recommendedButton").text, "Use recommended settings")
       var title = h.find(A(), "recommendedTitle"), button = h.find(A(), "recommendedButton")
       var tp = title.mapToItem(C(), 0, 0), bp = button.mapToItem(C(), 0, 0)
-      h.check("the button on its title's line, at the right (as Reset on SETTINGS)",
+      h.check("the button on its title's line, at the right",
               bp.x > tp.x + title.implicitWidth && bp.y < tp.y + title.height && tp.y < bp.y + button.height
-              && Math.abs((bp.x + button.width) - h.find(A(), "settingsReset").mapToItem(C(), 0, 0).x - h.find(A(), "settingsReset").width) < 1,
+              && Math.abs((bp.x + button.width) - (h.find(A(), "settingsReset").mapToItem(C(), 0, 0).x + h.find(A(), "settingsReset").width)) < 1,
               JSON.stringify([tp, bp]))
-      h.check("above the settings' title", bp.y < h.find(A(), "settingsTitle").mapToItem(C(), 0, 0).y)
-      h.eq("stops", kinds(), "switch,preview,fps,tabs,camera0,camera1,camera2,next,suggestion0,recommended,recommended-changes,reset,group0,"
-           + "setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
+      h.check("above the settings' groups", bp.y < h.find(A(), "settingsGroupHeader-image").mapToItem(C(), 0, 0).y)
+      h.eq("stops", kinds(), "switch,info,tabs,preview,camera,suggestion0,recommended,recommended-changes,group0,"
+           + "setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3,reset")
       h.eq("the Camera tab carries the caution sign", h.find(A(), "tab-camera").iconText, h.model.GLYPH_WARNING)
       h.eq("and says so", h.find(A(), "tab-camera").Accessible.name, "Camera, with a warning")
-      h.eq("the other tabs do not", h.find(A(), "tab-effect").iconText + h.find(A(), "tab-mic").iconText + h.find(A(), "tab-status").iconText, "")
+      h.eq("the other tabs do not", h.find(A(), "tab-effect").iconText + h.find(A(), "tab-mic").iconText, "")
       h.eq("the chips keep one height", h.find(A(), "tab-camera").height, h.find(A(), "tab-effect").height)
       h.eq("nothing written by showing it", args("settings").length + args("recommended").length, 0)
       // Three cameras, the health and two changes on a 1080 screen: the
-      // panel does not scroll, and the settings' groups keep a usable
-      // viewport of their own (at least six rows), never a sliver.
+      // card stays within its cap; the body is the one scroller.
       var flick = h.find(A(), "panelFlick")
-      h.check("the panel itself does not scroll", !flick.interactive && flick.contentHeight <= flick.height + 0.5,
-              flick.contentHeight + " in " + flick.height)
-      var groups = h.find(A(), "settingsFlick")
-      var rowH = h.find(A(), "setting-camera.image.brightness").height
-      h.check("the settings' groups keep at least six rows in view", rowH > 0 && groups.height >= 6 * rowH,
-              groups.height + " for rows of " + rowH)
-      h.eq("Reset to defaults still in view, above the groups", visible("settingsReset"), true)
+      h.check("the card within the 860 cap", A().popup.contentHeight <= 860, A().popup.contentHeight)
+      h.eq("no scroller in the settings", h.find(A(), "settingsFlick"), null)
+      h.eq("Reset to defaults drawn, at the bottom", visible("settingsReset"), true)
+      h.note("health: body " + Math.round(flick.contentHeight) + " in " + Math.round(flick.height))
     })
     h.grabStep(function() { return A().popup }, "h1-camera-health.png")
 
@@ -3570,16 +3637,16 @@ ShellRoot {
       // Opened by hand, the list may take the groups' room down to their
       // minimum (past it the panel scrolls, the designed fallback); the
       // groups still show and Reset stays reachable.
-      h.eq("the settings still drawn", visible("settingsReset") && visible("settingsFlick"), true)
+      h.eq("the settings still drawn", visible("settingsReset") && visible("settingsView"), true)
     })
     h.grabStep(function() { return A().popup }, "h2-camera-health-changes.png")
     h.step("health: Enter on the line folds them again", function() {
       C().setCursor("recommended-changes", -1)
       h.key(Qt.Key_Return)
     }, function() { return h.find(A(), "recommendedChange-0") === null })
-    h.step("health: another tab shows the camera's warning on its button", function() { h.tab(A(), "status") },
+    h.step("health: another tab shows the camera's warning on its button", function() { h.tab(A(), "mic") },
            function() { return !h.find(A(), "cameraTab").visible })
-    h.grabStep(function() { return A().popup }, "h3-status-tab-warning.png")
+    h.grabStep(function() { return A().popup }, "h3-mic-tab-warning.png")
     h.step("health: back to the Camera tab", function() { h.tab(A(), "camera") }, function() { return h.find(A(), "cameraTab").visible })
 
     h.step("health: Turn on writes the setting, as its switch would", function() {
@@ -3660,7 +3727,7 @@ ShellRoot {
       h.eq("no third", h.find(A(), "healthStatus-2"), null)
       h.check("above the rate", a.mapToItem(C(), 0, 0).y < h.find(A(), "healthDelivers").mapToItem(C(), 0, 0).y)
       h.eq("the status lines are no cursor stops", kinds(),
-           "switch,preview,fps,tabs,camera0,camera1,camera2,next,recommended,recommended-changes,reset,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3")
+           "switch,info,tabs,preview,camera,recommended,recommended-changes,group0,setting0,setting1,setting2,setting3,setting4,setting5,group1,group2,group3,reset")
     })
     // a closed shutter while a session runs: the tab chip and the bar say so
     h.step("health: a session runs with the shutter closed", function() {
@@ -5265,13 +5332,21 @@ ShellRoot {
     h.grabStep(function() { return dfind("setupCard") }, "a1b-setup-away-unset.png")
 
     // the panel's Away image row: Setup… opens the dialog at the picker
-    h.step("away: the panel's Away image row", function() {
+    h.step("away: the panel's Away image row, under More", function() {
       D().close()
       h.dialog = D()
       fakeShell.toggles = []
       A().open()
       h.tab(A(), "effect")
     }, function() { return A().opened && !D().shown })
+    h.step("away: More folded by default: one line, the row hidden", function() {
+      h.eq("More shown", h.find(A(), "moreLine").visible, true)
+      h.eq("the row hidden", h.find(A(), "awayLine").visible, false)
+      h.check("More is a stop, the row is not", C().stops.map(function(st) { return st.kind }).join(",").indexOf("more") >= 0
+              && C().stops.map(function(st) { return st.kind }).indexOf("away") < 0)
+      C().setCursor("more", -1)
+      h.key(Qt.Key_Return)
+    }, function() { return C().moreOpen })
     h.wait(300)
     h.step("away: shown under the Background row, a stop of its own", function() {
       h.eq("the row", h.find(A(), "awayLine").visible, true)
@@ -5280,11 +5355,12 @@ ShellRoot {
       h.eq("its text", h.find(A(), "awayButton").text, "Setup…")
       h.eq("its tooltip", h.find(A(), "awayButton").tooltipText, "The image shown instead of the camera: choose it in the setup")
       h.check("the button on the right", h.find(A(), "awayButton").x > h.find(A(), "awayLabel").x)
-      h.check("after the Background row", h.find(A(), "awayLine").y > h.find(A(), "backgroundLine").y)
+      h.check("after the Background row", h.find(A(), "awayLine").mapToItem(C(), 0, 0).y > h.find(A(), "backgroundLine").mapToItem(C(), 0, 0).y)
+      h.check("under More", h.find(A(), "awayLine").mapToItem(C(), 0, 0).y > h.find(A(), "moreLine").mapToItem(C(), 0, 0).y)
     })
     h.grabStep(function() { return A().popup }, "a2b-panel-away-row.png")
     h.step("away: Enter on Setup…", function() {
-      h.check("a stop", C().stops.map(function(st) { return st.kind }).join(",").indexOf("background,away") >= 0)
+      h.check("a stop after More", C().stops.map(function(st) { return st.kind }).join(",").indexOf("more,away") >= 0)
       C().setCursor("away", -1)
       h.key(Qt.Key_Return)
     }, function() { return D().shown && !A().opened && D().currentStop !== null && D().currentStop.kind === "config" && settled() }, 8000)
@@ -5472,12 +5548,14 @@ ShellRoot {
       h.eq("its label", h.find(A(), "batteryLabel").text, "Battery saver")
       h.eq("on", h.find(A(), "batterySwitch").checked, true)
       h.eq("interactive", h.find(A(), "batterySwitch").interactive, true)
-      h.eq("the daemon's Now", h.find(A(), "batteryNow").text, shellRoot.batteryNow)
+      h.eq("the daemon's Now, on hover and for the screen reader", h.find(A(), "batterySwitch").Accessible.description, shellRoot.batteryNow)
+      h.eq("no Now line", h.find(A(), "batteryNow"), null)
       h.eq("no reason", h.find(A(), "batteryReason").visible, false)
       h.eq("no notice", h.find(A(), "batteryNotice").visible, false)
       h.eq("no error", h.find(A(), "batteryError").visible, false)
       h.check("a stop", kinds().indexOf("battery") >= 0, kinds())
-      h.check("after the Background row", h.find(A(), "batteryBlock").y > h.find(A(), "backgroundLine").y)
+      h.check("under More, after the Background row", h.find(A(), "batteryBlock").mapToItem(C(), 0, 0).y > h.find(A(), "moreLine").mapToItem(C(), 0, 0).y
+              && h.find(A(), "moreLine").mapToItem(C(), 0, 0).y > h.find(A(), "backgroundLine").mapToItem(C(), 0, 0).y)
       h.eq("the saved mode is the default", A().storedBatteryMode, "on_battery")
     })
     h.grabStep(function() { return A().popup }, "b1-panel-battery-saver-on.png")
@@ -5508,11 +5586,13 @@ ShellRoot {
     // the Mode dropdown: three modes at revision 22, the daemon's mode while on
     var dd = function() { return h.find(A(), "batteryModeDropdown") }
     var calls = 0
-    h.step("battery: the Mode row under the switch, three modes at revision 22", function() {
-      h.eq("its label", h.find(A(), "batteryModeLabel").text, "Mode")
-      h.eq("shown", h.find(A(), "batteryModeRow").visible, true)
-      h.check("under the switch", h.find(A(), "batteryModeRow").y > h.find(A(), "batteryRow").y)
-      h.check("above the Now line", h.find(A(), "batteryModeRow").y < h.find(A(), "batteryNow").y)
+    h.step("battery: one row: the label, the mode, the switch; three modes at revision 22", function() {
+      var rowItem = h.find(A(), "batteryRow")
+      var mid = function(it) { return it.mapToItem(C(), 0, it.height / 2).y }
+      h.check("the dropdown on the switch's row", Math.abs(mid(dd()) - mid(h.find(A(), "batterySwitch"))) < 2
+              && Math.abs(mid(dd()) - mid(rowItem)) < 2, mid(dd()) + " vs " + mid(h.find(A(), "batterySwitch")))
+      h.check("between the label and the switch", dd().mapToItem(C(), 0, 0).x > h.find(A(), "batteryLabel").mapToItem(C(), 0, 0).x
+              && dd().mapToItem(C(), dd().width, 0).x < h.find(A(), "batterySwitch").mapToItem(C(), 0, 0).x)
       h.eq("three", JSON.stringify(dd().options.map(function(o) { return o.value })), JSON.stringify(["on_battery", "power_profile", "always"]))
       h.eq("the plugin's labels", JSON.stringify(dd().options.map(function(o) { return o.label })), JSON.stringify(["On battery", "Follow the power profile", "Always"]))
       h.eq("the daemon's mode", dd().value, "power_profile")
@@ -5738,11 +5818,11 @@ ShellRoot {
       h.eq("faded", h.find(A(), "batterySwitch").opacity, C().greyedOpacity)
       h.eq("the reason", h.find(A(), "batteryReason").text, "Set video processing to automatic to use this")
       h.eq("still on", h.find(A(), "batterySwitch").checked, true)
-      h.eq("still has its Now", h.find(A(), "batteryNow").text, shellRoot.batteryNow)
+      h.eq("the reason is the description now", h.find(A(), "batterySwitch").Accessible.description, "Set video processing to automatic to use this")
       h.check("refused", !C().toggleBatterySaver())
       h.eq("the Mode dropdown greyed too", h.find(A(), "batteryModeDropdown").enabled, false)
       h.eq("faded", h.find(A(), "batteryModeDropdown").opacity, C().greyedOpacity)
-      h.eq("its label dim", String(h.find(A(), "batteryModeLabel").color), String(C().dim))
+      h.eq("the row's label dim", String(h.find(A(), "batteryLabel").color), String(C().dim))
       h.check("no choice", !C().chooseBatteryMode("on_battery"))
       h.markLog()
       calls = fakeShell.calls.length
@@ -5824,6 +5904,332 @@ ShellRoot {
     daemonProc.running = true
   }
 
+  // ---- the panel's size, measured (MEASURE <state> <width>x<height>) ---------
+  //
+  // The effects as a revision-28 daemon publishes them on a machine with an
+  // NVIDIA GPU, every effect off: one switch each, their dependents hidden,
+  // enhancement not applicable here and the open-model cut-out handled by
+  // NVIDIA Maxine (two entries of "Not available now"). Measured on a
+  // 1080-high screen (shellRoot.card1080): the narrow default Effects view,
+  // the narrow Mic tab with the microphone off, the Details view, the wide
+  // layout with the preview hidden (the settings column alone) and with the
+  // preview live. Each is grabbed to m9-measure-<state>.png.
+  function measureEffectRows() {
+    var g = function(group, label, id, type, name, v, d, o) {
+      var x = { scope: "global" }
+      for (var k in o) x[k] = o[k]
+      return stateRow(group, label, id, type, name, v, d, x)
+    }
+    var maxine = "Handled by NVIDIA Maxine video effects instead"
+    return [
+      g("background", "Background effect", "effect.background.mode", "enum", "Effect", "none", "none", { options: "none:Off,blur:Blur,replace:Replace" }),
+      g("background", "Background effect", "effect.background.blur_strength", "int", "Blur strength", 50, 50,
+        { min: 0, max: 100, step: 1, unit: "%", master: "effect.background.mode", when: "blur", reason: "Choose Blur to change this" }),
+      g("eye_contact", "Eye contact", "effect.eye_contact.enabled", "bool", "Eye contact", "false", "false", {}),
+      g("eye_contact", "Eye contact", "effect.eye_contact.look_away", "bool", "Natural look-away", "false", "false",
+        { master: "effect.eye_contact.enabled", when: "true", reason: "Turn on eye contact to change this" }),
+      g("auto_frame", "Auto-framing", "effect.auto_frame.enabled", "bool", "Auto-framing", "false", "false", {}),
+      g("auto_frame", "Auto-framing", "effect.auto_frame.framing", "enum", "Framing", "medium", "medium",
+        { options: "tight:Tight,medium:Medium,wide:Wide", master: "effect.auto_frame.enabled", when: "true", reason: "Turn on auto-framing to change this" }),
+      g("cutout", "Cut-out", "effect.cutout.chair", "bool", "Hide the chair with the background", "false", "false",
+        { master: "effect.background.mode", when: "blur,replace", reason: "Turn on the background effect to change this" }),
+      g("video", "Video", "effect.video.denoise", "bool", "Noise removal", "false", "false", {}),
+      g("video", "Video", "effect.video.enhance", "bool", "Enhance low-resolution camera", "false", "false",
+        { fixed: true, kind: "not_applicable", reason: "The camera already captures at full resolution" }),
+      g("video", "Video", "effect.video.enhance_method", "enum", "Enhancement method", "ai", "ai",
+        { options: "ai:AI super resolution,fast:Fast upscale", master: "effect.video.enhance", when: "true", reason: "Turn on enhancement to change this" }),
+      g("video", "Video", "effect.video.hdr", "bool", "HDR look", "false", "false", {}),
+      g("lighting", "Lighting", "effect.lighting.relight", "bool", "Relighting", "false", "false", {}),
+      g("lighting", "Lighting", "effect.lighting.light", "enum", "Light", "neutral", "neutral",
+        { options: "warm:Warm,neutral:Neutral,cool:Cool", master: "effect.lighting.relight", when: "true", reason: "Turn on relighting to change this" }),
+      g("lighting", "Lighting", "effect.lighting.direction", "int", "Light direction", 0, 0,
+        { min: -90, max: 90, step: 5, unit: "°", master: "effect.lighting.relight", when: "true", reason: "Turn on relighting to change this" }),
+      g("lighting", "Lighting", "effect.lighting.brightness", "int", "Brightness", 100, 100,
+        { min: 50, max: 200, step: 5, unit: "%", master: "effect.lighting.relight", when: "true", reason: "Turn on relighting to change this" }),
+      g("cutout_onnx", "Open-model cut-out", "effect.cutout_onnx.model", "enum", "Model", "modnet", "modnet",
+        { options: "modnet:MODNet", fixed: true, kind: "other_provider", reason: maxine }),
+      g("cutout_onnx", "Open-model cut-out", "effect.cutout_onnx.device", "enum", "Runs on", "auto", "auto",
+        { options: "auto:Automatic,cpu:CPU", fixed: true, kind: "other_provider", reason: maxine })
+    ]
+  }
+
+  function measureScenario() {
+    var A = function() { return h.widgetA }
+    var S = function() { return h.widgetA.service }
+    var P = function() { return h.widgetA.previewService }
+    var C = function() { return h.content(h.widgetA) }
+    var snap = function(o) {
+      var m = { interface_revision: 28, settings_schema: 1, settings_revision: 5, loopback_consumers: 0, pipewire_consumers: 0,
+                preview_consumers: 0, pipewire_output: "ready", config_serial: 1, modules_serial: 1,
+                mic: { state: "off", consumers: 0, provider: "", latency_ms: 0, error: "" } }
+      for (var k in o) m[k] = o[k]
+      return snapshotLine(m)
+    }
+    var micRows = function() {
+      var m = function(id, type, label, v, d, o) {
+        var x = { scope: "global", surface: "mic" }
+        for (var k in o) x[k] = o[k]
+        return stateRow("input", "Microphone", id, type, label, v, d, x)
+      }
+      return [m("mic.input.enabled", "bool", "Noise and echo processing", "true", "true", {}),
+              m("mic.input.use_as_default", "bool", "Use as default microphone", "false", "false",
+                { fixed: true, kind: "busy", reason: "Turn the microphone on first" })]
+    }
+    var measure = function(state, limit) {
+      var w = A().popup.contentWidth, hgt = A().popup.contentHeight
+      console.log("MEASURE " + state + " " + w + "x" + hgt)
+      var f = h.find(A(), "panelFlick")
+      h.check(state + ": within the 860 cap and the 1080 screen's room (" + hgt + ")",
+              hgt <= 860 && hgt <= A().popup.availableCardHeight, hgt + " vs " + A().popup.availableCardHeight)
+      h.check(state + ": the body does not scroll (" + Math.round(f.contentHeight) + " in " + Math.round(f.height) + ")",
+              !f.interactive && f.contentHeight <= f.height + 0.5, f.contentHeight + " in " + f.height)
+      if (limit !== undefined) h.check(state + ": at most " + limit + " tall (" + hgt + ")", hgt <= limit, hgt)
+    }
+    // Waits until the card's size has held still for 300 ms (a Column lays
+    // out on a later frame; a grab before that shows the old layout).
+    var settle = function(label) {
+      h.step("measure: settle (" + label + ")", function() { h.notes.settleSize = ""; h.notes.settleAt = Date.now() }, function() {
+        var size = A().popup.contentWidth + "x" + A().popup.contentHeight
+        if (size !== h.notes.settleSize) { h.notes.settleSize = size; h.notes.settleAt = Date.now(); return false }
+        return Date.now() - h.notes.settleAt >= 300
+      }, 5000)
+    }
+    h.step("measure: a revision-28 daemon, every effect off, the microphone off", function() {
+      A().close()
+      A().popup.availableCardHeight = shellRoot.card1080
+      h.removeFile("settings-no-kind")
+      h.writeFile("settings-state", brioState(true).concat(measureEffectRows(), micRows()))
+      h.writeFile("settings-camera", [brioId])
+      h.writeFile("settings-serial", ["30"])
+      h.writeFile("settings-mode", ["list"])
+      h.removeFile("delay")
+      h.removeFile("stderr")
+      h.writeFile("exit", ["0"])
+      h.feed([snap({})])
+    }, function() { return S().record.interfaceRevision === 28 && !!S().record.settings && S().record.settings.serial === 30 && h.writerIdle() })
+    h.step("measure: the narrow setting, the preview hidden", function() {
+      A().settings = { cliPath: shellRoot.cli, narrowPanel: true }
+      A().open()
+      h.tab(A(), "effect")
+      // the disclosures as a first opening shows them: folded
+      C().moreOpen = false
+      C().notAvailableOpen = ({})
+    }, function() { return A().opened && C() !== null && !P().switchOn })
+    h.wait(500)
+    h.step("measure: narrow, the default Effects view", function() {
+      h.eq("narrow: one column", A().layout.wide + "," + A().popup.contentWidth, "false,520")
+      h.eq("the preview a strip", h.find(A(), "previewStrip").visible, true)
+      h.eq("one switch per effect, no heading", C().effectSettings.groups.map(function(g) {
+        return (g.heading ? g.label + ":" : "") + g.rows.map(function(r) { return r.label }).join(",") }).join(" | "),
+        "Eye contact | Auto-framing | Video:Noise removal,HDR look | Relighting")
+      h.eq("the Not available line", h.find(A(), "effect-notAvailableText").text, "Not available now (2)")
+      h.eq("More, folded", h.find(A(), "moreLine").visible && !h.find(A(), "moreBlock").visible, true)
+      measure("narrow-effects-default", 560)
+    })
+    var yIn = function(name) { var it = h.find(A(), name); return it ? Math.round(it.mapToItem(C(), 0, 0).y) : -1 }
+    var rightOf = function(it) { return it ? Math.round(it.mapToItem(C(), it.width, 0).x) : -1 }
+    h.step("measure: narrow layout: the header's state line, the rows' rhythm, one right edge", function() {
+      var state = h.find(A(), "heroState"), sw = h.find(A(), "enableSwitch"), hero = h.find(A(), "hero")
+      h.check("the state line runs under the title and the controls",
+              state.mapToItem(C(), 0, 0).y >= sw.mapToItem(C(), 0, sw.height).y - 0.5, state.mapToItem(C(), 0, 0).y + " vs " + sw.mapToItem(C(), 0, sw.height).y)
+      h.check("across the column, on one line", rightOf(state) >= rightOf(hero) - 1 && state.lineCount === 1, rightOf(state) + "/" + rightOf(hero) + " lines " + state.lineCount)
+      var heights = ["effect.eye_contact.enabled", "effect.auto_frame.enabled", "effect.video.denoise", "effect.video.hdr", "effect.lighting.relight"].map(function(id) {
+        return Math.round(h.find(A(), "setting-" + id).height) })
+      h.check("one height for every switch row (" + heights.join(",") + ")", heights.every(function(x) { return x === heights[0] }), heights.join(","))
+      var gapRows = yIn("setting-effect.auto_frame.enabled") - yIn("setting-effect.eye_contact.enabled")
+      var gapVideo = yIn("setting-effect.video.hdr") - yIn("setting-effect.video.denoise")
+      h.eq("one spacing between switch rows, headed or not", gapRows, gapVideo)
+      h.eq("Relighting is ruled off from the Video section", h.find(A(), "effect-settingsGroupBreak-lighting").kind, "rule")
+      h.eq("the Background heading in the group headings' style", h.find(A(), "effectTitle").font.capitalization === Font.AllUppercase
+           && h.find(A(), "effectTitle").font.pixelSize === h.find(A(), "effect-settingsGroupLabel-video").font.pixelSize, true)
+      var body = h.find(A(), "body")
+      h.notes.switchRight = rightOf(h.find(A(), "settingSwitch-effect.eye_contact.enabled"))
+      h.eq("the switches end on the body's right edge", h.notes.switchRight, rightOf(body))
+      h.eq("the body lines up with the tab row", Math.round(body.mapToItem(C(), 0, 0).x), Math.round(h.find(A(), "tabRow").mapToItem(C(), 0, 0).x))
+      h.notes.tabRowY = yIn("tabRow")
+    })
+    h.step("measure: the cursor stays on its row when a row is revealed above it", function() {
+      // the pointer off the rows: a row sliding under it would move the cursor
+      keys.mouseMove(h.find(A(), "heroTitle"), 1, 1)
+      var i = C().stops.map(function(st) { return st.id }).indexOf("effect.lighting.relight")
+      C().cursorActive = true
+      C().cursorIndex = i
+      h.eq("on Relighting", C().currentStop.id, "effect.lighting.relight")
+      S().commitSetting("effect.eye_contact.enabled", true)
+    }, function() { return C().stops.some(function(st) { return st.id === "effect.eye_contact.look_away" }) && h.writerIdle() }, 5000)
+    h.step("measure: still on Relighting; eye contact off again", function() {
+      h.eq("the same row, not its old index's neighbour", C().currentStop.id, "effect.lighting.relight")
+      S().commitSetting("effect.eye_contact.enabled", false)
+    }, function() { return !C().stops.some(function(st) { return st.id === "effect.eye_contact.look_away" }) && h.writerIdle() }, 5000)
+    h.step("measure: and still on Relighting once it is hidden again", function() {
+      h.eq("the same row", C().currentStop.id, "effect.lighting.relight")
+      C().cursorActive = false
+      C().cursorIndex = 0
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-narrow-effects-default.png")
+    h.step("measure: the Not available list opened", function() { C().toggleNotAvailable() })
+    h.wait(250)
+    h.step("measure: its open state is the Effects tab's own", function() {
+      h.tab(A(), "camera")
+      h.eq("the Camera tab's line is folded", C().notAvailable.open, false)
+      h.tab(A(), "effect")
+      h.eq("back on Effects: still open", C().notAvailable.open, true)
+    })
+    h.wait(250)
+    h.step("measure: its entries and reasons", function() {
+      h.eq("the Setup button on the switches' right edge", rightOf(h.find(A(), "effect-notAvailableSetup-1")), h.notes.switchRight)
+      h.eq("entries", h.find(A(), "effect-notAvailableLabel-0").text + " / " + h.find(A(), "effect-notAvailableReason-0").text,
+           "Enhance low-resolution camera / The camera already captures at full resolution")
+      h.eq("another module's group, once", h.find(A(), "effect-notAvailableLabel-1").text + " / " + h.find(A(), "effect-notAvailableReason-1").text,
+           "Open-model cut-out / Handled by NVIDIA Maxine video effects instead")
+      h.eq("no third", h.find(A(), "effect-notAvailableEntry-2"), null)
+    })
+    settle("Not available open")
+    h.step("measure: narrow, Not available now open", function() {
+      h.eq("the list open", C().notAvailable.open && h.find(A(), "effect-notAvailableEntry-1").visible, true)
+      measure("narrow-effects-unavailable")
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-narrow-effects-unavailable.png")
+    h.step("measure: the Not available list folded again", function() { C().toggleNotAvailable() },
+           function() { return !C().notAvailable.open })
+    h.step("measure: the Mic tab, the microphone off", function() { h.tab(A(), "mic") })
+    h.wait(300)
+    h.step("measure: narrow, Mic off", function() {
+      h.eq("no preview on the Mic tab", h.find(A(), "previewStrip").visible || h.find(A(), "previewBlock").visible, false)
+      h.eq("the tab row stays where it is on the Effects tab", yIn("tabRow"), h.notes.tabRowY)
+      h.eq("the microphone's switch on the settings switches' right edge", rightOf(h.find(A(), "micSwitch")), h.notes.switchRight)
+      h.eq("the Effects tab's Not available line keeps its own state", C().notAvailableOpen.effect === true, false)
+      h.eq("the switch and one sentence", h.find(A(), "micExplainer").visible && !h.find(A(), "micSettingsArea").visible, true)
+      measure("narrow-mic-off")
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-narrow-mic-off.png")
+    h.step("measure: the Camera tab", function() { h.tab(A(), "camera") })
+    h.wait(300)
+    h.step("measure: the camera's groups in today's daemon's order", function() {
+      h.eq("groups", C().settingsView.groups.map(function(g) { return g.label }).join(","), "Framing & focus,Image,White balance,Exposure")
+      h.eq("Framing & focus open first: field of view, then zoom", C().settingsView.groups[0].expanded + ":"
+           + C().settingsView.groups[0].rows.slice(0, 2).map(function(r) { return r.label }).join(","), "true:Field of view,Zoom")
+      h.eq("the tab row stays where it is", yIn("tabRow"), h.notes.tabRowY)
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-narrow-camera.png")
+    h.step("measure: the Camera tab, White balance open", function() {
+      C().settingsOpen = "white_balance"
+    })
+    h.wait(300)
+    h.step("measure: a row's help under the cursor", function() {
+      var id = "camera.white_balance.temperature_compensation"
+      h.notes.helpRowH = h.find(A(), "setting-" + id).height
+      h.notes.helpCardH = A().popup.contentHeight
+      var i = C().stops.map(function(st) { return st.id }).indexOf(id)
+      C().cursorActive = true
+      C().cursorIndex = i
+    })
+    h.wait(250)
+    h.step("measure: the help is a tip over the panel, not a line in it", function() {
+      var id = "camera.white_balance.temperature_compensation"
+      h.eq("the tip shows the description", h.find(A(), "settingHelpTip-" + id).visible && h.find(A(), "settingHelp-" + id).text === "Shifts the picture warmer or cooler", true)
+      h.eq("the row keeps its height", h.find(A(), "setting-" + id).height, h.notes.helpRowH)
+      h.eq("the card keeps its height", A().popup.contentHeight, h.notes.helpCardH)
+      h.eq("Reset to defaults on the switches' right edge", rightOf(h.find(A(), "settingsReset")) >= h.notes.switchRight - Commons.Style.space(3)
+           && rightOf(h.find(A(), "settingsReset")) <= h.notes.switchRight, true)
+      h.eq("the camera's switches too", rightOf(h.find(A(), "settingSwitch-camera.white_balance.white_balance_automatic")), h.notes.switchRight)
+      h.eq("the rows over the blocks drawn after them (a downward tip stays on top)", h.find(A(), "settingsGroups").z, 1)
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-narrow-help-tip.png")
+    h.step("measure: the cursor off", function() {
+      C().cursorActive = false
+      C().cursorIndex = 0
+      C().settingsOpen = null
+    })
+    h.step("measure: the Details view", function() { h.tab(A(), "effect"); C().toggleDetails() })
+    h.wait(300)
+    h.step("measure: narrow, Details", function() {
+      h.eq("shown", h.find(A(), "detailsView").visible, true)
+      measure("narrow-details")
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-narrow-details.png")
+    h.step("measure: the wide layout (the setting off), the preview hidden", function() {
+      C().toggleDetails()
+      A().settings = { cliPath: shellRoot.cli }
+    }, function() { return !A().storedNarrow && !P().switchOn && !C().detailsOpen })
+    settle("wide, preview hidden")
+    h.step("measure: wide, preview hidden: the settings column alone", function() {
+      h.eq("the narrow setting off, the preview hidden", A().storedNarrow + "," + P().switchOn + "," + A().settings.narrowPanel, "false,false,undefined")
+      h.eq("shown, this setting would be two columns", h.model.panelLayout(A().storedNarrow, true, true).wide, true)
+      h.eq("one column: the same card as the narrow setting's, by design", A().layout.wide + "," + A().popup.contentWidth, "false,520")
+      measure("wide-preview-hidden")
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-wide-preview-hidden.png")
+    h.step("measure: Show preview", function() { C().togglePreview() },
+           function() { return P().frames >= 3 && h.find(A(), "previewImage").status === Image.Ready }, 8000)
+    h.wait(400)
+    h.step("measure: wide, the preview live, the default state", function() {
+      h.eq("two columns", A().layout.wide + "," + A().popup.contentWidth, "true,920")
+      h.eq("the preview on the left, its summary under it", h.find(A(), "previewColumn").visible && h.find(A(), "previewSummary").visible, true)
+      h.eq("the controls over the frame on a solid backing of the theme's background",
+           h.find(A(), "previewOverlayBacking").visible && h.find(A(), "previewHideBacking").visible
+           && String(h.find(A(), "previewOverlayBacking").color) === String(Commons.Color.background), true)
+      h.check("the state line under the title, beside the controls (wide)",
+              h.find(A(), "heroState").mapToItem(C(), 0, 0).y < h.find(A(), "enableSwitch").mapToItem(C(), 0, h.find(A(), "enableSwitch").height).y)
+      measure("wide-preview-live")
+    })
+    h.grabStep(function() { return A().popup }, "m9-measure-wide-preview-live.png")
+    h.step("measure: wide, the Details view beside the preview", function() { C().toggleDetails() })
+    h.wait(300)
+    h.step("measure: wide, Details", function() { measure("wide-details") })
+    h.grabStep(function() { return A().popup }, "m9-measure-wide-details.png")
+    // the preview exits on the wide layout's Mic tab: the layout does not
+    // follow the error (it would go narrow, release the hold, clear the
+    // failure, go wide, relaunch and fail again: a 920/520 flap)
+    h.step("preview error, wide: the Mic tab, the preview live", function() {
+      C().toggleDetails()
+      h.tab(A(), "mic")
+    }, function() { return !C().detailsOpen && P().running && A().layout.wide && A().previewHeld }, 8000)
+    settle("wide, Mic tab")
+    h.step("preview error, wide: every next start exits on its own", function() {
+      h.notes.flapStarts = P().starts
+      h.notes.flapWidth = A().popup.contentWidth
+      h.notes.flapLayouts = 0
+      h.notes.flapFn = function() { if (!A().layout.wide) h.notes.flapLayouts++ }
+      A().layoutChanged.connect(h.notes.flapFn)
+      h.writeFile("preview-exit", ["1"])
+    }, function() { return h.writerIdle() })
+    h.step("preview error, wide: the preview child killed", function() { h.killPid(P().pid, "KILL") },
+           function() { return !P().running && P().failed }, 8000)
+    h.step("preview error, wide: 3 s watched", function() {
+      h.notes.flapMark = Date.now()
+      h.notes.flapMin = A().popup.contentWidth
+      h.notes.flapMax = A().popup.contentWidth
+    }, function() {
+      var w = A().popup.contentWidth
+      h.notes.flapMin = Math.min(h.notes.flapMin, w)
+      h.notes.flapMax = Math.max(h.notes.flapMax, w)
+      return Date.now() - h.notes.flapMark >= 3000
+    }, 5000)
+    h.step("preview error, wide: one width, no relaunch, the error in the frame area", function() {
+      A().layoutChanged.disconnect(h.notes.flapFn)
+      h.eq("the width held (" + h.notes.flapMin + ".." + h.notes.flapMax + ")", h.notes.flapMin + "," + h.notes.flapMax + "," + h.notes.flapLayouts,
+           h.notes.flapWidth + "," + h.notes.flapWidth + ",0")
+      h.eq("no relaunch", P().starts, h.notes.flapStarts)
+      h.eq("still wide, still held, still failed", A().layout.wide + "," + A().previewHeld + "," + P().failed, "true,true,true")
+      var t = h.find(A(), "previewPlaceholder")
+      h.check("the reason inside the frame area", h.find(A(), "previewBlock").visible && t.visible && t.text.indexOf("stopped by signal 9") !== -1, t.text)
+      h.eq("drawn as an error", t.color, Commons.Color.urgent)
+      h.eq("no strip in the wide layout", h.find(A(), "previewStrip").visible, false)
+      h.eq("Hide over the frame", h.find(A(), "previewHide").visible, true)
+      h.removeFile("preview-exit")
+    }, function() { return h.writerIdle() })
+    h.grabStep(function() { return A().popup }, "m9-preview-error-wide-mic.png")
+    h.step("measure: hide the preview again", function() { h.tab(A(), "effect"); C().togglePreview() },
+           function() { return !P().running && !P().switchOn && !A().layout.wide })
+    h.step("measure: back to the default fixture", function() {
+      A().close()
+      A().settings = { cliPath: shellRoot.cli }
+      h.writeFile("settings-mode", ["none"])
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.interfaceRevision === 4 && h.writerIdle() })
+  }
+
   function liveScenario() {
     var A = function() { return h.widgetA }
     var S = function() { return h.widgetA.service }
@@ -5896,12 +6302,12 @@ ShellRoot {
     }, 15000)
     h.wait(2500)
     h.step("live figures", function() {
-      h.tab(A(), "status")
+      if (!h.content(A()).detailsOpen) h.content(A()).toggleDetails()
       var rows = h.model.statsRows(S().record)
       h.note("stats: " + JSON.stringify(rows))
       h.note("consumers " + S().record.consumers + ", tooltip: " + A().iconButton.tooltipText)
       h.eq("active glyph", A().iconButton.text, glyphOf("active"))
-      h.eq("stats block shown", h.find(A(), "statsBlock").visible, true)
+      h.eq("the live figures in the Details", h.model.detailsRows(S().record).some(function(r) { return r.label === "Frame rate" }), true)
       h.check("consumer counted", S().record.consumers >= 1, S().record.consumers)
     })
     h.grabStep(function() { return strip }, "live-bar-active.png")

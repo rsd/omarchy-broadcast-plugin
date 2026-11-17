@@ -28,9 +28,15 @@
 #     settings-state holds one setting per line, fields separated by "|":
 #       group|group label|id|type|label|value|default|stored|min|max|step|
 #       unit|options|master|when|reason|fixed|scope|surface|display_offset|
-#       display_scale|description
-#     (the last three optional, revisions 27 and 26: an int's display transform
-#     as integers, and a description text with no "|")
+#       display_scale|description|kind
+#     (the last four optional, revisions 27, 26 and 28: an int's display
+#     transform as integers, a description text with no "|", and the
+#     disabled_kind of a fixed row)
+#     Every setting carries its `disabled_kind` (interface revision 28): ""
+#     while enabled, parent_off while its master's value is not one of
+#     `when`, and for a fixed row its `kind` (default device). If
+#     $FAKE_OB_DIR/settings-no-kind exists the key is left out of every
+#     setting and change, as a daemon before revision 28 prints them.
 #     options as value:Label,value:Label (enum); a setting with a master
 #     (another setting's id) is enabled only while the master's value is one
 #     of `when` (comma-separated), else greyed with `reason`; fixed 1: always
@@ -190,10 +196,16 @@ function enabled(k,   m, i, nw, ws) {
   for (i = 1; i <= nw; i++) if (val[m] == ws[i]) return 1
   return 0
 }
+function kind(k) {
+  if (nokind == 1) return ""
+  if (en[k]) return ",\"disabled_kind\":\"\""
+  if (f[k, 17] == "1") return ",\"disabled_kind\":" jstr(f[k, 23] != "" ? f[k, 23] : "device")
+  return ",\"disabled_kind\":\"parent_off\""
+}
 function setting(k,   s, t, i, n, os, kv, w, nw, ws, mt) {
   t = f[k, 4]
   s = "{\"id\":" jstr(f[k, 3]) ",\"label\":" jstr(f[k, 5]) ",\"type\":" jstr(t) ",\"scope\":\"" (f[k, 18] == "global" ? "global" : "camera") "\",\"stored\":" (f[k, 8] == "1" ? "true" : "false")
-  s = s ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16])
+  s = s ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16]) kind(k)
   w = ""
   if (f[k, 14] != "") {
     mt = typ[f[k, 14]]
@@ -227,18 +239,20 @@ function setting(k,   s, t, i, n, os, kv, w, nw, ws, mt) {
 function change(k,   s) {
   s = "{\"id\":" jstr(f[k, 3])
   if (f[k, 4] != "action") s = s ",\"value\":" jval(f[k, 4], f[k, 6])
-  return s ",\"stored\":" (f[k, 8] == "1" ? "true" : "false") ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16]) "}"
+  return s ",\"stored\":" (f[k, 8] == "1" ? "true" : "false") ",\"enabled\":" (en[k] ? "true" : "false") ",\"disabled_reason\":" jstr(en[k] ? "" : f[k, 16]) kind(k) "}"
 }
-function load(   i) { n++; for (i = 1; i <= 22; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
-function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 22; i++) s = s "|" f[k, i]; return s }
+function load(   i) { n++; for (i = 1; i <= 23; i++) f[n, i] = $i; val[$3] = $6; typ[$3] = $4; row[$3] = n }
+function state_line(k,   i, s) { s = f[k, 1]; for (i = 2; i <= 23; i++) s = s "|" f[k, i]; return s }
 '
 
 setting_file() { head -n 1 -- "$dir/$1" 2>/dev/null || echo "$2"; }
+# 1: a daemon before interface revision 28 (no disabled_kind).
+nokind=$([ -f "$dir/settings-no-kind" ] && echo 1 || echo 0)
 
 # The settings set of settings-state as settings_group lines.
 settings_set() {
   awk -F'|' -v camera="$(setting_file settings-camera "")" -v rev="$(setting_file settings-rev 1)" \
-      -v serial="$(setting_file settings-serial 1)" -v per="$(setting_file settings-per-line 4)" "$SETTINGS_AWK"'
+      -v serial="$(setting_file settings-serial 1)" -v per="$(setting_file settings-per-line 4)" -v nokind="$nokind" "$SETTINGS_AWK"'
     NF >= 16 { load() }
     END {
       for (k = 1; k <= n; k++) en[k] = enabled(k)
@@ -357,7 +371,7 @@ if [ "${1:-}" = "settings" ]; then
   : > "$deltas"
   awk -F'|' -v id="$id" -v value="$value" -v reset="$([ "$2" = reset ] && [ -z "$only" ] && echo 1)" -v only="$only" -v out="$deltas" \
       -v head="{\"v\":1,\"type\":\"settings_delta\",\"schema\":1,\"rev\":$rev,\"serial\":$serial,\"camera\":" \
-      -v camera="$camera" "$SETTINGS_AWK"'
+      -v camera="$camera" -v nokind="$nokind" "$SETTINGS_AWK"'
     NF >= 16 { load() }
     END {
       for (k = 1; k <= n; k++) before[k] = enabled(k)
