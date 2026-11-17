@@ -6,9 +6,11 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// The camera's settings, drawn generically from Model.settingsView: whatever
-// the daemon publishes, in its groups and order, through one widget per type:
-//   int     the shell's PanelSlider, with the value and its unit
+// The camera's settings, drawn generically from Model.settingsView:
+// whatever the daemon publishes, in its groups and order, through one widget
+// per type:
+//   int     the shell's PanelSlider, with the value and its unit; an int of
+//           exactly two values is a switch (Model.settingWidget)
 //   bool    the shell's ToggleSwitch (as the shell's panels draw a row switch;
 //           the row owns its click)
 //   enum    a row of the shell's Buttons (its ButtonGroup) up to
@@ -16,18 +18,27 @@ import "Model.js" as Model
 //   action  a Button
 // A group is a header that opens and closes, one open at a time (memory only:
 // the panel holds the choice, Model.openGroupId), or, where the view says it
-// is not collapsible (the Effect tab's), a plain heading over rows that are
-// always shown; a row the daemon greys out
-// keeps its label, value and the daemon's reason legible, only its control is
-// faded, and it takes no input. Nothing here knows any setting: no id is
-// named, every label, unit, reason and choice comes from the view, already
-// sanitised by Model.js (markup characters removed), and every Text is
-// PlainText (tests/check-source.py counts them).
+// is not collapsible (the Effect and Mic tabs'), a plain heading over rows
+// that are always shown, or no heading at all where the group is one master
+// and its dependents (the view's `heading`). The view lists only the rows
+// drawn in place (Model.settingPlacement): a dependent shows indented under
+// its master (`depth`) once the daemon allows it; a row the daemon greys in
+// place keeps its label and value legible, only its control is faded, and it
+// takes no input. What a row says beyond its label (its reason while greyed,
+// its description: the view's `help`) shows only under the cursor, which the
+// pointer moves too, as a tip drawn over the panel (never in the layout),
+// marked by a faint "?" after the label. What cannot run
+// here is one counted line at the foot ("Not available now (n)", the
+// panel's notAvailable, Model.notAvailableView), opened to its entries and
+// their reasons, with a Setup button where something is not installed.
+// Nothing here knows any setting: no id is named, every label, unit, reason
+// and choice comes from the view, already sanitised by Model.js (markup
+// characters removed), and every Text is PlainText (tests/check-source.py
+// counts them).
 //
-// Layout: the section title with Reset to defaults on its line, and the
-// note, on top; the groups in a Flickable that scrolls only when the screen
-// has no room for them (`room`; it then shows a scroll bar and a fade at the
-// edge with more); the groups' note under it. Reset is never scrolled away.
+// Layout: the note, the groups, the "Not available now" line, then Reset to
+// defaults as a quiet link at the bottom (the Camera tab's). No scroller of
+// its own: the panel's body is the one scroller.
 //
 // The repeaters' models are counts, not the view's arrays: a delta changes
 // what a row shows, never rebuilds it, so the slider under the mouse stays the
@@ -44,23 +55,24 @@ Column {
   id: root
 
   property QtObject bar: null
-  // Put before the objectName of the section's own parts (settingsTitle,
-  // settingsFlick, ...), so that two sections in one panel are told apart.
+  // Put before the objectName of the section's own parts (settingsNote,
+  // settingsReset, ...), so that two sections in one panel are told apart.
   property string namePrefix: ""
-  // Model.settingsView(record, open, drafts), or Model.effectSettingsView
-  // (the Effect tab's: no title, no Reset, groups that stay open).
+  // Model.settingsView(record, open, drafts), or Model.effectSettingsView /
+  // micSettingsView (no Reset, groups that stay open).
   property var view: ({ visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "",
-                        title: "", collapsible: true })
+                        title: "", collapsible: true, unavailable: [] })
+  // The view's "Not available now" line, as the panel holds it open or
+  // closed (Model.notAvailableView).
+  property var notAvailable: ({ visible: false, count: 0, text: "", open: false, glyph: "", entries: [], note: "" })
   // The panel's current stop ({ kind, index }) or null, and its chip cursor.
   property var cursorStop: null
   property int choiceCursor: -1
   // Where the keyboard goes back to once a dropdown's list closes.
   property Item keyCatcher: null
-  // The most this section may take on the screen (the card's room below its
-  // top); 0: no cap. Past it the groups scroll here, alone.
-  property real room: 0
-  // Sliders held anywhere in the panel: the Flickable never takes a drag then.
-  property int slidersHeld: 0
+  // The visible area the section scrolls in (the panel's body): a help tip
+  // that would run past its bottom is drawn above its row instead.
+  property Item viewport: null
   property color foreground: Commons.Color.foreground
   property color dim: Qt.darker(foreground, 1.55)
   property color faint: Qt.darker(foreground, 1.8)
@@ -78,18 +90,28 @@ Column {
   signal groupToggled(string id)
   // Reset to defaults was clicked.
   signal resetRequested()
-  // A slider was grabbed (+1) or let go (-1): the panel's Flickables must
-  // not take the drag over.
+  // The "Not available now" line was clicked: it opens or folds.
+  signal notAvailableToggled()
+  // An entry's Setup button was clicked: the setup dialog.
+  signal setupRequested(int index)
+  // A slider was grabbed (+1) or let go (-1): the panel's body must not take
+  // the drag over.
   signal heldChanged(int delta)
 
-  // The left inset of headings and rows: none in the Effect tab, where they
-  // line up with the panel's section headers and choices.
+  // The left inset of headings and rows: none in the Effect and Mic tabs,
+  // where they line up with the panel's own rows. On the right every
+  // control ends on the one edge the panel's own controls end on (the
+  // section's width), whatever the tab.
   readonly property real inset: view.collapsible === false ? 0 : Style.space(6)
-  readonly property Item flick: settingsFlick
+  // How far a dependent is drawn in, under its master.
+  readonly property real depthInset: Style.space(18)
   readonly property Item resetItem: resetButton
+  readonly property Item notAvailableItem: notAvailableLine
 
   spacing: Style.space(8)
   visible: view.visible
+  // Above what the panel draws after the section, for the help tips.
+  z: 1
 
   function hasCursor(kind, index) {
     return cursorStop !== null && cursorStop !== undefined && cursorStop.kind === kind
@@ -112,60 +134,18 @@ Column {
     return null
   }
 
+  // The Setup button of entry `index` of the "Not available now" list, or null.
+  function setupItem(index) {
+    var entry = unavailableRepeater.itemAt(index)
+    return entry ? entry.button : null
+  }
+
   // Enter or Space on a dropdown row: its list opens and takes the keyboard
   // (the shell Dropdown's own keys: Up/Down or j/k walk, Enter chooses,
   // Escape closes); the panel's key catcher gets it back on close.
   function openChoices(stop) {
     var item = rowItem(stop)
     return item ? item.openChoices() : false
-  }
-
-  // The height everything but the groups' Flickable takes.
-  readonly property real pinnedHeight: sectionTitle.height
-    + (noteText.visible ? noteText.height + spacing : 0)
-    + (hintText.visible ? hintText.height + spacing : 0)
-    + (groupsNote.visible ? groupsNote.height + spacing : 0)
-    + (groupsBox.visible ? spacing : 0)
-
-  // The section's title, and on its line Reset to defaults: camera-wide,
-  // so it sits with the title, right-aligned, apart from any setting's own
-  // button, pinned above the groups and never scrolled away.
-  Item {
-    id: sectionTitle
-    width: parent.width
-    // Nothing to say (the Effect tab's section): no line, no gap.
-    visible: root.view.title !== "" || root.view.reset === true
-    height: visible ? Math.max(titleText.implicitHeight, resetButton.visible ? resetButton.implicitHeight : 0) : 0
-
-    PanelSectionHeader {
-      id: titleText
-      objectName: root.namePrefix + "settingsTitle"
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      text: root.view.title
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-    }
-
-    Button {
-      id: resetButton
-      objectName: root.namePrefix + "settingsReset"
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      visible: root.view.reset === true
-      text: Model.SETTINGS_RESET_LABEL
-      tooltipText: Model.SETTINGS_RESET_TOOLTIP
-      bordered: true
-      hasCursor: root.hasCursor("reset", -1)
-      foreground: root.foreground
-      accent: root.accent
-      fontFamily: root.fontFamily
-      Accessible.role: Accessible.Button
-      Accessible.name: Model.SETTINGS_RESET_LABEL
-      Accessible.description: Model.SETTINGS_RESET_TOOLTIP
-      onHovered: function(on) { if (on) root.cursorRequested("reset", -1) }
-      onClicked: root.resetRequested()
-    }
   }
 
   // Where a change applies: live, or at the camera's next open.
@@ -197,549 +177,581 @@ Column {
     font.pixelSize: Style.font.bodySmall
   }
 
-  Item {
-    id: groupsBox
+  Column {
+    id: groupsColumn
+    objectName: root.namePrefix + "settingsGroups"
     width: parent.width
-    height: settingsFlick.height
     visible: root.view.groups.length > 0
+    // Over the siblings drawn after it (the Not available block, the
+    // truncation note, Reset): the last row's help tip, opening downward,
+    // stays on top of them.
+    z: 1
+    // Headers and rows carry their own padding: between groups the same
+    // step as between the rows of one (groupBlock's spacing), so rows keep
+    // one rhythm whichever group they are in.
+    spacing: Style.space(1)
 
-    Flickable {
-      id: settingsFlick
-      objectName: root.namePrefix + "settingsFlick"
-      readonly property real fullHeight: groupsColumn.implicitHeight
-      readonly property real roomLeft: root.room > 0 ? Math.max(Style.space(160), root.room - root.pinnedHeight) : fullHeight
-      readonly property bool moreBelow: interactive && contentY + height < contentHeight - 1
-      width: parent.width
-      height: Math.min(fullHeight, roomLeft)
-      contentWidth: width
-      contentHeight: fullHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      flickableDirection: Flickable.VerticalFlick
-      interactive: contentHeight > height + 0.5 && root.slidersHeld === 0
-      // At rest too while it scrolls: the cue that more is there.
-      ScrollBar.vertical: ScrollBar {
-        objectName: root.namePrefix + "settingsScrollBar"
-        policy: settingsFlick.contentHeight > settingsFlick.height + 0.5 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
-      }
+    Repeater {
+      id: groupRepeater
+      objectName: root.namePrefix + "settingsGroupRepeater"
+      model: root.view.groups.length
 
-      Column {
-        id: groupsColumn
-        // Clear of the scroll bar while there is one.
-        width: settingsFlick.width - (settingsFlick.contentHeight > settingsFlick.height + 0.5 ? Style.space(12) : 0)
-        // Headers and rows carry their own padding: no gap between them.
-        spacing: 0
+      delegate: Column {
+        id: groupBlock
+        required property int index
+        readonly property var group: root.view.groups[index] || ({ id: "", label: "", heading: false, expanded: false, glyph: "", rows: [], truncation: "", breakAbove: "" })
+        readonly property Item header: groupHeader
+        objectName: root.namePrefix + "settingsGroup-" + group.id
+        width: groupsColumn.width
+        spacing: Style.space(1)
+        // Above the groups after it while one of its rows has the cursor,
+        // so the row's help tip draws over them.
+        z: root.cursorStop && root.cursorStop.kind === "setting"
+          && group.rows.some(function(r) { return r.stop === root.cursorStop.index }) ? 1 : 0
+
+        // Not collapsible (the Effect and Mic tabs): the group's break
+        // (Model.markGroupBreaks): a gap above a heading, a gap with a faint
+        // line where rows with no heading follow a headed section (so they
+        // never read as its items), else nothing: every row keeps one rhythm.
+        Item {
+          objectName: root.namePrefix + "settingsGroupBreak-" + groupBlock.group.id
+          readonly property string kind: root.view.collapsible === false ? (groupBlock.group.breakAbove || "") : ""
+          width: parent.width
+          height: Style.space(8)
+          visible: kind !== ""
+
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width
+            height: 1
+            visible: parent.kind === "rule"
+            color: root.faint
+            opacity: 0.5
+          }
+        }
+
+        function rowFor(stop) {
+          for (var r = 0; r < rowRepeater.count; r++) {
+            var item = rowRepeater.itemAt(r)
+            if (item && item.row.stop === stop) return item
+          }
+          return null
+        }
+
+        // The header: the group's label, aligned with its rows' labels,
+        // and the chevron at the right edge; Enter, Space or a click
+        // opens or closes it.
+        CursorSurface {
+          id: groupHeader
+          objectName: root.namePrefix + "settingsGroupHeader-" + groupBlock.group.id
+          // Not collapsible: only where the view heads the group (a group
+          // that is one master and its dependents has none).
+          visible: root.view.collapsible !== false || groupBlock.group.heading === true
+          width: parent.width
+          implicitHeight: headerLabel.implicitHeight + Style.space(6)
+          hasCursor: root.hasCursor("group", groupBlock.index)
+          foreground: root.foreground
+          fill: root.hoverFill
+          Accessible.role: root.view.collapsible !== false ? Accessible.Button : Accessible.StaticText
+          Accessible.name: groupBlock.group.label
+          Accessible.description: root.view.collapsible === false ? "" : (groupBlock.group.expanded ? "Expanded" : "Collapsed")
+
+          Text {
+            id: headerLabel
+            objectName: root.namePrefix + "settingsGroupLabel-" + groupBlock.group.id
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.leftMargin: root.inset
+            anchors.right: headerGlyph.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            elide: Text.ElideRight
+            // Collapsible: bold body text. Not (the Effect tab): the look of
+            // the panel's section headers (PanelSectionHeader), small caps.
+            readonly property bool section: root.view.collapsible === false
+            text: section ? groupBlock.group.label.toUpperCase() : groupBlock.group.label
+            color: section ? Qt.darker(root.foreground, 1.4) : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: section ? Style.font.caption : Style.font.body
+            font.bold: true
+          }
+          Text {
+            id: headerGlyph
+            textFormat: Text.PlainText
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(6)
+            width: Style.space(16)
+            anchors.verticalCenter: parent.verticalCenter
+            horizontalAlignment: Text.AlignHCenter
+            text: groupBlock.group.glyph
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+          MouseArea {
+            anchors.fill: parent
+            enabled: root.view.collapsible !== false
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onEntered: root.cursorRequested("group", groupBlock.index)
+            onClicked: root.groupToggled(groupBlock.group.id)
+          }
+        }
 
         Repeater {
-          id: groupRepeater
-          objectName: root.namePrefix + "settingsGroupRepeater"
-          model: root.view.groups.length
+          id: rowRepeater
+          model: groupBlock.group.rows.length
 
-          delegate: Column {
-            id: groupBlock
+          delegate: CursorSurface {
+            id: settingRow
             required property int index
-            readonly property var group: root.view.groups[index] || ({ id: "", label: "", expanded: false, glyph: "", rows: [], truncation: "" })
-            readonly property Item header: groupHeader
-            objectName: root.namePrefix + "settingsGroup-" + group.id
-            width: groupsColumn.width
-            spacing: Style.space(1)
+            readonly property var row: groupBlock.group.rows[index] || ({ id: "", type: "", widget: "", label: "", enabled: false, greyed: true,
+                                                                          kind: "", reason: "", description: "", help: "", depth: 0, checked: false,
+                                                                          displayOffset: null, displayScale: null, value: null, valueText: "", min: 0, max: 1,
+                                                                          step: 1, options: [], selectedIndex: -1, optionsNote: "", stop: -1 })
+            readonly property bool greyed: !row.enabled
+            readonly property bool onCursor: root.hasCursor("setting", row.stop)
+            // The row draws the cursor (see the header comment).
+            readonly property bool rowDrawsCursor: greyed || row.widget === "slider" || row.widget === "switch"
+            // Which set and which setting this item shows now.
+            readonly property string rowKey: root.view.setKey + "\n" + row.id
+            objectName: "setting-" + row.id
+            width: groupBlock.width
+            implicitHeight: rowColumn.implicitHeight + Style.space(4)
+            // Above the rows after it, so its help tip draws over them.
+            z: onCursor ? 1 : 0
+            hasCursor: onCursor && rowDrawsCursor
+            outline: true
+            foreground: root.foreground
+            fill: root.hoverFill
+            Accessible.role: row.widget === "slider" ? Accessible.Slider
+              : (row.widget === "switch" ? Accessible.CheckBox
+                : (row.widget === "action" ? Accessible.Button : Accessible.ComboBox))
+            // The whole label, however it is elided on screen.
+            Accessible.name: row.label
+            Accessible.description: Model.settingDescription(row)
+            Accessible.checkable: row.widget === "switch"
+            Accessible.checked: row.widget === "switch" && row.value === true
 
-            // Not collapsible (the Effect tab): a gap above each group after
-            // the first, so the groups read as sections.
-            Item {
-              width: parent.width
-              height: Style.space(8)
-              visible: root.view.collapsible === false && groupBlock.index > 0
+            function openChoices() {
+              if (settingRow.greyed || settingRow.row.widget !== "dropdown" || !widget.item) return false
+              widget.item.openList()
+              return true
             }
 
-            function rowFor(stop) {
-              for (var r = 0; r < rowRepeater.count; r++) {
-                var item = rowRepeater.itemAt(r)
-                if (item && item.row.stop === stop) return item
-              }
-              return null
+            // Where the row as a whole is the target (a slider's row, a
+            // greyed row, a row with help to show): hovering it moves the
+            // cursor there. A switch row's MouseArea below does the same;
+            // elsewhere the widget is the target and reports its own hover.
+            HoverHandler {
+              enabled: settingRow.row.widget === "slider" || settingRow.greyed || settingRow.row.help !== ""
+              onHoveredChanged: if (hovered) root.cursorRequested("setting", settingRow.row.stop)
             }
 
-            // The header: the group's label, aligned with its rows' labels,
-            // and the chevron at the right edge; Enter, Space or a click
-            // opens or closes it.
-            CursorSurface {
-              id: groupHeader
-              objectName: root.namePrefix + "settingsGroupHeader-" + groupBlock.group.id
-              width: parent.width
-              implicitHeight: headerLabel.implicitHeight + Style.space(6)
-              hasCursor: root.hasCursor("group", groupBlock.index)
-              foreground: root.foreground
-              fill: root.hoverFill
-              Accessible.role: root.view.collapsible !== false ? Accessible.Button : Accessible.StaticText
-              Accessible.name: groupBlock.group.label
-              Accessible.description: root.view.collapsible === false ? "" : (groupBlock.group.expanded ? "Expanded" : "Collapsed")
+            Column {
+              id: rowColumn
+              // A dependent is drawn in, under its master.
+              x: root.inset + (settingRow.row.depth === 1 ? root.depthInset : 0)
+              y: Style.space(2)
+              width: parent.width - x
+              spacing: Style.space(1)
+
+              // The label on the left (an action's label is its button),
+              // the widget on the right; one line. A slider takes 60% of
+              // the line, any other widget what it needs; the label the
+              // rest, elided.
+              Item {
+                id: rowLine
+                width: parent.width
+                implicitHeight: Math.max(rowLabel.implicitHeight, widget.item ? widget.item.implicitHeight : 0)
+
+                Text {
+                  id: rowLabel
+                  objectName: "settingLabel-" + settingRow.row.id
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  // As wide as it needs, up to the widget less the help mark.
+                  width: Math.min(implicitWidth, Math.max(0, widget.x - Style.space(8) - (helpMark.visible ? helpMark.implicitWidth + Style.space(6) : 0)))
+                  visible: settingRow.row.widget !== "action"
+                  elide: Text.ElideRight
+                  text: settingRow.row.label
+                  color: settingRow.greyed ? root.dim : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                // The row has more to say (its reason, its description):
+                // shown as a tip while the row has the cursor.
+                Text {
+                  id: helpMark
+                  objectName: "settingHelpMark-" + settingRow.row.id
+                  textFormat: Text.PlainText
+                  anchors.left: rowLabel.right
+                  anchors.leftMargin: Style.space(6)
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: rowLabel.visible && settingRow.row.help !== ""
+                  text: "?"
+                  color: root.faint
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Loader {
+                  id: widget
+                  objectName: "settingWidget-" + settingRow.row.id
+                  readonly property bool isAction: settingRow.row.widget === "action"
+                  anchors.left: isAction ? parent.left : undefined
+                  anchors.right: isAction ? undefined : parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: settingRow.row.widget === "slider" ? Math.round(parent.width * 0.6)
+                    : Math.min(item ? item.implicitWidth : 0, parent.width - Style.space(72))
+                  height: item ? item.implicitHeight : 0
+                  enabled: !settingRow.greyed
+                  sourceComponent: settingRow.row.widget === "slider" ? sliderWidget
+                    : (settingRow.row.widget === "switch" ? switchWidget
+                      : (settingRow.row.widget === "segmented" ? segmentedWidget
+                        : (settingRow.row.widget === "dropdown" ? dropdownWidget
+                          : (isAction ? actionWidget : null))))
+                }
+              }
 
               Text {
-                id: headerLabel
-                objectName: root.namePrefix + "settingsGroupLabel-" + groupBlock.group.id
                 textFormat: Text.PlainText
-                anchors.left: parent.left
-                anchors.leftMargin: root.inset
-                anchors.right: headerGlyph.left
-                anchors.rightMargin: Style.space(6)
-                anchors.verticalCenter: parent.verticalCenter
-                elide: Text.ElideRight
-                // Collapsible: bold body text. Not (the Effect tab): the look of
-                // the panel's section headers (PanelSectionHeader), small caps.
-                readonly property bool section: root.view.collapsible === false
-                text: section ? groupBlock.group.label.toUpperCase() : groupBlock.group.label
-                color: section ? Qt.darker(root.foreground, 1.4) : root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: section ? Style.font.caption : Style.font.body
-                font.bold: true
-              }
-              Text {
-                id: headerGlyph
-                textFormat: Text.PlainText
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(6)
-                width: Style.space(16)
-                anchors.verticalCenter: parent.verticalCenter
-                horizontalAlignment: Text.AlignHCenter
-                text: groupBlock.group.glyph
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: text !== ""
+                text: settingRow.row.optionsNote
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.caption
               }
-              MouseArea {
+            }
+
+            // What the row says beyond its label (its reason while greyed,
+            // its description), only while it has the cursor (the keyboard's
+            // or the pointer's): one tip at a time, drawn over what is under
+            // the row in the tooltip's colours, never in the layout, so
+            // neither the row nor the card changes size.
+            BorderSurface {
+              id: helpTip
+              objectName: "settingHelpTip-" + settingRow.row.id
+              readonly property var tipBorder: Border.localOrSurfaceSpec("tooltip", "border", Commons.Color.tooltip.border,
+                                                                          Commons.Color.tooltip.border, Style.normalBorderWidth)
+              // Under the row, or above it where under would leave the viewport.
+              readonly property bool above: visible && root.viewport !== null
+                && settingRow.mapToItem(root.viewport, 0, settingRow.height).y + Style.space(2) + height > root.viewport.height
+              x: rowColumn.x
+              y: above ? -height - Style.space(2) : parent.height + Style.space(2)
+              z: 10
+              width: Math.min(helpText.implicitWidth, parent.width - rowColumn.x)
+              height: helpText.implicitHeight
+              visible: settingRow.onCursor && settingRow.row.help !== ""
+              color: Commons.Color.tooltip.background
+              borderSpec: tipBorder
+              radius: Style.cornerRadius
+
+              // Opaque under the tooltip's fill (a theme may give it alpha):
+              // what the tip covers never shows through its words.
+              Rectangle {
                 anchors.fill: parent
-                enabled: root.view.collapsible !== false
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onEntered: root.cursorRequested("group", groupBlock.index)
-                onClicked: root.groupToggled(groupBlock.group.id)
+                z: -1
+                radius: parent.radius
+                color: Commons.Color.background
+              }
+
+              Text {
+                id: helpText
+                objectName: "settingHelp-" + settingRow.row.id
+                textFormat: Text.PlainText
+                width: Math.min(implicitWidth, settingRow.width - rowColumn.x)
+                wrapMode: Text.Wrap
+                text: settingRow.row.help
+                color: Commons.Color.tooltip.text
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                leftPadding: Border.left(helpTip.tipBorder) + Style.spacing.controlPaddingX
+                rightPadding: Border.right(helpTip.tipBorder) + Style.spacing.controlPaddingX
+                topPadding: Border.top(helpTip.tipBorder) + Style.spacing.controlPaddingY
+                bottomPadding: Border.bottom(helpTip.tipBorder) + Style.spacing.controlPaddingY
               }
             }
 
-            Repeater {
-              id: rowRepeater
-              model: groupBlock.group.rows.length
+            // A switch row owns its click, as the shell's Toggle row does.
+            MouseArea {
+              anchors.fill: parent
+              visible: settingRow.row.widget === "switch"
+              hoverEnabled: true
+              cursorShape: settingRow.greyed ? Qt.ArrowCursor : Qt.PointingHandCursor
+              onEntered: root.cursorRequested("setting", settingRow.row.stop)
+              onClicked: if (!settingRow.greyed) Daemon.commitSetting(settingRow.row.id, Model.switchFlip(settingRow.row))
+            }
 
-              delegate: CursorSurface {
-                id: settingRow
-                required property int index
-                readonly property var row: groupBlock.group.rows[index] || ({ id: "", type: "", widget: "", label: "", enabled: false,
-                                                                              reason: "", description: "", displayOffset: null, displayScale: null, value: null, valueText: "", min: 0, max: 1,
-                                                                              step: 1, options: [], selectedIndex: -1, optionsNote: "", stop: -1 })
-                readonly property bool greyed: !row.enabled
-                readonly property bool onCursor: root.hasCursor("setting", row.stop)
-                // The row draws the cursor (see the header comment).
-                readonly property bool rowDrawsCursor: greyed || row.widget === "slider" || row.widget === "switch"
-                // Which set and which setting this item shows now.
-                readonly property string rowKey: root.view.setKey + "\n" + row.id
-                objectName: "setting-" + row.id
-                width: groupBlock.width
-                implicitHeight: rowColumn.implicitHeight + Style.space(4)
-                hasCursor: onCursor && rowDrawsCursor
-                outline: true
-                foreground: root.foreground
-                fill: root.hoverFill
-                Accessible.role: row.widget === "slider" ? Accessible.Slider
-                  : (row.widget === "switch" ? Accessible.CheckBox
-                    : (row.widget === "action" ? Accessible.Button : Accessible.ComboBox))
-                // The whole label, however it is elided on screen.
-                Accessible.name: row.label
-                Accessible.description: Model.settingDescription(row)
-                Accessible.checkable: row.widget === "switch"
-                Accessible.checked: row.widget === "switch" && row.value === true
+            // int: the slider and its value (what the hand holds while it
+            // is held: the shell's PanelSlider shows its own position
+            // then). The value text is never faded.
+            Component {
+              id: sliderWidget
+              Item {
+                id: sliderBox
+                // What the press latched: the set and setting the hand
+                // took; "" between drags (a wheel step has none), or
+                // `cancelled` once the item shows another one.
+                property string heldKey: ""
+                readonly property string cancelled: "\u0000"
+                readonly property var heldValue: slider.dragging ? Model.clampSetting(settingRow.row, slider.liveValue) : null
+                implicitHeight: slider.implicitHeight
 
-                function openChoices() {
-                  if (settingRow.greyed || settingRow.row.widget !== "dropdown" || !widget.item) return false
-                  widget.item.openList()
-                  return true
+                // `released`: no release will follow (the grab is gone).
+                function cancelDrag(released) {
+                  heldKey = released === true ? "" : cancelled
+                  if (!slider.dragging) return
+                  slider.dragging = false
+                  slider.liveValue = slider.value
+                }
+                // A move or a release of the drag the hand began on
+                // this very setting, or of a wheel step.
+                function own() {
+                  return heldKey === "" || heldKey === settingRow.rowKey
                 }
 
-                // Where the row as a whole is the target (a slider's row, a
-                // greyed row): hovering it moves the cursor there. A switch
-                // row's MouseArea below does the same; elsewhere the widget
-                // is the target and reports its own hover.
-                HoverHandler {
-                  enabled: settingRow.row.widget === "slider" || settingRow.greyed
-                  onHoveredChanged: if (hovered) root.cursorRequested("setting", settingRow.row.stop)
+                // The item now shows another set or setting: the drag
+                // ends here and its release writes nothing.
+                Connections {
+                  target: settingRow
+                  function onRowKeyChanged() { if (sliderBox.heldKey !== "" && sliderBox.heldKey !== settingRow.rowKey) sliderBox.cancelDrag() }
                 }
 
-                Column {
-                  id: rowColumn
-                  x: root.inset
-                  y: Style.space(2)
-                  width: parent.width - 2 * root.inset
-                  spacing: Style.space(1)
-
-                  // The label on the left (an action's label is its button),
-                  // the widget on the right; one line. A slider takes 60% of
-                  // the line, any other widget what it needs; the label the
-                  // rest, elided.
-                  Item {
-                    id: rowLine
-                    width: parent.width
-                    implicitHeight: Math.max(rowLabel.implicitHeight, widget.item ? widget.item.implicitHeight : 0)
-
-                    Text {
-                      id: rowLabel
-                      objectName: "settingLabel-" + settingRow.row.id
-                      textFormat: Text.PlainText
-                      anchors.left: parent.left
-                      anchors.right: widget.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.verticalCenter: parent.verticalCenter
-                      visible: settingRow.row.widget !== "action"
-                      elide: Text.ElideRight
-                      text: settingRow.row.label
-                      color: settingRow.greyed ? root.dim : root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                    }
-
-                    Loader {
-                      id: widget
-                      objectName: "settingWidget-" + settingRow.row.id
-                      readonly property bool isAction: settingRow.row.widget === "action"
-                      anchors.left: isAction ? parent.left : undefined
-                      anchors.right: isAction ? undefined : parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: settingRow.row.widget === "slider" ? Math.round(parent.width * 0.6)
-                        : Math.min(item ? item.implicitWidth : 0, parent.width - Style.space(72))
-                      height: item ? item.implicitHeight : 0
-                      enabled: !settingRow.greyed
-                      sourceComponent: settingRow.row.widget === "slider" ? sliderWidget
-                        : (settingRow.row.widget === "switch" ? switchWidget
-                          : (settingRow.row.widget === "segmented" ? segmentedWidget
-                            : (settingRow.row.widget === "dropdown" ? dropdownWidget
-                              : (isAction ? actionWidget : null))))
-                    }
+                PanelSlider {
+                  id: slider
+                  objectName: "settingSlider-" + settingRow.row.id
+                  bar: root.bar
+                  anchors.left: parent.left
+                  anchors.right: sliderValue.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: settingRow.greyed ? root.greyedOpacity : 1.0
+                  minimum: settingRow.row.min
+                  maximum: settingRow.row.max
+                  step: settingRow.row.step
+                  integer: true
+                  value: typeof settingRow.row.value === "number" ? settingRow.row.value : settingRow.row.min
+                  onDraggingChanged: {
+                    if (dragging) sliderBox.heldKey = settingRow.rowKey
+                    root.heldChanged(dragging ? 1 : -1)
                   }
+                  onMoved: function(v) { if (sliderBox.own()) Daemon.moveSetting(settingRow.row.id, v) }
+                  onReleased: function(v) {
+                    var mine = sliderBox.own()
+                    sliderBox.heldKey = ""
+                    if (mine) Daemon.commitSetting(settingRow.row.id, v)
+                  }
+                  // A row hidden mid-drag (a collapsed group, another tab,
+                  // another camera) loses the mouse grab, and PanelSlider
+                  // has no cancel handler: let go here, or the Flickables
+                  // would stay locked.
+                  onVisibleChanged: if (!visible && dragging) sliderBox.cancelDrag(true)
+                  Component.onDestruction: if (dragging) root.heldChanged(-1)
+                }
+                Text {
+                  id: sliderValue
+                  objectName: "settingValue-" + settingRow.row.id
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  // Clear of the row's cursor border at the right edge.
+                  anchors.rightMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(84)
+                  horizontalAlignment: Text.AlignRight
+                  elide: Text.ElideLeft
+                  text: sliderBox.heldValue !== null ? Model.settingValueText(settingRow.row, sliderBox.heldValue) : settingRow.row.valueText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
 
-                  // Why the daemon greys it out: the panel's hint style.
-                  Text {
-                    objectName: "settingReason-" + settingRow.row.id
-                    textFormat: Text.PlainText
-                    width: parent.width
-                    wrapMode: Text.Wrap
-                    visible: settingRow.greyed && text !== ""
-                    text: settingRow.row.reason
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                  // The daemon's description of the setting (revision 26), also while greyed.
-                  Text {
-                    objectName: "settingDescription-" + settingRow.row.id
-                    textFormat: Text.PlainText
-                    width: parent.width
-                    wrapMode: Text.Wrap
-                    visible: text !== ""
-                    text: settingRow.row.description
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    width: parent.width
-                    wrapMode: Text.Wrap
-                    visible: text !== ""
-                    text: settingRow.row.optionsNote
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+            // bool: the shell's row switch, at the right edge; the row
+            // owns the click and draws the cursor.
+            Component {
+              id: switchWidget
+              Item {
+                implicitWidth: settingSwitch.implicitWidth
+                implicitHeight: settingSwitch.implicitHeight
+                ToggleSwitch {
+                  id: settingSwitch
+                  objectName: "settingSwitch-" + settingRow.row.id
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: settingRow.greyed ? root.greyedOpacity : 1.0
+                  checked: settingRow.row.checked === true
+                  interactive: false
+                  cursorRing: false
+                  hasCursor: false
+                  foreground: root.foreground
+                  accent: root.accent
+                }
+              }
+            }
+
+            // enum, few short choices: the shell's ButtonGroup, at the
+            // right edge. The panel's chip cursor lights one chip; Enter
+            // or Space (or a click) chooses it.
+            Component {
+              id: segmentedWidget
+              Item {
+                implicitWidth: choices.implicitWidth
+                implicitHeight: choices.implicitHeight
+                ButtonGroup {
+                  id: choices
+                  objectName: "settingChoices-" + settingRow.row.id
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: settingRow.greyed ? root.greyedOpacity : 1.0
+                  options: settingRow.row.options
+                  value: typeof settingRow.row.value === "string" ? settingRow.row.value : ""
+                  focusable: false
+                  cursorIndex: settingRow.onCursor && !settingRow.greyed ? root.choiceCursor : -1
+                  foreground: root.foreground
+                  background: Commons.Color.background
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onHovered: function(index, isHovered) { if (isHovered) root.choiceHovered(settingRow.row.stop, index) }
+                  onChanged: function(value) { Daemon.commitSetting(settingRow.row.id, value) }
+                }
+              }
+            }
+
+            // enum, many or long choices: the shell's Dropdown. Its list
+            // takes the keyboard while open; the panel's key catcher gets
+            // it back. A list open when the item comes to show another
+            // set or setting closes, and its choice writes nothing.
+            Component {
+              id: dropdownWidget
+              Item {
+                id: dropdownBox
+                property string openKey: ""
+                // Wide enough for the longest label (the list's rows are
+                // as wide as the box, and a label cut off at "(gone)"
+                // would hide the point), never less than 220;
+                // the row's loader holds it within the line.
+                readonly property real labelsWidth: widestLabel()
+                implicitWidth: Math.max(Style.space(220), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
+                implicitHeight: choiceList.implicitHeight
+
+                TextMetrics {
+                  id: labelProbe
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
                 }
 
-                // A switch row owns its click, as the shell's Toggle row does.
-                MouseArea {
-                  anchors.fill: parent
-                  visible: settingRow.row.widget === "switch"
-                  hoverEnabled: true
-                  cursorShape: settingRow.greyed ? Qt.ArrowCursor : Qt.PointingHandCursor
-                  onEntered: root.cursorRequested("setting", settingRow.row.stop)
-                  onClicked: if (!settingRow.greyed) Daemon.commitSetting(settingRow.row.id, settingRow.row.value !== true)
-                }
-
-                // int: the slider and its value (what the hand holds while it
-                // is held: the shell's PanelSlider shows its own position
-                // then). The value text is never faded.
-                Component {
-                  id: sliderWidget
-                  Item {
-                    id: sliderBox
-                    // What the press latched: the set and setting the hand
-                    // took; "" between drags (a wheel step has none), or
-                    // `cancelled` once the item shows another one.
-                    property string heldKey: ""
-                    readonly property string cancelled: "\u0000"
-                    readonly property var heldValue: slider.dragging ? Model.clampSetting(settingRow.row, slider.liveValue) : null
-                    implicitHeight: slider.implicitHeight
-
-                    // `released`: no release will follow (the grab is gone).
-                    function cancelDrag(released) {
-                      heldKey = released === true ? "" : cancelled
-                      if (!slider.dragging) return
-                      slider.dragging = false
-                      slider.liveValue = slider.value
-                    }
-                    // A move or a release of the drag the hand began on
-                    // this very setting, or of a wheel step.
-                    function own() {
-                      return heldKey === "" || heldKey === settingRow.rowKey
-                    }
-
-                    // The item now shows another set or setting: the drag
-                    // ends here and its release writes nothing.
-                    Connections {
-                      target: settingRow
-                      function onRowKeyChanged() { if (sliderBox.heldKey !== "" && sliderBox.heldKey !== settingRow.rowKey) sliderBox.cancelDrag() }
-                    }
-
-                    PanelSlider {
-                      id: slider
-                      objectName: "settingSlider-" + settingRow.row.id
-                      bar: root.bar
-                      anchors.left: parent.left
-                      anchors.right: sliderValue.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.verticalCenter: parent.verticalCenter
-                      opacity: settingRow.greyed ? root.greyedOpacity : 1.0
-                      minimum: settingRow.row.min
-                      maximum: settingRow.row.max
-                      step: settingRow.row.step
-                      integer: true
-                      value: typeof settingRow.row.value === "number" ? settingRow.row.value : settingRow.row.min
-                      onDraggingChanged: {
-                        if (dragging) sliderBox.heldKey = settingRow.rowKey
-                        root.heldChanged(dragging ? 1 : -1)
-                      }
-                      onMoved: function(v) { if (sliderBox.own()) Daemon.moveSetting(settingRow.row.id, v) }
-                      onReleased: function(v) {
-                        var mine = sliderBox.own()
-                        sliderBox.heldKey = ""
-                        if (mine) Daemon.commitSetting(settingRow.row.id, v)
-                      }
-                      // A row hidden mid-drag (a collapsed group, another tab,
-                      // another camera) loses the mouse grab, and PanelSlider
-                      // has no cancel handler: let go here, or the Flickables
-                      // would stay locked.
-                      onVisibleChanged: if (!visible && dragging) sliderBox.cancelDrag(true)
-                      Component.onDestruction: if (dragging) root.heldChanged(-1)
-                    }
-                    Text {
-                      id: sliderValue
-                      objectName: "settingValue-" + settingRow.row.id
-                      textFormat: Text.PlainText
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: Style.space(84)
-                      horizontalAlignment: Text.AlignRight
-                      elide: Text.ElideLeft
-                      text: sliderBox.heldValue !== null ? Model.settingValueText(settingRow.row, sliderBox.heldValue) : settingRow.row.valueText
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
+                function widestLabel() {
+                  var options = settingRow.row.options
+                  var widest = 0
+                  for (var i = 0; i < options.length; i++) {
+                    labelProbe.text = options[i].label
+                    widest = Math.max(widest, labelProbe.advanceWidth)
                   }
+                  return widest
                 }
 
-                // bool: the shell's row switch, at the right edge; the row
-                // owns the click and draws the cursor.
-                Component {
-                  id: switchWidget
-                  Item {
-                    implicitWidth: settingSwitch.implicitWidth
-                    implicitHeight: settingSwitch.implicitHeight
-                    ToggleSwitch {
-                      id: settingSwitch
-                      objectName: "settingSwitch-" + settingRow.row.id
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      opacity: settingRow.greyed ? root.greyedOpacity : 1.0
-                      checked: settingRow.row.value === true
-                      interactive: false
-                      cursorRing: false
-                      hasCursor: false
-                      foreground: root.foreground
-                      accent: root.accent
-                    }
+                function openList() {
+                  choiceList.open()
+                }
+
+                Connections {
+                  target: settingRow
+                  function onRowKeyChanged() { if (choiceList.popupOpen) choiceList.close() }
+                }
+
+                Dropdown {
+                  id: choiceList
+                  objectName: "settingDropdown-" + settingRow.row.id
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: settingRow.greyed ? root.greyedOpacity : 1.0
+                  showLabel: false
+                  options: settingRow.row.options
+                  value: typeof settingRow.row.value === "string" ? settingRow.row.value : ""
+                  hasCursor: settingRow.onCursor && !settingRow.greyed
+                  foreground: root.foreground
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onHovered: function(isHovered) { if (isHovered) root.cursorRequested("setting", settingRow.row.stop) }
+                  onChanged: function(value) {
+                    // The Dropdown sets its own value on a choice: bound
+                    // to the row's again, so the daemon's word shows.
+                    choiceList.value = Qt.binding(function() { return typeof settingRow.row.value === "string" ? settingRow.row.value : "" })
+                    if (dropdownBox.openKey === "" || dropdownBox.openKey === settingRow.rowKey)
+                      Daemon.commitSetting(settingRow.row.id, value)
                   }
-                }
-
-                // enum, few short choices: the shell's ButtonGroup, at the
-                // right edge. The panel's chip cursor lights one chip; Enter
-                // or Space (or a click) chooses it.
-                Component {
-                  id: segmentedWidget
-                  Item {
-                    implicitWidth: choices.implicitWidth
-                    implicitHeight: choices.implicitHeight
-                    ButtonGroup {
-                      id: choices
-                      objectName: "settingChoices-" + settingRow.row.id
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      opacity: settingRow.greyed ? root.greyedOpacity : 1.0
-                      options: settingRow.row.options
-                      value: typeof settingRow.row.value === "string" ? settingRow.row.value : ""
-                      focusable: false
-                      cursorIndex: settingRow.onCursor && !settingRow.greyed ? root.choiceCursor : -1
-                      foreground: root.foreground
-                      background: Commons.Color.background
-                      accent: root.accent
-                      fontFamily: root.fontFamily
-                      onHovered: function(index, isHovered) { if (isHovered) root.choiceHovered(settingRow.row.stop, index) }
-                      onChanged: function(value) { Daemon.commitSetting(settingRow.row.id, value) }
-                    }
-                  }
-                }
-
-                // enum, many or long choices: the shell's Dropdown. Its list
-                // takes the keyboard while open; the panel's key catcher gets
-                // it back. A list open when the item comes to show another
-                // set or setting closes, and its choice writes nothing.
-                Component {
-                  id: dropdownWidget
-                  Item {
-                    id: dropdownBox
-                    property string openKey: ""
-                    // Wide enough for the longest label (the list's rows are
-                    // as wide as the box, and a label cut off at "(gone)"
-                    // would hide the point), never less than 220;
-                    // the row's loader holds it within the line.
-                    readonly property real labelsWidth: widestLabel()
-                    implicitWidth: Math.max(Style.space(220), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
-                    implicitHeight: choiceList.implicitHeight
-
-                    TextMetrics {
-                      id: labelProbe
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                    }
-
-                    function widestLabel() {
-                      var options = settingRow.row.options
-                      var widest = 0
-                      for (var i = 0; i < options.length; i++) {
-                        labelProbe.text = options[i].label
-                        widest = Math.max(widest, labelProbe.advanceWidth)
-                      }
-                      return widest
-                    }
-
-                    function openList() {
-                      choiceList.open()
-                    }
-
-                    Connections {
-                      target: settingRow
-                      function onRowKeyChanged() { if (choiceList.popupOpen) choiceList.close() }
-                    }
-
-                    Dropdown {
-                      id: choiceList
-                      objectName: "settingDropdown-" + settingRow.row.id
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      opacity: settingRow.greyed ? root.greyedOpacity : 1.0
-                      showLabel: false
-                      options: settingRow.row.options
-                      value: typeof settingRow.row.value === "string" ? settingRow.row.value : ""
-                      hasCursor: settingRow.onCursor && !settingRow.greyed
-                      foreground: root.foreground
-                      accent: root.accent
-                      fontFamily: root.fontFamily
-                      onHovered: function(isHovered) { if (isHovered) root.cursorRequested("setting", settingRow.row.stop) }
-                      onChanged: function(value) {
-                        // The Dropdown sets its own value on a choice: bound
-                        // to the row's again, so the daemon's word shows.
-                        choiceList.value = Qt.binding(function() { return typeof settingRow.row.value === "string" ? settingRow.row.value : "" })
-                        if (dropdownBox.openKey === "" || dropdownBox.openKey === settingRow.rowKey)
-                          Daemon.commitSetting(settingRow.row.id, value)
-                      }
-                      onPopupOpenChanged: {
-                        dropdownBox.openKey = popupOpen ? settingRow.rowKey : ""
-                        if (!popupOpen && root.keyCatcher) root.keyCatcher.forceActiveFocus()
-                      }
-                    }
-                  }
-                }
-
-                // action: a button that runs it once; it draws the cursor.
-                Component {
-                  id: actionWidget
-                  Item {
-                    implicitWidth: actionButton.implicitWidth
-                    implicitHeight: actionButton.implicitHeight
-                    Button {
-                      id: actionButton
-                      objectName: "settingAction-" + settingRow.row.id
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      opacity: settingRow.greyed ? root.greyedOpacity : 1.0
-                      text: settingRow.row.label
-                      bordered: true
-                      hasCursor: settingRow.onCursor && !settingRow.greyed
-                      foreground: root.foreground
-                      accent: root.accent
-                      fontFamily: root.fontFamily
-                      onHovered: function(on) { if (on) root.cursorRequested("setting", settingRow.row.stop) }
-                      onClicked: Daemon.runSettingAction(settingRow.row.id)
-                    }
+                  onPopupOpenChanged: {
+                    dropdownBox.openKey = popupOpen ? settingRow.rowKey : ""
+                    if (!popupOpen && root.keyCatcher) root.keyCatcher.forceActiveFocus()
                   }
                 }
               }
             }
 
-            // A live, read-only figure of the group (the view's `live`, ""
-            // for none): the panel's dim small text, hidden while empty. One
-            // line, elided (never wrapped), so it never changes height while
-            // shown. It has no Accessible name: it changes up to 4 times a
-            // second and a screen reader would announce each change.
-            Text {
-              objectName: root.namePrefix + "settingsGroupLive-" + groupBlock.group.id
-              textFormat: Text.PlainText
-              x: root.inset
-              width: parent.width - 2 * root.inset
-              elide: Text.ElideRight
-              visible: text !== ""
-              text: groupBlock.group.live || ""
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            // Rows past the caps or skipped: said, never silently dropped.
-            Text {
-              objectName: root.namePrefix + "settingsGroupTruncated-" + groupBlock.group.id
-              textFormat: Text.PlainText
-              x: root.inset
-              width: parent.width - 2 * root.inset
-              wrapMode: Text.Wrap
-              visible: text !== ""
-              text: groupBlock.group.truncation
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+            // action: a button that runs it once; it draws the cursor.
+            Component {
+              id: actionWidget
+              Item {
+                implicitWidth: actionButton.implicitWidth
+                implicitHeight: actionButton.implicitHeight
+                Button {
+                  id: actionButton
+                  objectName: "settingAction-" + settingRow.row.id
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  opacity: settingRow.greyed ? root.greyedOpacity : 1.0
+                  text: settingRow.row.label
+                  bordered: true
+                  hasCursor: settingRow.onCursor && !settingRow.greyed
+                  foreground: root.foreground
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onHovered: function(on) { if (on) root.cursorRequested("setting", settingRow.row.stop) }
+                  onClicked: Daemon.runSettingAction(settingRow.row.id)
+                }
+              }
             }
           }
         }
-      }
-    }
 
-    // More below the edge: the bottom fades into the card.
-    Rectangle {
-      objectName: root.namePrefix + "settingsMoreBelow"
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.bottom: parent.bottom
-      height: Style.space(28)
-      visible: settingsFlick.moreBelow
-      gradient: Gradient {
-        GradientStop { position: 0.0; color: "transparent" }
-        GradientStop { position: 1.0; color: Commons.Color.popups.background }
+        // A live, read-only figure of the group (the view's `live`, ""
+        // for none): the panel's dim small text, hidden while empty. One
+        // line, elided (never wrapped), so it never changes height while
+        // shown. It has no Accessible name: it changes up to 4 times a
+        // second and a screen reader would announce each change.
+        Text {
+          objectName: root.namePrefix + "settingsGroupLive-" + groupBlock.group.id
+          textFormat: Text.PlainText
+          x: root.inset
+          width: parent.width - 2 * root.inset
+          elide: Text.ElideRight
+          visible: text !== ""
+          text: groupBlock.group.live || ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        // Rows past the caps or skipped: said, never silently dropped.
+        Text {
+          objectName: root.namePrefix + "settingsGroupTruncated-" + groupBlock.group.id
+          textFormat: Text.PlainText
+          x: root.inset
+          width: parent.width - 2 * root.inset
+          wrapMode: Text.Wrap
+          visible: text !== ""
+          text: groupBlock.group.truncation
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
       }
     }
   }
@@ -755,5 +767,171 @@ Column {
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
+  }
+
+  // ---- "Not available now (n)": one counted line, opened to what cannot
+  // run here and why; a Setup button where something is not installed
+  Column {
+    id: notAvailableBlock
+    objectName: root.namePrefix + "notAvailable"
+    width: parent.width
+    spacing: Style.space(4)
+    visible: root.notAvailable.visible === true
+
+    CursorSurface {
+      id: notAvailableLine
+      objectName: root.namePrefix + "notAvailableLine"
+      width: parent.width
+      implicitHeight: notAvailableText.implicitHeight + Style.space(6)
+      hasCursor: root.hasCursor("unavailable", -1)
+      foreground: root.foreground
+      fill: root.hoverFill
+      Accessible.role: Accessible.Button
+      Accessible.name: root.notAvailable.text
+      Accessible.description: root.notAvailable.open ? "Expanded" : "Collapsed"
+
+      Text {
+        id: notAvailableGlyph
+        textFormat: Text.PlainText
+        x: root.inset
+        width: Style.space(16)
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.notAvailable.glyph
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+      Text {
+        id: notAvailableText
+        objectName: root.namePrefix + "notAvailableText"
+        textFormat: Text.PlainText
+        anchors.left: notAvailableGlyph.right
+        anchors.leftMargin: Style.space(4)
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        elide: Text.ElideRight
+        text: root.notAvailable.text
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+      MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onEntered: root.cursorRequested("unavailable", -1)
+        onClicked: root.notAvailableToggled()
+      }
+    }
+
+    Repeater {
+      id: unavailableRepeater
+      objectName: root.namePrefix + "notAvailableEntries"
+      model: root.notAvailable.open ? root.notAvailable.entries.length : 0
+      delegate: Item {
+        id: entry
+        required property int index
+        readonly property var item: root.notAvailable.entries[index] || ({ label: "", reason: "", setup: false })
+        readonly property Item button: setupButton
+        objectName: root.namePrefix + "notAvailableEntry-" + index
+        width: parent ? parent.width : 0
+        implicitHeight: Math.max(entryText.implicitHeight, setupButton.visible ? setupButton.implicitHeight : 0) + Style.space(4)
+
+        Column {
+          id: entryText
+          x: root.inset + Style.space(20)
+          anchors.right: setupButton.visible ? setupButton.left : parent.right
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+
+          Text {
+            objectName: root.namePrefix + "notAvailableLabel-" + entry.index
+            textFormat: Text.PlainText
+            width: parent.width
+            elide: Text.ElideRight
+            text: entry.item.label
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+          Text {
+            objectName: root.namePrefix + "notAvailableReason-" + entry.index
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            visible: text !== ""
+            text: entry.item.reason
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        Button {
+          id: setupButton
+          objectName: root.namePrefix + "notAvailableSetup-" + entry.index
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          visible: entry.item.setup === true
+          text: Model.NOT_AVAILABLE_SETUP_LABEL
+          tooltipText: Model.NOT_AVAILABLE_SETUP_TOOLTIP
+          bordered: true
+          hasCursor: root.hasCursor("unavailable-setup", entry.index)
+          foreground: root.foreground
+          background: Commons.Color.background
+          accent: root.accent
+          fontFamily: root.fontFamily
+          Accessible.role: Accessible.Button
+          Accessible.name: Model.NOT_AVAILABLE_SETUP_LABEL
+          Accessible.description: Model.NOT_AVAILABLE_SETUP_TOOLTIP
+          onHovered: function(on) { if (on) root.cursorRequested("unavailable-setup", entry.index) }
+          onClicked: root.setupRequested(entry.index)
+        }
+      }
+    }
+
+    // The list cut at its cap: said, never silently dropped (the count on
+    // the line is the real one).
+    Text {
+      objectName: root.namePrefix + "notAvailableTruncated"
+      textFormat: Text.PlainText
+      x: root.inset + Style.space(20)
+      width: parent.width - x
+      wrapMode: Text.Wrap
+      visible: root.notAvailable.open === true && text !== ""
+      text: root.notAvailable.note || ""
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
+  // ---- Reset to defaults: camera-wide, a quiet link at the bottom, right-aligned
+  Item {
+    width: parent.width
+    height: root.view.reset === true ? resetButton.implicitHeight : 0
+    visible: root.view.reset === true
+
+    Button {
+      id: resetButton
+      objectName: root.namePrefix + "settingsReset"
+      anchors.right: parent.right
+      text: Model.SETTINGS_RESET_LABEL
+      tooltipText: Model.SETTINGS_RESET_TOOLTIP
+      bordered: false
+      fontSize: Style.font.bodySmall
+      // A quiet link: its words end on the section's right edge, with the
+      // switches and the Setup buttons.
+      horizontalPadding: Style.space(2)
+      hasCursor: root.hasCursor("reset", -1)
+      foreground: root.dim
+      accent: root.accent
+      fontFamily: root.fontFamily
+      Accessible.role: Accessible.Button
+      Accessible.name: Model.SETTINGS_RESET_LABEL
+      Accessible.description: Model.SETTINGS_RESET_TOOLTIP
+      onHovered: function(on) { if (on) root.cursorRequested("reset", -1) }
+      onClicked: root.resetRequested()
+    }
   }
 }

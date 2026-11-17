@@ -9,7 +9,8 @@ import "Model.js" as Model
 // The bar icon and its popup. One of these per monitor; all of them read the
 // same Daemon singleton, which owns the only watch process, and the same
 // Preview singleton, which owns the only preview process: an open panel holds
-// the preview (Preview.hold), a closed one releases it.
+// the preview (Preview.hold) while it has a place to draw it (not on the
+// narrow layout's Mic tab, Model.previewHeld), a closed one releases it.
 //
 // Left click opens and closes the panel. Middle click turns the camera on or
 // off, but only while the daemon's state is known: unavailable, it opens the
@@ -43,11 +44,29 @@ BarWidget {
   // the daemon (`auto`, or nothing stored, reads as auto only from a daemon
   // that knows it; anything else unknown reads as on_battery).
   readonly property string storedBatteryMode: Model.batterySaverModeValue(Model.settingValue(settings, "batterySaverMode"), record)
+  // The widget's "Narrow panel (one column)" setting, and the layout it and
+  // the preview make (Model.panelLayout): two columns while the user shows
+  // the preview where it can run, else (or when narrow) the settings column
+  // alone. Never from the preview's placeholder: a failing preview keeps the
+  // layout (and so this widget's hold, previewHeld) as it was.
+  readonly property bool storedNarrow: Model.narrowPanelValue(Model.settingValue(settings, "narrowPanel"))
+  readonly property var layout: Model.panelLayout(storedNarrow, Preview.switchOn,
+    Model.previewControlsShown(Daemon.record, Preview.pathReason))
   readonly property color urgentColor: bar ? bar.urgent : Commons.Color.urgent
   // The microphone indicator (Model.micIndicator): shown while apps record.
   readonly property var micIndicator: Model.micIndicator(record)
 
   property bool opened: false
+  // Set once the widget is complete: a change of `settings` before it is the
+  // base widget's default, not the bar's hand-over.
+  property bool completed: false
+  // The tab the panel shows (its own once it has shown one; before that the
+  // one it will show), and whether this widget holds the preview: open, with a
+  // place to draw it (Model.previewHeld).
+  property string shownTab: ""
+  readonly property string panelTab: root.shownTab !== "" ? root.shownTab
+    : (root.requestedTab !== "" ? root.requestedTab : root.storedTab)
+  readonly property bool previewHeld: Model.previewHeld(root.opened, root.layout, root.panelTab)
   // The tab a click on the microphone glyph asks for, for this opening only
   // (never written to the layout; the panel shows the stored tab again once
   // it is back to "", which it is at every close).
@@ -158,17 +177,21 @@ BarWidget {
   }
 
   onCliSettingChanged: Daemon.configure(root, root.cliSetting)
-  // Every hand-over of the bar, including the first (there is no earlier
-  // call: before it, `settings` is the base's empty default).
-  onSettingsChanged: Preview.configure(root, root.settings)
-  onOpenedChanged: {
-    if (root.opened) Preview.hold(root)
+  // Every hand-over of the bar, including the first, and nothing else: the
+  // change the widget's creation emits for the base's empty default comes
+  // before the widget is complete, and is no hand-over (Model.barHandOver).
+  onSettingsChanged: if (Model.barHandOver(root.completed)) Preview.configure(root, root.settings)
+  onPreviewHeldChanged: {
+    if (root.previewHeld) Preview.hold(root)
     else Preview.release(root)
+  }
+  onOpenedChanged: {
     if (!root.opened) root.requestedTab = ""
     Daemon.notePanels()
   }
 
   Component.onCompleted: {
+    root.completed = true
     Daemon.attach(root)
     Daemon.configure(root, root.cliSetting)
   }
@@ -229,17 +252,16 @@ BarWidget {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent ? panel.loadedContent.keyCatcher : null
-    // 520: wider than the shell's widest panel (weather, 480) because the
-    // preview spans the card. With the card's padding (popup-padding 14 a
-    // side) and border taken off, the 16:9 frame is about 484x272, so the
-    // preview's 480x270 frames show at their own size instead of being scaled
-    // down to a blur, and the tab row and the slider rows get room to breathe.
-    contentWidth: panel.fittedContentWidth(Style.space(520))
-    // Not capped below the screen: the preview, the tab row and the tallest
-    // tab fit on a 1080-pixel screen. The card's own limit is the screen's
-    // available height (KeyboardPanel.availableCardHeight); only past it does
-    // the content scroll.
-    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight)
+    // Model.panelLayout's width: 920 for the two columns (the live preview
+    // beside the settings), 520 for the settings column alone (the narrow
+    // setting, or the preview hidden): wider than the shell's widest panel
+    // (weather, 480), so the tab row and the slider rows get room to breathe.
+    contentWidth: panel.fittedContentWidth(Style.space(root.layout.width))
+    // As tall as the content, capped at Model.PANEL_HEIGHT_CAP (the tallest
+    // cap the shell's own panels use) and by the screen's available height
+    // (KeyboardPanel.availableCardHeight); past it only the panel's body
+    // (the tab's content) scrolls.
+    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(Model.PANEL_HEIGHT_CAP))
 
     // Built on first open, not on every monitor at startup.
     content: Component {
@@ -249,9 +271,8 @@ BarWidget {
         storedTab: root.storedTab
         storedBatteryMode: root.storedBatteryMode
         requestedTab: root.requestedTab
-        // The card's room for the content on this screen: past it the
-        // camera settings scroll inside the Camera tab, not the panel.
-        contentRoom: panel.availableCardHeight > 0 ? Math.max(0, panel.availableCardHeight - panel.padding * 2) : 0
+        layout: root.layout
+        onTabChanged: root.shownTab = tab
         onCloseRequested: root.close()
         onSettingsRequested: function(values) { root.persistSettings(values) }
         onSetupRequested: function(focus) { root.openSetup(focus) }

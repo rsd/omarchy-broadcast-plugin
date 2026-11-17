@@ -746,6 +746,42 @@ function unavailableMessage(record) {
   }
 }
 
+// The Camera tab's camera dropdown: { visible, options, value, notes }.
+// options: { value (the camera's id), label } of every camera listed, a
+// camera that cannot be chosen marked so (its note, in `notes`, says why);
+// `value` the active camera's id ("" for none). The USB ids are in the
+// Details view.
+var CAMERA_PICKER_LABEL = "Camera"
+var CAMERA_UNSELECTABLE_MARK = " (cannot be chosen)"
+function cameraPickerView(record) {
+  var out = { visible: false, options: [], value: "", notes: [] }
+  if (!available(record)) return out
+  var cams = Array.isArray(record.cameras) ? record.cameras : []
+  for (var i = 0; i < cams.length && i < CAMERA_CAP; i++) {
+    var c = cams[i]
+    var active = isActiveCamera(record, c)
+    var blocked = c.selectId === "" && !active
+    out.options.push({ value: c.id, label: blocked ? c.label + CAMERA_UNSELECTABLE_MARK : c.label })
+    if (active) out.value = c.id
+    if (c.selectNote !== "") out.notes.push(c.label + ": " + c.selectNote)
+  }
+  out.visible = out.options.length > 0
+  return out
+}
+
+// The camera a choice of the dropdown selects: the selectable id of the
+// listed camera `value` names, or null (none such, the active one, or one
+// that cannot be chosen).
+function cameraChoice(record, value) {
+  var cams = record && Array.isArray(record.cameras) ? record.cameras : []
+  for (var i = 0; i < cams.length && i < CAMERA_CAP; i++) {
+    var c = cams[i]
+    if (c.id !== value || typeof value !== "string" || value === "") continue
+    return c.selectId !== "" && !isActiveCamera(record, c) ? c.selectId : null
+  }
+  return null
+}
+
 // The row under the camera list when not every camera is shown.
 function truncationText(record) {
   if (!record || !record.camerasTruncated) return ""
@@ -860,17 +896,22 @@ function moduleEffects(record) {
 // plugin predates its settings), and while no enabled module offers the
 // background effect. While the set is still loading neither is shown. A row
 // the daemon greys out (the camera is off, a module is loading) is drawn
-// faded with the daemon's reason under it.
+// faded with the daemon's reason under it. `value` is the choice shown (the
+// draft while one is unconfirmed): the rows under the choice follow it.
 function effectModeView(record, drafts) {
-  var out = { visible: false, hint: "", id: "", enabled: false, reason: "", options: [] }
+  var out = { visible: false, hint: "", id: "", enabled: false, reason: "", options: [], value: "" }
   if (!available(record)) return out
   if (!moduleEffects(record)) { out.hint = DAEMON_NO_EFFECTS; return out }
   if (!settingsSupported(record)) { out.hint = settingsMissingText(record); return out }
   if (!isPlainObject(record.settings)) return out
   var row = effectModeRow(record)
   if (!row) { out.hint = NO_BACKGROUND_TEXT; return out }
+  // A choice that cannot run here (no GPU for it, its models missing) is in
+  // the tab's "Not available now" list instead (effectSettingsView).
+  if (UNAVAILABLE_KINDS.indexOf(row.kind) >= 0) return out
   var value = shownSettingValue(row, drafts)
   out.visible = true
+  out.value = value
   out.id = row.id
   out.enabled = row.enabled
   out.reason = row.enabled ? "" : row.reason
@@ -1102,7 +1143,7 @@ var PREVIEW_CODE_CAP = 64
 // replaces the whole entry, so dropping keys to stay bounded would lose them).
 var SETTINGS_KEY_CAP = 256
 var PREVIEW_OLD_DAEMON = "Preview needs omarchy-broadcast 0.18 or newer"
-var PREVIEW_IDLE_TEXT = "Camera idle; turn on Preview to start it"
+var PREVIEW_IDLE_TEXT = "Preview off"
 var PREVIEW_OFF_TEXT = "Preview off"
 var PREVIEW_CAMERA_OFF_TEXT = "Camera off"
 var PREVIEW_STARTING_TEXT = "Starting preview…"
@@ -1148,16 +1189,15 @@ function otherConsumers(record) {
   return record.loopbackConsumers + record.pipewireConsumers
 }
 
-// Whether the one preview process runs. A panel is open (`held` registered
+// Whether the one preview process runs: a panel is open (`held` registered
 // holders), the preview can work (`supported`: daemon revision, frame path,
-// CLI), and either the user's Preview switch is on, or the stream is already
-// active for SOMEONE ELSE: loopback or PipeWire consumers, never preview
-// leases. The lease is itself a consumer, so counting it would let a preview
-// keep the camera on that only it holds, with the switch off (R1).
+// CLI), and the preview is shown (`switchOn`: the remembered shown/hidden
+// state the panel's Show preview and Hide write). Hidden, it never runs,
+// whoever else uses the camera: the panel then draws a one-line strip, with
+// no frame to read. `record` is not read (kept for the call's shape).
 function shouldPreview(held, supported, switchOn, record) {
   if (!(typeof held === "number" && held > 0) || supported !== true) return false
-  if (switchOn === true) return true
-  return available(record) && record.state === "active" && otherConsumers(record) > 0
+  return switchOn === true
 }
 
 // Only 15 or 30 is ever passed, as its own argv element.
@@ -1265,6 +1305,18 @@ function settingsEntry(moduleName, settings, values) {
 }
 
 // An entry as the bar hands settings to a widget: without its id.
+// Whether a change of a widget's `settings` is the bar's hand-over: one
+// that comes once the widget is complete (`completed`). The bar hands the
+// settings to a widget it has made (after its loader has loaded it), while
+// the one change that comes before, as the widget is created, is the base
+// widget's empty default (the layout entry's own id never reaches the
+// widget either: the bar strips it). Taking that empty default as a
+// hand-over would undo a preview choice the shell could not store, and
+// clear a preview failure, each time a widget is made (a monitor plugged in).
+function barHandOver(completed) {
+  return completed === true
+}
+
 function settingsFromEntry(entry) {
   var out = {}
   if (!isPlainObject(entry)) return out
@@ -1403,9 +1455,13 @@ function fpsOptions(fps) {
 // range and labels, whether each can be changed now (`enabled`) and why not
 // (`disabled_reason`). The plugin draws whatever arrives through one generic
 // renderer (SettingsView.qml) that knows four types; it never names a
-// setting, and never evaluates `enabled_when` (a condition on a setting it
-// skipped, or an operator it does not know, changes nothing: `enabled` is
-// the daemon's word). The daemon keeps each camera's values and applies them
+// setting, and never decides `enabled` from `enabled_when`: `enabled` is the
+// daemon's word, always. `enabled_when` and the daemon's `disabled_kind` are
+// read for layout only (settingPlacement, rowMaster): where a row is drawn
+// (under its master, in the "Not available now" list, or not at all while
+// its master is off), never whether it takes input. A condition on a setting
+// the set does not hold, or an operator this plugin does not know, places
+// nothing. The daemon keeps each camera's values and applies them
 // at every open; a change applies live while the daemon has the camera open
 // (state `starting` or `active`) and is stored for the next open otherwise.
 
@@ -1494,7 +1550,35 @@ var SETUP_QUEUE_CAP = 1
 // A microphone on/off ask replaces the one queued before it.
 var MIC_QUEUE_CAP = 1
 var INTENT_QUEUE_CAP = SETTING_QUEUE_CAP + QUICK_QUEUE_CAP + ACTION_QUEUE_CAP + SETUP_QUEUE_CAP + MIC_QUEUE_CAP + 2
-var SETTINGS_TITLE = "SETTINGS"
+var SETTINGS_TITLE = ""
+// Why a setting is disabled (D-Bus interface revision 28, the setting's
+// `disabled_kind`), and where the panel draws it then (settingPlacement):
+//   parent_off      hidden; revealed under its master when its rule holds
+//   not_applicable, not_installed, needs_hardware, other_provider,
+//   unavailable     in the tab's "Not available now (n)" list, with the reason
+//   busy, device    in place, greyed; the reason on hover or focus
+// Any other value, none (an older daemon) or "" while disabled: greyed in
+// place, as before the key, except that a row whose `enabled_when` does not
+// hold reads as parent_off (layout only).
+var DISABLED_KINDS = ["parent_off", "not_applicable", "not_installed", "needs_hardware", "other_provider", "unavailable", "busy", "device"]
+var UNAVAILABLE_KINDS = ["not_applicable", "not_installed", "needs_hardware", "other_provider", "unavailable"]
+// The kinds whose "Not available now" entry offers Setup... (the setup
+// dialog: modules, backends and diagnostics), where something can be
+// installed, enabled or chosen: all but not_applicable (nothing to set up).
+var SETUP_KINDS = ["unavailable", "needs_hardware", "not_installed", "other_provider"]
+// The producer's bounds on a rule (docs/cli-json.md): at most 4 conditions,
+// an `in` of at most 8 operands; a string operand is at most an option value
+// long.
+var WHEN_CAP = 4
+var WHEN_IN_CAP = 8
+var WHEN_OPS = ["eq", "ne", "in"]
+var WHEN_VALUE_CAP = 128
+// The "Not available now" line and the "More" disclosure (constants only:
+// the kit's Button draws the Setup label).
+var NOT_AVAILABLE_TEXT = "Not available now"
+var NOT_AVAILABLE_SETUP_LABEL = "Setup…"
+var NOT_AVAILABLE_SETUP_TOOLTIP = "Open the setup: modules, backends and diagnostics"
+var MORE_TEXT = "More"
 var SETTINGS_RESET_LABEL = "Reset to defaults"
 var SETTINGS_RESET_TOOLTIP = "Set every setting of this camera back to its default and forget the stored values"
 var SETTINGS_IDLE_TEXT = "Not in use: changes apply when an app next uses the camera."
@@ -1624,6 +1708,108 @@ function groupSurface(g, scope) {
   return scope === "global" && isPlainObject(g) && g.surface === MIC_SURFACE ? MIC_SURFACE : ""
 }
 
+// The daemon's `disabled_kind` (revision 28): one of DISABLED_KINDS, else ""
+// (absent, an older daemon, or a word this plugin does not know: greyed in
+// place, as before the key).
+function disabledKind(value) {
+  return typeof value === "string" && DISABLED_KINDS.indexOf(value) >= 0 ? value : ""
+}
+
+// One operand of a rule: a boolean, a number or a short string (else
+// undefined: the condition is not read).
+function whenOperand(v) {
+  if (typeof v === "boolean") return v
+  if (typeof v === "number" && isFinite(v)) return v
+  if (typeof v === "string" && v.length <= WHEN_VALUE_CAP) return v
+  return undefined
+}
+
+// A setting's `enabled_when` -> [{ id, op, value }] of the conditions this
+// plugin reads (an id of the grammar, a known op, an operand of the right
+// shape; `in` takes a list of at most WHEN_IN_CAP), at most WHEN_CAP of them.
+// `known` is false when any condition was not read: the rule cannot then be
+// told to fail, only to hold. Layout only (settingPlacement, rowMaster).
+function settingWhen(value) {
+  var src = Array.isArray(value) ? value : []
+  var out = { conditions: [], known: true }
+  for (var i = 0; i < src.length && i < WHEN_CAP; i++) {
+    var c = src[i]
+    var id = isPlainObject(c) ? settingId(c.id) : ""
+    var op = isPlainObject(c) && WHEN_OPS.indexOf(c.op) >= 0 ? c.op : ""
+    var operand
+    if (op === "in") {
+      if (Array.isArray(c.value) && c.value.length <= WHEN_IN_CAP) {
+        operand = []
+        for (var j = 0; j < c.value.length; j++) {
+          var v = whenOperand(c.value[j])
+          if (v === undefined) { operand = undefined; break }
+          operand.push(v)
+        }
+      }
+    } else if (op !== "") {
+      operand = whenOperand(c.value)
+    }
+    if (id === "" || operand === undefined) { out.known = false; continue }
+    out.conditions.push({ id: id, op: op, value: operand })
+  }
+  if (src.length > WHEN_CAP) out.known = false
+  return out
+}
+
+// Whether a rule holds for the values of the set (`values`: id -> value):
+// true, false, or null when it cannot be told (a condition this plugin did
+// not read, or one on a setting the set does not hold). Layout only.
+function whenHolds(when, values) {
+  if (!isPlainObject(when) || !Array.isArray(when.conditions)) return null
+  var unknown = when.known !== true
+  for (var i = 0; i < when.conditions.length && i < WHEN_CAP; i++) {
+    var c = when.conditions[i]
+    if (!values || !Object.prototype.hasOwnProperty.call(values, c.id)) { unknown = true; continue }
+    var v = values[c.id]
+    var ok = c.op === "in" ? c.value.indexOf(v) >= 0 : (c.op === "eq" ? v === c.value : v !== c.value)
+    if (!ok) return false
+  }
+  return unknown ? null : true
+}
+
+// Whether a "Not available now" entry of `kind` offers Setup....
+function notAvailableSetup(kind) {
+  return SETUP_KINDS.indexOf(kind) >= 0
+}
+
+// Where the panel draws a row (layout only; `enabled` stays the daemon's):
+//   "shown"        enabled
+//   "hidden"       disabled with kind parent_off, or (no kind) a rule that
+//                  does not hold: revealed when its master allows it
+//   "unavailable"  a kind of UNAVAILABLE_KINDS: in the "Not available now" list
+//   "greyed"       busy, device, or no kind and no failing rule: in place
+function settingPlacement(row, values) {
+  if (!row || row.enabled) return "shown"
+  if (row.kind === "parent_off") return "hidden"
+  if (UNAVAILABLE_KINDS.indexOf(row.kind) >= 0) return "unavailable"
+  if (row.kind === "busy" || row.kind === "device") return "greyed"
+  return whenHolds(row.when, values) === false ? "hidden" : "greyed"
+}
+
+// The setting a row's rule names first (its master), or "".
+function rowMaster(row) {
+  var w = row && isPlainObject(row.when) && Array.isArray(row.when.conditions) ? row.when.conditions : []
+  return w.length > 0 ? w[0].id : ""
+}
+
+// id -> value of every row of the set (what a rule is evaluated against):
+// the daemon's values, not a draft (a dependent shows once the daemon has
+// taken the master's change, as its `enabled` does).
+function settingValues(set) {
+  var out = Object.create(null)
+  var groups = isPlainObject(set) && Array.isArray(set.groups) ? set.groups : []
+  for (var g = 0; g < groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
+    var rows = groups[g].rows
+    for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) out[rows[r].id] = rows[r].value
+  }
+  return out
+}
+
 // One setting of a settings_group line -> a row, or null (skipped): an id of
 // the grammar, a known type, and for each type its fields:
 //   int     min, max, step, default, value: device integers; max > min,
@@ -1635,8 +1821,10 @@ function groupSurface(g, scope) {
 //   action  nothing more
 // `scope` is read as settingScope reads it; `surface` is the group's
 // (groupSurface), which decides the grammar of an option value
-// (optionValueOf). Unknown fields (enabled_when, hint, ...) are not read. A
-// setting
+// (optionValueOf). `kind` is the daemon's disabled_kind (disabledKind: ""
+// while enabled, absent or unknown) and `when` its enabled_when rule
+// (settingWhen), both for layout only. Unknown fields (hint, ...) are not
+// read. A setting
 // of a known type that is skipped (a fixed int, max == min; too many steps;
 // a field missing) still counts in its group's total (settingKnown), so the
 // group says that not all are shown; one of an unknown type does not.
@@ -1652,6 +1840,7 @@ function settingEntry(s, surface) {
     // Only a global setting is the microphone's (groupSurface).
     surface: surface === MIC_SURFACE && scope === "global" ? MIC_SURFACE : "", stored: s.stored === true, enabled: enabled,
     reason: enabled ? "" : settingText(s.disabled_reason, SETTING_REASON_CAP),
+    kind: enabled ? "" : disabledKind(s.disabled_kind), when: settingWhen(s.enabled_when),
     description: settingText(s.description, SETTING_DESCRIPTION_CAP), displayOffset: null, displayScale: null, displayRaw: false,
     value: null, defaultValue: null, min: 0, max: 0, step: 0, unit: "", options: [], optionsTotal: 0
   }
@@ -1880,6 +2069,10 @@ function settingChanged(row, c) {
   if (typeof c.enabled === "boolean") out.enabled = c.enabled
   if (out.enabled) out.reason = ""
   else if (typeof c.disabled_reason === "string") out.reason = settingText(c.disabled_reason, SETTING_REASON_CAP)
+  // A change that carries `enabled` carries the kind with it (absent: an
+  // older daemon, read as none).
+  if (out.enabled) out.kind = ""
+  else if (typeof c.enabled === "boolean" || c.disabled_kind !== undefined) out.kind = disabledKind(c.disabled_kind)
   return out
 }
 
@@ -2057,14 +2250,35 @@ function fitsSegmented(options) {
   return list.length <= SEGMENTED_MAX_OPTIONS && chars <= SEGMENTED_MAX_CHARS
 }
 
-// The widget an enum gets: a row of buttons while fitsSegmented, else a
-// dropdown.
+// The widget a row gets: an int of exactly two values is a switch (on: its
+// maximum), any other int a slider; a bool a switch; an enum a row of
+// buttons while fitsSegmented, else a dropdown.
 function settingWidget(row) {
   if (!row) return ""
-  if (row.type === "int") return "slider"
+  if (row.type === "int") return intIsSwitch(row) ? "switch" : "slider"
   if (row.type === "bool") return "switch"
   if (row.type === "action") return "action"
   return fitsSegmented(row.options) ? "segmented" : "dropdown"
+}
+
+// An int that takes exactly two values (its minimum and its maximum).
+function intIsSwitch(row) {
+  return !!row && row.type === "int" && typeof row.min === "number" && typeof row.max === "number"
+    && row.max > row.min && row.max - row.min === row.step
+}
+
+// Whether a switch row shows on: a bool's true, a two-value int at its
+// maximum.
+function switchChecked(row, value) {
+  if (!row) return false
+  return row.type === "int" ? value === row.max : value === true
+}
+
+// The value a click on a switch row writes: the other one of its two.
+function switchFlip(row) {
+  if (!row) return null
+  if (row.type === "int") return row.value === row.max ? row.min : row.max
+  return row.value !== true
 }
 
 // ---- the panel's view
@@ -2073,55 +2287,168 @@ function settingWidget(row) {
 // Camera tab is never taller than its tallest group). `open` is the panel's
 // choice of this session (memory only): a group id (that group, while the
 // set has it), "" (the user closed the open group: none), or anything else,
-// a group the set does not have included (no choice): the Image group, or
-// the first group on a camera that has none. "" when none is open. Only the
-// camera's groups count: the global ones are never in the accordion.
+// a group the set does not have included (no choice): the first group the
+// tab draws, in the daemon's order. "" when none is open. Only the camera's
+// groups count: the global ones are never in the accordion.
 function openGroupId(open, set) {
   if (!isPlainObject(set) || !Array.isArray(set.groups)) return ""
   var first = ""
-  var image = false
   for (var i = 0; i < set.groups.length && i < SETTINGS_SET_GROUP_CAP; i++) {
     var g = set.groups[i]
     if (g.scope === "global") continue
-    if (first === "") first = g.id
+    if (first === "" && groupDrawn(g, set)) first = g.id
     if (open !== "" && typeof open === "string" && g.id === open) return open
-    if (g.id === "image") image = true
   }
   if (first === "" || open === "") return ""
-  return image ? "image" : first
+  return first
+}
+
+// Whether a group is an entry of the accordion: it has a row the panel
+// draws in place (shown or greyed), or none at all (cut to nothing by a cap:
+// it is drawn, to say so).
+function groupDrawn(group, set) {
+  if (group.rows.length === 0) return true
+  var values = settingValues(set)
+  for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
+    var at = settingPlacement(group.rows[r], values)
+    if (at === "shown" || at === "greyed") return true
+  }
+  return false
 }
 
 // The settings section of a tab, exactly as it is drawn:
 //   { visible, hint, note, groups, truncation, reset, rowCount, setKey,
-//     title, collapsible }
-// groups: { id, label, index, expanded, glyph, rows, truncation, live }, where
-// the rows of a collapsed group are not listed and `live` is a read-only line
-// under the rows ("" for none, see groupLiveText); a row:
-//   { id, type, widget, label, enabled, reason, description, displayOffset,
-//     displayScale, value, valueText, min, max, step, options, selectedIndex,
-//     optionsNote, stop }
-// `stop` numbers the rows drawn, top to bottom (the keyboard's stops, see
-// cursorStops). `hint` replaces everything when the settings cannot be
-// shown (an old CLI or daemon, a newer schema, a camera without settings);
-// `note` says whether a change applies live or at the next open. `open` is
-// the panel's choice of open group (openGroupId). `setKey` names the set
-// (its camera and serial): a row of another key is another camera's or
-// another structure's, whatever its place (a held slider lets go).
-// `collapsible` is whether the groups open and close (one at a time).
+//     title, collapsible, unavailable }
+// groups: { id, label, heading, index, expanded, glyph, rows, truncation,
+// live }, where the rows of a collapsed group are not listed, `heading` is
+// whether its label is drawn (a group that is one master and its
+// dependents is not headed: the master's row is the heading), and `live` is
+// a read-only line under the rows ("" for none, see groupLiveText); a row:
+//   { id, type, widget, label, enabled, greyed, kind, reason, description,
+//     help, depth, checked, displayOffset, displayScale, value, valueText,
+//     min, max, step, options, selectedIndex, optionsNote, stop }
+// Only rows the panel draws in place are listed (settingPlacement: shown or
+// greyed); `depth` 1 draws a row under its master (the first setting its
+// rule names, an earlier row of the same group). `help` is what the row
+// says under the cursor: its reason while greyed, its description. `stop`
+// numbers the rows drawn, top to bottom (the keyboard's stops, see
+// cursorStops). `unavailable` lists what the tab's "Not available now"
+// line holds (unavailableEntries). `hint` replaces everything when the
+// settings cannot be shown (an old CLI or daemon, a newer schema, a camera
+// without settings); `note` says whether a change applies live or at the
+// next open. `open` is the panel's choice of open group (openGroupId).
+// `setKey` names the set (its camera and serial): a row of another key is
+// another camera's or another structure's, whatever its place (a held
+// slider lets go). `collapsible` is whether the groups open and close (one
+// at a time).
 function emptySettingsView() {
   return { visible: false, hint: "", note: "", groups: [], truncation: "", reset: false, rowCount: 0, setKey: "",
-           title: "", collapsible: true }
+           title: "", collapsible: true, unavailable: [] }
 }
 
-function viewRowOf(row, drafts, stop) {
+function viewRowOf(row, drafts, stop, depth) {
   var value = shownSettingValue(row, drafts)
+  var widget = settingWidget(row)
+  var help = row.enabled ? row.description
+    : (row.reason !== "" && row.description !== "" ? row.reason + ". " + row.description : (row.reason !== "" ? row.reason : row.description))
   return {
-    id: row.id, type: row.type, widget: settingWidget(row), label: row.label, enabled: row.enabled,
-    reason: row.reason, description: row.description, displayOffset: row.displayOffset, displayScale: row.displayScale,
+    id: row.id, type: row.type, widget: widget, label: row.label, enabled: row.enabled, greyed: !row.enabled,
+    kind: row.kind || "", reason: row.reason, description: row.description, help: help, depth: depth === 1 ? 1 : 0,
+    checked: widget === "switch" ? switchChecked(row, value) : false,
+    displayOffset: row.displayOffset, displayScale: row.displayScale,
     value: value, valueText: settingValueText(row, value), min: row.min, max: row.max,
     step: row.step, options: row.options, selectedIndex: row.type === "enum" ? optionIndex(row.options, value) : -1,
     optionsNote: showingText(row.options.length, row.optionsTotal, "choices"), stop: stop
   }
+}
+
+// Where every row of the set is drawn: id -> settingPlacement, over the
+// daemon's values (settingValues).
+function setPlacements(set) {
+  var values = settingValues(set)
+  var out = Object.create(null)
+  var groups = isPlainObject(set) && Array.isArray(set.groups) ? set.groups : []
+  for (var g = 0; g < groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
+    var rows = groups[g].rows
+    for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) out[rows[r].id] = settingPlacement(rows[r], values)
+  }
+  return out
+}
+
+// One group laid out for a tab: { rows, topLevel, unavailable, stop, looked }.
+// `rows` are the rows drawn in place (viewRowOf, numbered from `stop`; none
+// when `collapsed`, though the rest is still worked out), `topLevel` how many
+// of them are not under a master, `unavailable` the group's entries for the
+// "Not available now" list: one per row placed there, except a row whose
+// master is not drawn either (its master's entry says it) and, for kind
+// other_provider, one for the whole group (another module does the group's
+// job). `skip(row)` true leaves a row out entirely. `looked` counts every
+// row looked at, wherever it is drawn: the rows past it (the cap) are what a
+// group's "Showing N of M" counts out.
+function layoutGroup(group, placements, drafts, stop, collapsed, skip) {
+  var out = { rows: [], topLevel: 0, unavailable: [], stop: stop, looked: 0 }
+  var depthOf = Object.create(null)
+  var provided = false
+  for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
+    var row = group.rows[r]
+    out.looked++
+    if (skip && skip(row)) continue
+    var at = placements[row.id]
+    var master = rowMaster(row)
+    if (at === "unavailable") {
+      var masterAt = master !== "" ? placements[master] : undefined
+      if (masterAt === "unavailable" || masterAt === "hidden") continue
+      if (row.kind === "other_provider") {
+        if (provided) continue
+        provided = true
+        out.unavailable.push({ key: group.id + ":" + row.id, label: group.label !== "" ? group.label : row.label,
+                               reason: row.reason, setup: notAvailableSetup(row.kind), kind: row.kind })
+        continue
+      }
+      out.unavailable.push({ key: group.id + ":" + row.id, label: row.label, reason: row.reason,
+                             setup: notAvailableSetup(row.kind), kind: row.kind })
+      continue
+    }
+    if (at !== "shown" && at !== "greyed") continue
+    var depth = master !== "" && depthOf[master] !== undefined ? 1 : 0
+    depthOf[row.id] = depth
+    if (depth === 0) out.topLevel++
+    if (!collapsed) out.rows.push(viewRowOf(row, drafts, out.stop++, depth))
+  }
+  return out
+}
+
+// The tab's "Not available now" line: { visible, count, text, glyph, open,
+// entries, note } (entries listed only while open, at most
+// SETTINGS_ROW_CAP of them; `count` and the text say the real number, and
+// `note` "Showing N of M entries" when the list is cut). `open` is the
+// panel's choice of the session for that tab (memory only).
+function notAvailableView(view, open) {
+  var list = isPlainObject(view) && Array.isArray(view.unavailable) ? view.unavailable : []
+  var total = list.length
+  var n = Math.min(total, SETTINGS_ROW_CAP)
+  var out = { visible: total > 0, count: total, text: total > 0 ? NOT_AVAILABLE_TEXT + " (" + total + ")" : "",
+              open: total > 0 && open === true, glyph: total > 0 && open === true ? GLYPH_EXPANDED : GLYPH_COLLAPSED,
+              entries: [], note: "" }
+  if (out.open) {
+    out.note = showingText(n, total, "entries")
+    for (var i = 0; i < n; i++) {
+      var e = list[i]
+      out.entries.push({ key: e.key, label: e.label, reason: e.reason, setup: e.setup === true, index: i })
+    }
+  }
+  return out
+}
+
+// The keyboard stops of a "Not available now" line: the line, then each
+// entry's Setup button while open (`id`: the entry's key).
+function notAvailableStops(view) {
+  var out = []
+  if (!isPlainObject(view) || view.visible !== true) return out
+  out.push({ kind: "unavailable", index: -1 })
+  var list = Array.isArray(view.entries) ? view.entries : []
+  for (var i = 0; i < list.length && i < SETTINGS_ROW_CAP; i++) if (list[i].setup) out.push({ kind: "unavailable-setup", index: i, id: String(list[i].key || "") })
+  return out
 }
 
 // The Camera tab's section: the groups whose settings are per camera.
@@ -2142,36 +2469,73 @@ function settingsView(record, open, drafts) {
   }
   out.setKey = JSON.stringify([set.camera, set.serial])
   var openId = openGroupId(open, set)
+  var placements = setPlacements(set)
   var stop = 0
+  var cameraGroups = 0
   for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
     var group = set.groups[g]
     if (group.scope === "global") continue
+    cameraGroups++
     var expanded = group.id === openId
-    var rows = []
-    for (var r = 0; expanded && r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++)
-      rows.push(viewRowOf(group.rows[r], drafts, stop++))
+    var laid = layoutGroup(group, placements, drafts, stop, !expanded, null)
+    stop = laid.stop
+    out.unavailable = out.unavailable.concat(laid.unavailable)
+    // A group whose rows are all drawn elsewhere (hidden, or in the "Not
+    // available now" list) is no accordion entry; one cut to nothing by a
+    // cap is, to say so.
+    if (laid.topLevel === 0 && group.rows.length > 0) continue
     out.groups.push({
-      id: group.id, label: group.label, index: out.groups.length, expanded: expanded,
+      id: group.id, label: group.label, heading: true, index: out.groups.length, expanded: expanded,
       glyph: expanded ? GLYPH_EXPANDED : GLYPH_COLLAPSED,
-      rows: rows, truncation: expanded ? showingText(rows.length, group.total, "settings") : "",
+      rows: laid.rows, truncation: expanded ? showingText(laid.looked, group.total, "settings") : "",
       live: groupLiveText(record, group.id)
     })
   }
   out.rowCount = stop
   // "Showing N of M groups": N is what is drawn (commitSettings keeps only
-  // groups to draw), M counts the refused and capped ones too.
-  out.truncation = showingText(out.groups.length, set.groupsTotal, "groups")
+  // groups to draw), M counts the refused and capped ones too, less those
+  // with nothing to draw in place.
+  var undrawn = cameraGroups - out.groups.length
+  out.truncation = showingText(out.groups.length, Math.max(0, set.groupsTotal - undrawn), "groups")
   if (out.groups.length === 0) {
     // A set of global settings only: there is no camera, and nothing to say.
-    out.hint = set.camera !== "" ? SETTINGS_EMPTY_TEXT : ""
+    out.hint = set.camera !== "" && out.unavailable.length === 0 ? SETTINGS_EMPTY_TEXT : ""
     if (set.camera === "") out.truncation = ""
-    out.visible = out.hint !== ""
+    // Drawn while it has a hint or a "Not available now" line to say (the
+    // line is a cursor stop only while it is drawn).
+    out.visible = out.hint !== "" || out.unavailable.length > 0
     return out
   }
   out.visible = true
   out.note = settingsLive(record) ? SETTINGS_LIVE_TEXT : SETTINGS_IDLE_TEXT
   out.reset = true
   return out
+}
+
+// The breaks between the groups of a tab that draws them all open (the
+// Effect and Mic tabs), so that a heading's section reads as one, and rows
+// that are not in it never read as its items. Each group gets `breakAbove`:
+//   "gap"   a headed group after anything drawn: a gap above its heading
+//   "rule"  a group with no heading right after a headed section (the
+//           section above, `headedAbove`, for the first): a gap with a
+//           faint line, which ends that section
+//   ""      none: a group with no heading after one with none flows on as
+//           rows of the same rhythm (one master and its dependents each)
+// The lead group (what follows the background choice) is part of the
+// section above it. `drawnAbove`: something is drawn above the first group.
+function markGroupBreaks(groups, headedAbove, drawnAbove) {
+  var list = Array.isArray(groups) ? groups : []
+  var headed = headedAbove === true
+  var drawn = drawnAbove === true
+  for (var i = 0; i < list.length; i++) {
+    var g = list[i]
+    if (g.lead === true) { g.breakAbove = ""; drawn = true; continue }
+    if (g.heading === true) g.breakAbove = drawn ? "gap" : ""
+    else g.breakAbove = headed ? "rule" : ""
+    headed = g.heading === true
+    drawn = true
+  }
+  return list
 }
 
 // The setting the Effect tab's dedicated choice row owns: the background
@@ -2181,38 +2545,75 @@ var EFFECT_MODE_SETTING = "effect.background.mode"
 
 // The Effect tab's generic section: every group of global settings, all open
 // (no accordion, no reset: the camera's reset never reaches them), without
-// the setting the dedicated row owns (a group left with nothing is not
-// drawn), and without the microphone's groups (the Mic tab draws those).
-// No groups (`visible` false) when the daemon publishes no other global
-// setting, or predates module effects (MODULES_REVISION: the tab then says
-// it needs updating).
+// the setting the dedicated row owns, and without the microphone's groups
+// (the Mic tab draws those). The rows whose master is the background
+// effect's choice (its strength, ...) come first, in a group of their own
+// with no heading (`lead`), drawn under the choice row: they follow the
+// choice. A group left with nothing to draw is not drawn. Nothing
+// (`visible` false) when the daemon publishes no other global setting, or
+// predates module effects (MODULES_REVISION: the tab then says it needs
+// updating).
 function effectSettingsView(record, drafts) {
   var out = emptySettingsView()
   out.collapsible = false
   if (!moduleEffects(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out
   var set = record.settings
   out.setKey = JSON.stringify([set.camera, set.serial])
+  var placements = setPlacements(set)
   var stop = 0
   var skippedGroups = 0
-  for (var g = 0; g < set.groups.length && g < SETTINGS_SET_GROUP_CAP; g++) {
-    var group = set.groups[g]
-    if (group.scope !== "global" || group.surface === MIC_SURFACE) continue
-    var rows = []
-    var skipped = 0
-    for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) {
-      if (group.rows[r].id === EFFECT_MODE_SETTING) { skipped++; continue }
-      rows.push(viewRowOf(group.rows[r], drafts, stop++))
+  var effectGroups = []
+  for (var a = 0; a < set.groups.length && a < SETTINGS_SET_GROUP_CAP; a++)
+    if (set.groups[a].scope === "global" && set.groups[a].surface !== MIC_SURFACE) effectGroups.push(set.groups[a])
+  // The choice's dependents (rows whose rule names the choice first), from
+  // every group, drawn under the choice.
+  var follows = function(row) { return rowMaster(row) === EFFECT_MODE_SETTING }
+  var lead = { id: "background-follows", label: "", rows: [], total: 0 }
+  for (var b = 0; b < effectGroups.length; b++) {
+    var gr = effectGroups[b].rows
+    for (var c = 0; c < gr.length && c < SETTINGS_PER_GROUP_CAP; c++)
+      if (follows(gr[c]) && lead.rows.length < SETTINGS_PER_GROUP_CAP) lead.rows.push(gr[c])
+  }
+  var leadOut = { rows: [], unavailable: [], stop: 0 }
+  if (lead.rows.length > 0) {
+    // The choice is drawn above them, as their master: each is under it.
+    leadOut = layoutGroup(lead, placements, drafts, stop, false, null)
+    for (var d = 0; d < leadOut.rows.length; d++) leadOut.rows[d].depth = 1
+    stop = leadOut.stop
+    if (leadOut.rows.length > 0)
+      out.groups.push({ id: lead.id, label: "", heading: false, lead: true, index: 0, expanded: true, glyph: "",
+                        rows: leadOut.rows, truncation: "", live: "" })
+  }
+  for (var g = 0; g < effectGroups.length; g++) {
+    var group = effectGroups[g]
+    var unavailableMode = []
+    for (var m = 0; m < group.rows.length && m < SETTINGS_PER_GROUP_CAP; m++) {
+      var row = group.rows[m]
+      // The choice itself cannot run here: the list names it by its group.
+      if (row.id === EFFECT_MODE_SETTING && placements[row.id] === "unavailable")
+        unavailableMode.push({ key: group.id + ":" + row.id, label: group.label !== "" ? group.label : row.label,
+                               reason: row.reason, setup: notAvailableSetup(row.kind), kind: row.kind })
     }
-    if (rows.length === 0) { skippedGroups++; continue }
+    var laid = layoutGroup(group, placements, drafts, stop, false,
+                           function(r) { return r.id === EFFECT_MODE_SETTING || follows(r) })
+    stop = laid.stop
+    out.unavailable = out.unavailable.concat(unavailableMode, laid.unavailable)
+    if (laid.rows.length === 0) { skippedGroups++; continue }
     out.groups.push({
-      id: group.id, label: group.label, index: out.groups.length, expanded: true, glyph: "",
-      rows: rows, truncation: showingText(rows.length + skipped, group.total, "settings"),
+      id: group.id, label: group.label, heading: laid.topLevel > 1, lead: false, index: out.groups.length, expanded: true, glyph: "",
+      rows: laid.rows, truncation: showingText(laid.looked, group.total, "settings"),
       live: groupLiveText(record, group.id)
     })
   }
+  out.unavailable = out.unavailable.concat(leadOut.unavailable)
+  // The background choice above heads its own section.
+  var modeShown = effectModeShown(record)
+  markGroupBreaks(out.groups, modeShown, modeShown)
   out.rowCount = stop
-  out.truncation = showingText(out.groups.length + skippedGroups, set.globalGroupsTotal, "groups")
-  out.visible = out.groups.length > 0
+  out.truncation = showingText(out.groups.length - (out.groups.length > 0 && out.groups[0].lead === true ? 1 : 0) + skippedGroups,
+                               set.globalGroupsTotal, "groups")
+  // Drawn while it has rows, or a "Not available now" line to say.
+  out.visible = out.groups.length > 0 || out.unavailable.length > 0
   return out
 }
 
@@ -2593,17 +2994,18 @@ function settleWritten(drafts, settling, lines) {
 
 // ---------------------------------------------------------------- panel tabs
 
-// The panel's four tabs, in order, under the preview: the words are the
-// stored `panelTab` setting's values (manifest schema `options`, same order),
-// and the only ones ever written. The first is the default.
-var PANEL_TABS = ["effect", "camera", "mic", "status"]
+// The panel's three tabs, in order: the words are the stored `panelTab`
+// setting's values (manifest schema `options`, same order), and the only
+// ones ever written. The first is the default. A stored word of an older
+// version ("status": the Status tab, now the header's Details view) reads
+// as the default.
+var PANEL_TABS = ["effect", "camera", "mic"]
 var PANEL_TAB_DEFAULT = "effect"
-var PANEL_TAB_LABELS = { effect: "Effect", camera: "Camera", mic: "Mic", status: "Status" }
+var PANEL_TAB_LABELS = { effect: "Effects", camera: "Camera", mic: "Mic" }
 var PANEL_TAB_DESCRIPTIONS = {
-  effect: "Background effect and the video effects' settings",
+  effect: "Background effect and the video effects",
   camera: "Camera choice and camera settings",
-  mic: "The Omarchy Broadcast Mic: its processing, input and state",
-  status: "State, consumers, outputs and live figures"
+  mic: "The Omarchy Broadcast Mic: its processing and input"
 }
 
 // The stored tab, read back: a word of PANEL_TABS exactly, else the default.
@@ -2636,7 +3038,7 @@ function panelTabOptions(tab, health) {
   return out
 }
 
-// ---------------------------------------------------------------- status tab
+// ---------------------------------------------------------------- consumers
 
 var PIPEWIRE_OFF = "off"
 
@@ -2652,23 +3054,189 @@ function consumersByKind(record) {
   return parts.join(" \u00b7 ")
 }
 
-// The Status tab's rows: { label, value }, every value a display copy. The
-// daemon reports its interface revision, not a version number, so that is
-// what is shown.
-function statusRows(record) {
+// ---------------------------------------------------------------- details
+
+// This plugin's version, for the Details view and its copy (a bug report).
+// tests/check-source.py holds it equal to the manifest's `version`.
+var PLUGIN_VERSION = "0.37.0"
+var DETAILS_TITLE = "Details"
+var DETAILS_COPY_LABEL = "Copy"
+var DETAILS_COPIED_TEXT = "Copied"
+var DETAILS_BACK_LABEL = "Back"
+
+// The active camera's row of the list, or null.
+function activeCameraRow(record) {
+  var cams = record && Array.isArray(record.cameras) ? record.cameras : []
+  for (var i = 0; i < cams.length; i++) if (isActiveCamera(record, cams[i])) return cams[i]
+  return null
+}
+
+// The Details view, opened from the header's (i): { label, value } rows,
+// every value a display copy: the state, the camera and its USB id
+// (VID:PID), the output mode, the PipeWire output, the consumers by kind,
+// the live figures while active, the microphone, the daemon's interface
+// revision (it reports no version number) and this plugin's version. The
+// daemon reports no firmware version, so none is shown. Nothing while the
+// daemon is unavailable but the plugin's version.
+function detailsRows(record) {
+  var rows = []
+  if (available(record)) {
+    var camera = activeCameraLabel(record)
+    var cam = activeCameraRow(record)
+    rows.push({ label: "State", value: record.state })
+    rows.push({ label: "Camera", value: camera !== "" ? camera : "none" })
+    if (cam && cam.usb !== "") rows.push({ label: "USB id", value: cam.usb })
+    rows.push({ label: "Output", value: record.outputMode !== "" ? record.outputMode : UNKNOWN })
+    rows.push({ label: "PipeWire", value: record.pipewireOutput !== "" ? record.pipewireOutput : UNKNOWN })
+    var split = consumersByKind(record)
+    rows.push({ label: "Used by", value: split !== "" ? split : (record.consumers >= 0 ? consumersText(record.consumers) : UNKNOWN) })
+    var stats = statsRows(record)
+    for (var i = 0; i < stats.length; i++) rows.push(stats[i])
+    var mic = micView(record)
+    if (mic.visible) {
+      rows.push({ label: "Microphone", value: mic.rows[0].value })
+      if (mic.runsOn !== "") rows.push({ label: "Mic runs on", value: mic.runsOn.replace(/^Runs on: /, "") })
+    }
+    rows.push({ label: "Daemon API", value: record.interfaceRevision >= 0 ? "revision " + record.interfaceRevision : UNKNOWN })
+  } else {
+    rows.push({ label: "State", value: stateLabel(record) })
+  }
+  rows.push({ label: "Plugin", value: PLUGIN_VERSION })
+  return rows
+}
+
+// The text the Details view's Copy puts on the clipboard: one "label: value"
+// line each, under the product's name.
+function detailsText(rows) {
+  var list = Array.isArray(rows) ? rows : []
+  var lines = [PRODUCT]
+  for (var i = 0; i < list.length && i < 32; i++) lines.push(list[i].label + ": " + list[i].value)
+  return lines.join("\n")
+}
+
+// ---------------------------------------------------------------- header
+
+// The header's state line, in words (plain text, sentence case):
+//   "Off", "Ready: starts when an app uses the camera", "Starting…",
+//   "In use by 1 app, 30 fps", "Preview only, 30 fps", "Error",
+//   "Connecting…", "Unavailable".
+// The rate is the live figure's, while one is reported.
+var HEADER_READY_TEXT = "Ready: starts when an app uses the camera"
+function headerState(record) {
+  if (!available(record)) return !record || record.link === "connecting" ? "Connecting…" : "Unavailable"
+  switch (record.state) {
+  case "off": return "Off"
+  case "idle": return HEADER_READY_TEXT
+  case "starting": return "Starting…"
+  case "error": return "Error"
+  case "active":
+    var apps = otherConsumers(record)
+    var text = apps > 0 ? (apps === 1 ? "In use by 1 app" : "In use by " + apps + " apps")
+      : (record.previewConsumers > 0 ? "Preview only" : "In use")
+    var fps = record.stats ? record.stats.fps : null
+    if (typeof fps === "number" && isFinite(fps) && fps > 0 && fps <= STAT_MAX) text += ", " + Math.round(fps) + " fps"
+    return text
+  default: return record.state
+  }
+}
+
+// The main switch's label (it turns the virtual camera on or off).
+var MAIN_SWITCH_LABEL = "Virtual camera"
+
+// ---------------------------------------------------------------- layout
+
+// The panel's two layouts (decided here, drawn by BroadcastPanel and sized
+// by BarWidget): wide, two columns (the live preview on the left with a
+// short summary under it, the tabs on the right), while the user shows the
+// preview where it can run and the widget's `narrowPanel` setting is off;
+// else one column of PANEL_NARROW_WIDTH with the preview as a one-line
+// strip, or its frame above the tabs (narrow, never on the Mic tab). The height is the
+// content's, capped at PANEL_HEIGHT_CAP and by the screen: past it only the
+// body (the tab's content) scrolls.
+var PANEL_WIDE_WIDTH = 920
+var PANEL_NARROW_WIDTH = 520
+var PANEL_HEIGHT_CAP = 860
+
+// The stored `narrowPanel` setting, read back: on only for a real true.
+function narrowPanelValue(value) {
+  return value === true
+}
+
+// Whether the preview draws its frame area (else a strip, or nothing): it
+// shows a frame or starts one.
+function previewFrameShown(placeholder) {
+  return isPlainObject(placeholder) && (placeholder.mode === "box" || placeholder.mode === "image")
+}
+
+// { wide, width }: wide while not `narrow`, the preview is shown (the
+// user's switch, `switchOn`) and it can run here (`controls`,
+// previewControlsShown). Never from the preview's placeholder: a preview
+// that fails shows its error in the wide frame area (previewStripView), and
+// the layout stays put. Were it to follow the placeholder, a failure would
+// make the layout narrow, so the narrow Mic tab would release the preview
+// (previewHeld), which clears the failure, the layout would go wide again,
+// the preview would be held and relaunched, and fail again: a loop.
+function panelLayout(narrow, switchOn, controls) {
+  var wide = narrow !== true && switchOn === true && controls === true
+  return { wide: wide, width: wide ? PANEL_WIDE_WIDTH : PANEL_NARROW_WIDTH }
+}
+
+// The preview's place in the panel, exactly as drawn:
+//   { mode, text, error, button }
+// mode: "frame" (the 16:9 area, its controls drawn over it; in the wide
+// layout also while the preview fails: `text` and `error` then say why,
+// drawn inside the frame area, see panelLayout), "strip" (one
+// line, `text` and `button`), or "none" (nothing: the daemon is unavailable,
+// or the narrow layout's Mic tab). `button`: "show" (Show preview: the
+// preview is off and can run), "hide" (it is on but failed: turn it off),
+// or "". `controls`: the preview can run here (previewControlsShown).
+var PREVIEW_SHOW_LABEL = "Show preview"
+var PREVIEW_HIDE_LABEL = "Hide preview"
+var PREVIEW_GRID_LABEL = "Grid"
+var PREVIEW_GRID_TOOLTIP = "Rule-of-thirds grid over the preview"
+var PREVIEW_RATE_TOOLTIP = "Preview refresh rate (not the camera's)"
+function previewStripView(placeholder, switchOn, controls, layout, tab) {
+  var p = isPlainObject(placeholder) ? placeholder : { mode: "hidden", text: "", error: false }
+  var out = { mode: "none", text: "", error: false, button: "" }
+  if (p.mode === "hidden") return out
+  var wide = isPlainObject(layout) && layout.wide === true
+  if (!wide && panelTabValue(tab) === "mic") return out
+  if (previewFrameShown(p)) { out.mode = "frame"; return out }
+  if (wide) {
+    out.mode = "frame"
+    out.text = p.text
+    out.error = p.error === true
+    return out
+  }
+  out.mode = "strip"
+  out.text = p.text
+  out.error = p.error === true
+  if (controls === true) out.button = switchOn === true ? "hide" : "show"
+  return out
+}
+
+// Whether an open panel holds the preview (it runs only while one does):
+// while it has a place to draw it, which the narrow layout's Mic tab does
+// not (previewStripView); the wide layout's preview column stays on every
+// tab. `layout` is panelLayout's, which never follows the placeholder, so a
+// failure does not move the hold (and clear itself, see panelLayout). `tab` is the tab shown, read through panelTabValue.
+function previewHeld(opened, layout, tab) {
+  if (opened !== true) return false
+  return (isPlainObject(layout) && layout.wide === true) || panelTabValue(tab) !== "mic"
+}
+
+// The wide layout's summary under the preview: { label, value } rows of
+// the camera, the output format, the apps using it and the microphone.
+function previewSummaryRows(record) {
   if (!available(record)) return []
   var camera = activeCameraLabel(record)
   var rows = [
-    { label: "State", value: record.state },
     { label: "Camera", value: camera !== "" ? camera : "none" },
-    { label: "Consumers", value: record.consumers >= 0 ? String(record.consumers) : UNKNOWN }
+    { label: "Format", value: record.outputMode !== "" ? record.outputMode : UNKNOWN }
   ]
-  var split = consumersByKind(record)
-  if (split !== "") rows.push({ label: "Used by", value: split })
-  rows.push({ label: "Output", value: record.outputMode !== "" ? record.outputMode : UNKNOWN })
-  rows.push({ label: "PipeWire", value: record.pipewireOutput !== "" ? record.pipewireOutput : UNKNOWN })
-  rows.push({ label: "D-Bus API",
-              value: record.interfaceRevision >= 0 ? "revision " + record.interfaceRevision : UNKNOWN })
+  var apps = otherConsumers(record)
+  rows.push({ label: "Apps", value: apps < 0 ? UNKNOWN : (apps === 0 ? "None" : String(apps)) })
+  if (micSupported(record)) rows.push({ label: "Mic", value: micStateLabel(record.mic) })
   return rows
 }
 
@@ -2775,19 +3343,34 @@ function micLatencyText(mic) {
 }
 
 // The Mic tab's own part, above the settings, exactly as drawn:
-//   { visible, hint, hostOn, rows, runsOn, error }
+//   { visible, hint, hostOn, stateLine, explainer, rows, runsOn, error }
 // `visible`: the microphone is shown (else `hint` says why: an old daemon
 // or CLI). `hostOn`: the switch of the microphone itself (`mic on|off`).
-// rows: { label, value }; `runsOn` the modules processing it, as the daemon
-// words it ("" unless the state is active or starting, as the added delay is
-// "None" unless it is); `error` the daemon's.
+// While it is off the tab says only what the microphone is (`explainer`);
+// while it is on, one line of its state (`stateLine`: "Processing, 1 app
+// recording, adds 12 ms"). rows: { label, value } for the Details view;
+// `runsOn` the modules processing it, as the daemon words it ("" unless the
+// state is active or starting, as the added delay is "None" unless it is);
+// `error` the daemon's.
+var MIC_EXPLAINER_TEXT = "A microphone with noise and echo removed. Turn it on, then choose “Omarchy Broadcast Mic” in your apps."
+function micStateLine(m) {
+  var parts = [micStateLabel(m)]
+  if (typeof m.consumers === "number" && m.consumers >= 0)
+    parts.push(m.consumers === 0 ? "no app recording" : (m.consumers === 1 ? "1 app recording" : m.consumers + " apps recording"))
+  if (micProcessing(m) && typeof m.latencyMs === "number" && m.latencyMs > 0 && m.latencyMs <= STAT_MAX)
+    parts.push("adds " + Math.round(m.latencyMs) + " ms")
+  return parts.join(", ")
+}
+
 function micView(record) {
-  var out = { visible: false, hint: "", hostOn: false, rows: [], runsOn: "", error: "" }
+  var out = { visible: false, hint: "", hostOn: false, stateLine: "", explainer: "", rows: [], runsOn: "", error: "" }
   if (!available(record)) return out
   if (!micSupported(record)) { out.hint = micMissingText(record); return out }
   var m = record.mic
   out.visible = true
   out.hostOn = m.state !== "off"
+  out.stateLine = out.hostOn ? micStateLine(m) : ""
+  out.explainer = out.hostOn ? "" : MIC_EXPLAINER_TEXT
   out.rows = [
     { label: "State", value: micStateLabel(m) },
     { label: "Consumers", value: out.hostOn ? micConsumersText(m.consumers) : "None" },
@@ -2799,19 +3382,24 @@ function micView(record) {
 }
 
 // The Mic tab's settings: every group of surface MIC_SURFACE, all open (no
-// accordion, no reset), as effectSettingsView draws the Effect tab's. `note`
-// says that no audio module is installed when the daemon's own group is the
-// only one; nothing while the set is still loading, or the microphone is
-// not supported (micView says why).
+// accordion, no reset), laid out as effectSettingsView lays out the Effect
+// tab's (dependents under their master, what cannot run here in the "Not
+// available now" list). Nothing while the microphone is off: the tab then
+// says only what it is (micView). `note` says that no audio module is
+// installed when the daemon's own group is the only one; nothing while the
+// set is still loading, or the microphone is not supported (micView says
+// why).
 function micSettingsView(record, drafts) {
   var out = emptySettingsView()
   out.collapsible = false
   if (!micSupported(record) || !settingsSupported(record) || !isPlainObject(record.settings)) return out
+  if (!micHostOn(record)) return out
   var set = record.settings
   // The microphone's settings are global: no camera in the key, so another
   // camera never closes an open dropdown or lets go of a held slider (that
   // is all a key change does, see SettingsView's rowKey).
   out.setKey = JSON.stringify([MIC_SURFACE, set.serial])
+  var placements = setPlacements(set)
   var stop = 0
   var modules = false
   var undrawn = 0
@@ -2820,22 +3408,24 @@ function micSettingsView(record, drafts) {
     if (group.surface !== MIC_SURFACE) continue
     if (group.id !== MIC_INPUT_GROUP) modules = true
     if (out.groups.length >= SETTINGS_GROUP_CAP) continue
-    var rows = []
-    for (var r = 0; r < group.rows.length && r < SETTINGS_PER_GROUP_CAP; r++) rows.push(viewRowOf(group.rows[r], drafts, stop++))
-    if (rows.length === 0) { undrawn++; continue }
+    var laid = layoutGroup(group, placements, drafts, stop, false, null)
+    stop = laid.stop
+    out.unavailable = out.unavailable.concat(laid.unavailable)
+    if (laid.rows.length === 0) { undrawn++; continue }
     out.groups.push({
-      id: group.id, label: group.label, index: out.groups.length, expanded: true, glyph: "",
-      rows: rows, truncation: showingText(rows.length, group.total, "settings"),
+      id: group.id, label: group.label, heading: laid.topLevel > 1, index: out.groups.length, expanded: true, glyph: "",
+      rows: laid.rows, truncation: showingText(laid.looked, group.total, "settings"),
       live: ""
     })
   }
+  markGroupBreaks(out.groups, false, false)
   out.rowCount = stop
   // "Showing N of M groups": M counts the groups the view could draw, not
   // one it never draws (no row to show).
   var groupsTotal = typeof set.micGroupsTotal === "number" ? Math.max(0, set.micGroupsTotal - undrawn) : 0
   out.truncation = showingText(out.groups.length, groupsTotal, "groups")
-  out.note = modules ? "" : (micHostOn(record) ? MIC_NO_MODULES_TEXT : MIC_NO_MODULES_OFF_TEXT)
-  out.visible = out.groups.length > 0 || out.note !== ""
+  out.note = modules ? "" : MIC_NO_MODULES_TEXT
+  out.visible = out.groups.length > 0 || out.note !== "" || out.unavailable.length > 0
   return out
 }
 
@@ -3135,74 +3725,100 @@ function recommendedArgv(cli, record, intent) {
 
 // ---------------------------------------------------------------- keyboard cursor
 
-// The panel's keyboard stops, top to bottom, as the panel lays them out: the
-// on/off switch, the Preview switch and the frame-rate choices (one stop for
-// the row; only when `previewControls`, see previewControlsShown), the tab
-// row (one stop; Left/Right change the tab), then only the stops of the tab
-// shown (`tab`, read through panelTabValue):
+// The panel's keyboard stops, top to bottom, as the panel lays them out
+// (`p`, what the panel draws):
+//   the header's on/off switch, its (i) (the Details view), then while
+//   `p.details` only the view's Back and Copy;
+//   the preview's (`p.preview`, previewStripView): the strip's button (one
+//   stop, "preview") while it has one, or over the frame, while the preview
+//   can run (`p.previewControls`), Hide ("preview"), the grid and the
+//   refresh rate (one stop for its choices);
+//   the tab row (one stop; Left/Right change the tab): after the preview's
+//   stops in the wide layout (`p.wide`, the preview column on the left),
+//   before them in the narrow one (the preview drawn under the tab row);
+//   then only the stops of the tab shown (`p.tab`, read through
+//   panelTabValue):
 //   effect  the background effect's choices (one stop for the row;
-//           Left/Right walk its choices, as in the shell's button groups),
-//           the Background row while backgroundRowShown (one stop;
-//           Left/Right walk Gallery... and Add...), the Away image button,
-//           the Battery saver switch and its Mode dropdown (one stop each;
-//           Enter opens the list, Left/Right do nothing) while
-//           `batterySaver` (batterySaverView)
-//           is visible, then the rows of `effectSettings` (effectSettingsView: the
-//           daemon's other global settings, drawn generically, no group
-//           header is a stop);
-//   camera  one per rendered camera row (`cameraCount` is the count the
-//           panel draws, so the cursor and the rows always agree), Next
-//           camera when it is shown, each suggestion's button drawn
-//           (`health.shownSuggestions`), the line that opens or folds the
-//           rest, Use recommended settings and the line that opens or folds
-//           its changes, while `health` (healthView) offers them,
-//           then from `settings` (the settingsView
-//           the panel draws, so collapsed groups and capped rows are no
-//           stops): Reset to defaults (on the settings' title line), each
-//           group header (index: its place in the view) and the rows of an
-//           open group (index: the row's `stop`);
-//   mic     the microphone's switch (while micView shows it), then the
-//           rows of `micSettings` (micSettingsView, drawn generically);
-//   status  nothing (it only shows figures).
-// Nothing is a stop while the daemon is unavailable: no control is drawn. The
-// effect row is no stop either while it is not drawn (effectModeView: the
-// daemon predates module effects, or offers no background effect).
-function cursorStops(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings, health, batterySaver) {
+//           Left/Right walk its choices, as in the shell's button groups)
+//           while drawn (effectModeView), the Background row while
+//           `p.backgroundRow` (backgroundRowDrawn: one stop; Left/Right walk
+//           Gallery... and Add...), the rows of `p.effectSettings`
+//           (effectSettingsView, drawn generically: the choice's dependents
+//           first; no group heading is a stop), the "Not available now"
+//           line and its Setup buttons (`p.notAvailable`, notAvailableView),
+//           then "More" while it holds anything, and while `p.moreOpen` the
+//           Battery saver switch and its Mode dropdown (one stop each; Enter
+//           opens the list, Left/Right do nothing) while `p.batterySaver`
+//           (batterySaverView) is visible, and the Away image button;
+//   camera  the camera dropdown while there is a camera (`p.cameraCount`),
+//           each suggestion's button drawn (`p.health.shownSuggestions`),
+//           the line that opens or folds the rest, Use recommended settings
+//           and the line that opens or folds its changes, while `p.health`
+//           (healthView) offers them, then from `p.settings` (the
+//           settingsView the panel draws, so collapsed groups and capped
+//           rows are no stops) each group header (index: its place in the
+//           view) and the rows of an open group (index: the row's `stop`),
+//           the "Not available now" line and its Setup buttons, and Reset
+//           to defaults at the bottom;
+//   mic     the microphone's switch (while micView shows it), then the rows
+//           of `p.micSettings` (micSettingsView, drawn generically) and the
+//           "Not available now" line and its Setup buttons.
+// A stop that stands for one of several rows (a setting, a group header, a
+// Setup button) carries the row's `id` too (cursorAfter anchors on it).
+// Nothing is a stop while the daemon is unavailable: no control is drawn.
+function cursorStops(record, p) {
   if (!available(record)) return []
-  var stops = [{ kind: "switch", index: -1 }]
-  if (previewControls === true) {
-    stops.push({ kind: "preview", index: -1 })
-    stops.push({ kind: "fps", index: -1 })
+  var q = isPlainObject(p) ? p : {}
+  var stops = [{ kind: "switch", index: -1 }, { kind: "info", index: -1 }]
+  if (q.details === true) {
+    stops.push({ kind: "details-back", index: -1 })
+    stops.push({ kind: "details-copy", index: -1 })
+    return stops
   }
-  stops.push({ kind: "tabs", index: -1 })
-  var shown = panelTabValue(tab)
+  var preview = isPlainObject(q.preview) ? q.preview : { mode: "none", button: "" }
+  var previewStops = []
+  if (preview.mode === "strip" && preview.button !== "") previewStops.push({ kind: "preview", index: -1 })
+  else if (preview.mode === "frame" && q.previewControls === true) {
+    previewStops.push({ kind: "preview", index: -1 })
+    previewStops.push({ kind: "grid", index: -1 })
+    previewStops.push({ kind: "fps", index: -1 })
+  }
+  // Wide: the preview column first; narrow: the preview is drawn under the
+  // tab row (so the tabs never move between tabs), and walked after it.
+  if (q.wide === true) stops = stops.concat(previewStops, [{ kind: "tabs", index: -1 }])
+  else stops = stops.concat([{ kind: "tabs", index: -1 }], previewStops)
+  var rowsOf = function(view) {
+    var out = []
+    var groups = isPlainObject(view) && Array.isArray(view.groups) ? view.groups : []
+    for (var g = 0; g < groups.length && g < SETTINGS_GROUP_CAP; g++) {
+      var rows = Array.isArray(groups[g].rows) ? groups[g].rows : []
+      for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) out.push({ kind: "setting", index: rows[r].stop, id: rows[r].id })
+    }
+    return out
+  }
+  var shown = panelTabValue(q.tab)
   if (shown === "effect") {
     if (effectModeShown(record)) stops.push({ kind: "effect", index: -1 })
-    if (backgroundRowShown(record)) stops.push({ kind: "background", index: -1 })
-    if (placeholderSupported(record)) stops.push({ kind: "away", index: -1 })
-    if (isPlainObject(batterySaver) && batterySaver.visible === true) {
-      stops.push({ kind: "battery", index: -1 })
-      stops.push({ kind: "battery-mode", index: -1 })
-    }
-    if (effectSettingsShown(effectSettings)) {
-      // The generic rows' stops number from 0 in this tab's view, as the
-      // camera's do in theirs (the two are never shown together).
-      for (var e = 0; e < effectSettings.groups.length && e < SETTINGS_GROUP_CAP; e++) {
-        var erows = Array.isArray(effectSettings.groups[e].rows) ? effectSettings.groups[e].rows : []
-        for (var q = 0; q < erows.length && q < SETTINGS_PER_GROUP_CAP; q++) stops.push({ kind: "setting", index: erows[q].stop })
+    if (q.backgroundRow === true) stops.push({ kind: "background", index: -1 })
+    stops = stops.concat(rowsOf(q.effectSettings), notAvailableStops(q.notAvailable))
+    var battery = isPlainObject(q.batterySaver) && q.batterySaver.visible === true
+    var away = placeholderSupported(record)
+    if (battery || away) {
+      stops.push({ kind: "more", index: -1 })
+      if (q.moreOpen === true) {
+        if (battery) {
+          stops.push({ kind: "battery", index: -1 })
+          stops.push({ kind: "battery-mode", index: -1 })
+        }
+        if (away) stops.push({ kind: "away", index: -1 })
       }
     }
   } else if (shown === "mic") {
     if (micSupported(record)) stops.push({ kind: "mic-host", index: -1 })
-    var mgroups = micSettingsShown(micSettings) ? micSettings.groups : []
-    for (var mg = 0; mg < mgroups.length && mg < SETTINGS_GROUP_CAP; mg++) {
-      var mrows = Array.isArray(mgroups[mg].rows) ? mgroups[mg].rows : []
-      for (var mr = 0; mr < mrows.length && mr < SETTINGS_PER_GROUP_CAP; mr++) stops.push({ kind: "setting", index: mrows[mr].stop })
-    }
+    stops = stops.concat(rowsOf(q.micSettings), notAvailableStops(q.notAvailable))
   } else if (shown === "camera") {
-    var n = Math.max(0, Math.min(Number(cameraCount) || 0, CAMERA_CAP))
-    for (var i = 0; i < n; i++) stops.push({ kind: "camera", index: i })
-    if (canNext(record)) stops.push({ kind: "next", index: -1 })
+    if ((Number(q.cameraCount) || 0) > 0) stops.push({ kind: "camera", index: -1 })
+    var health = q.health
     var hints = isPlainObject(health) && Array.isArray(health.suggestions) ? health.suggestions : []
     var drawn = isPlainObject(health) ? Math.min(Number(health.shownSuggestions) || 0, hints.length) : 0
     for (var sg = 0; sg < drawn && sg < HEALTH_SUGGESTIONS_CAP; sg++) stops.push({ kind: "suggestion", index: sg })
@@ -3211,13 +3827,15 @@ function cursorStops(record, cameraCount, previewControls, tab, settings, effect
       stops.push({ kind: "recommended", index: -1 })
       stops.push({ kind: "recommended-changes", index: -1 })
     }
-    if (isPlainObject(settings) && settings.reset === true) stops.push({ kind: "reset", index: -1 })
+    var settings = q.settings
     var groups = isPlainObject(settings) && Array.isArray(settings.groups) ? settings.groups : []
     for (var g = 0; g < groups.length && g < SETTINGS_GROUP_CAP; g++) {
-      stops.push({ kind: "group", index: g })
+      stops.push({ kind: "group", index: g, id: String(groups[g].id || "") })
       var rows = Array.isArray(groups[g].rows) ? groups[g].rows : []
-      for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) stops.push({ kind: "setting", index: rows[r].stop })
+      for (var r = 0; r < rows.length && r < SETTINGS_PER_GROUP_CAP; r++) stops.push({ kind: "setting", index: rows[r].stop, id: rows[r].id })
     }
+    stops = stops.concat(notAvailableStops(q.notAvailable))
+    if (isPlainObject(settings) && settings.reset === true) stops.push({ kind: "reset", index: -1 })
   }
   return stops
 }
@@ -3228,16 +3846,36 @@ function clampCursor(index, length) {
   return Math.max(0, Math.min(length - 1, i))
 }
 
-// Rows that are one stop each (cameras, group headers, settings) are told
-// apart by index.
+// Rows that are one stop each (group headers, settings, suggestions, Setup
+// buttons of the "Not available now" list) are told apart by index.
 function stopHasIndex(kind) {
-  return kind === "camera" || kind === "group" || kind === "setting" || kind === "suggestion"
+  return kind === "group" || kind === "setting" || kind === "suggestion" || kind === "unavailable-setup"
 }
 
 function stopIndex(stops, kind, index) {
   for (var i = 0; i < stops.length; i++)
     if (stops[i].kind === kind && (!stopHasIndex(kind) || stops[i].index === index)) return i
   return -1
+}
+
+// The cursor's index once the stops change from `before` to `after` (a row
+// revealed or hidden above it, a group opened, a daemon delta): the same
+// stop where it still is, by kind and, for a row, by its id (a stop without
+// one, a suggestion, by its index); else the old index, kept in range.
+function cursorAfter(before, index, after) {
+  var next = Array.isArray(after) ? after : []
+  if (next.length === 0) return 0
+  var prev = Array.isArray(before) && before.length > 0 ? before[clampCursor(index, before.length)] : null
+  if (isPlainObject(prev) && typeof prev.kind === "string") {
+    var keyed = stopHasIndex(prev.kind)
+    var id = typeof prev.id === "string" && prev.id !== "" ? prev.id : ""
+    for (var i = 0; i < next.length; i++) {
+      var s = next[i]
+      if (!isPlainObject(s) || s.kind !== prev.kind) continue
+      if (!keyed || (id !== "" ? s.id === id : s.index === prev.index)) return i
+    }
+  }
+  return clampCursor(index, next.length)
 }
 
 // ---------------------------------------------------------------- CLI path
@@ -5313,7 +5951,17 @@ function backgroundRowShown(record) {
   return mediaSupported(record) && backgroundOffered(record)
 }
 
-// The Background row, exactly as drawn:
+// Whether the Background row is drawn now: it can be (backgroundRowShown)
+// and the background effect's choice shown is the replacement background
+// (the image is what that choice uses; the draft counts, so the row comes
+// with the click).
+function backgroundRowDrawn(record, drafts) {
+  if (!backgroundRowShown(record)) return false
+  var mode = effectModeView(record, drafts)
+  return mode.visible && mode.value === BACKGROUND_REPLACE
+}
+
+// The Background row, exactly as drawn (only while backgroundRowDrawn):
 //   { visible, label, source, video, buttons: [{ label, enabled, tooltip }] }
 // `source` and `video` are the thumbnail's (mediaThumb of the raw path over
 // `media`, the last background gallery read, or null: a still's own file,
@@ -5323,9 +5971,9 @@ function backgroundRowShown(record) {
 // button 0, Add... button 1; each is disabled, its tooltip saying why, while
 // its tool is not on PATH (`tools`, the Daemon's probe), and both while a
 // flow runs (`busy`).
-function backgroundRowView(record, tools, busy, media) {
+function backgroundRowView(record, tools, busy, media, drafts) {
   var out = { visible: false, label: "", source: "", video: false, buttons: [] }
-  if (!backgroundRowShown(record)) return out
+  if (!backgroundRowDrawn(record, drafts)) return out
   var t = isPlainObject(tools) ? tools : emptyTools()
   out.visible = true
   var thumb = mediaThumb(record.backgroundImagePath, media)

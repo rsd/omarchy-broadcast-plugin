@@ -48,6 +48,22 @@ TestCase {
   function line(obj) { return JSON.stringify(obj) }
   function kindsOf(stops) { return JSON.stringify(stops.map(function(s) { return s.kind })) }
 
+  // Model.cursorStops from the panel's parts, positionally: the camera count
+  // drawn, whether the preview can run (then its strip's Show preview is a
+  // stop), the tab, the three settings views, the health and the battery
+  // saver; "More" open, every "Not available now" line closed.
+  function stopsOf(record, cameraCount, previewControls, tab, settings, effectSettings, micSettings, health, batterySaver, extra) {
+    var shown = Model.panelTabValue(tab)
+    var view = shown === "camera" ? settings : (shown === "mic" ? micSettings : effectSettings)
+    var p = { cameraCount: cameraCount, previewControls: previewControls === true,
+              preview: previewControls === true ? { mode: "strip", button: "show" } : { mode: "none", button: "" },
+              tab: tab, settings: settings, effectSettings: effectSettings, micSettings: micSettings, health: health,
+              batterySaver: batterySaver, backgroundRow: Model.backgroundRowDrawn(record, null), moreOpen: true,
+              notAvailable: Model.notAvailableView(view, false) }
+    for (var k in extra) p[k] = extra[k]
+    return Model.cursorStops(record, p)
+  }
+
   function snap(overrides) {
     return Model.reduce(Model.emptyRecord("connecting"), line(snapshotObject(overrides || {}))).record
   }
@@ -232,7 +248,7 @@ TestCase {
     compare(Model.intentArgv({ verb: "enable", on: true }, cli, r), null)
     compare(Model.intentArgv({ verb: "select", id: fhdId }, cli, r), null)
     verify(!Model.canNext(r))
-    compare(Model.cursorStops(r, 2).length, 0)
+    compare(stopsOf(r, 2).length, 0)
     compare(Model.statsRows(r).length, 0)
     compare(Model.stateLabel(r), "unsupported state")
     compare(Model.tooltipText(r), "Omarchy Broadcast: unsupported state")
@@ -487,25 +503,35 @@ TestCase {
   function test_cursor_stops() {
     var r = Model.reduce(snap(), line({ v: 1, type: "cameras", active_camera: brioId,
       cameras: cameraObjects().concat([{ id: "third", name: "Third", usb: "", active: false }]), cameras_truncated: false })).record
-    var stops = Model.cursorStops(r, r.cameras.length, false, "camera")
+    var stops = stopsOf(r, r.cameras.length, false, "camera")
     compare(JSON.stringify(stops.map(function(s) { return s.kind + s.index })),
-            JSON.stringify(["switch-1", "tabs-1", "camera0", "camera1", "camera2", "next-1"]))
-    compare(Model.cursorStops(r, 2, false, "camera").length, 5, "follows the rendered row count")
+            JSON.stringify(["switch-1", "info-1", "tabs-1", "camera-1"]), "one stop for the camera dropdown")
+    compare(stopsOf(r, 0, false, "camera").length, 3, "no camera: no dropdown")
     var one = snap({ cameras: [cameraObjects()[0]] })
-    compare(kindsOf(Model.cursorStops(one, 1, false, "camera")), JSON.stringify(["switch", "tabs", "camera"]))
-    compare(kindsOf(Model.cursorStops(one, 1, false, "effect")), JSON.stringify(["switch", "tabs"]), "a daemon below revision 9: no effect row")
-    compare(kindsOf(Model.cursorStops(one, 1, false, "status")), JSON.stringify(["switch", "tabs"]), "the Status tab has no control")
-    compare(kindsOf(Model.cursorStops(one, 1, false)), kindsOf(Model.cursorStops(one, 1, false, "effect")), "no tab: the default")
-    compare(kindsOf(Model.cursorStops(one, 1, false, "bogus")), kindsOf(Model.cursorStops(one, 1, false, "effect")), "unknown tab: the default")
-    compare(kindsOf(Model.cursorStops(one, 1, false, "Camera")), kindsOf(Model.cursorStops(one, 1, false, "effect")), "exact words only")
-    compare(Model.cursorStops(Model.emptyRecord("not-running"), 3, true, "camera").length, 0)
+    compare(kindsOf(stopsOf(one, 1, false, "camera")), JSON.stringify(["switch", "info", "tabs", "camera"]))
+    compare(kindsOf(stopsOf(one, 1, false, "effect")), JSON.stringify(["switch", "info", "tabs"]), "a daemon below revision 9: no effect row")
+    compare(kindsOf(stopsOf(one, 1, false, "status")), kindsOf(stopsOf(one, 1, false, "effect")), "a stored Status tab reads as the default")
+    compare(kindsOf(stopsOf(one, 1, false)), kindsOf(stopsOf(one, 1, false, "effect")), "no tab: the default")
+    compare(kindsOf(stopsOf(one, 1, false, "bogus")), kindsOf(stopsOf(one, 1, false, "effect")), "unknown tab: the default")
+    compare(kindsOf(stopsOf(one, 1, false, "Camera")), kindsOf(stopsOf(one, 1, false, "effect")), "exact words only")
+    compare(kindsOf(Model.cursorStops(one, { tab: "camera", cameraCount: 1, details: true })),
+            JSON.stringify(["switch", "info", "details-back", "details-copy"]), "the Details view: its Back and Copy, no tab")
+    compare(kindsOf(Model.cursorStops(one, { tab: "camera", cameraCount: 1, preview: { mode: "frame" }, previewControls: true, wide: true })),
+            JSON.stringify(["switch", "info", "preview", "grid", "fps", "tabs", "camera"]), "wide: the frame's Hide, grid and rate, then the tabs")
+    compare(kindsOf(Model.cursorStops(one, { tab: "camera", cameraCount: 1, preview: { mode: "frame" }, previewControls: true })),
+            JSON.stringify(["switch", "info", "tabs", "preview", "grid", "fps", "camera"]), "narrow: the tabs, then the frame drawn under them")
+    compare(kindsOf(Model.cursorStops(one, { tab: "camera", cameraCount: 1, preview: { mode: "frame" }, previewControls: false })),
+            JSON.stringify(["switch", "info", "tabs", "camera"]), "no control over a frame that cannot run")
+    compare(kindsOf(Model.cursorStops(one, { tab: "camera", cameraCount: 1, preview: { mode: "strip", button: "" } })),
+            JSON.stringify(["switch", "info", "tabs", "camera"]), "a strip without a button is no stop")
+    compare(kindsOf(Model.cursorStops(one, null)), JSON.stringify(["switch", "info", "tabs"]), "no parts: the header and the tab row")
+    compare(stopsOf(Model.emptyRecord("not-running"), 3, true, "camera").length, 0)
     compare(Model.clampCursor(-3, 5), 0)
     compare(Model.clampCursor(9, 5), 4)
     compare(Model.clampCursor(2, 0), 0)
-    compare(Model.stopIndex(stops, "camera", 2), 4)
-    compare(Model.stopIndex(stops, "tabs", -1), 1)
-    compare(Model.stopIndex(stops, "next", -1), 5)
-    compare(Model.stopIndex(stops, "camera", 7), -1)
+    compare(Model.stopIndex(stops, "camera", -1), 3)
+    compare(Model.stopIndex(stops, "tabs", -1), 2)
+    compare(Model.stopIndex(stops, "next", -1), -1, "no Next camera: the dropdown")
     compare(Model.stopIndex(stops, "effect", -1), -1, "another tab's stop")
   }
 
@@ -1021,11 +1047,11 @@ TestCase {
     var r = withGlobals({ cameras: one }, { effect: "blur" })
     var cam = Model.settingsView(r, {}, {})
     var fx = Model.effectSettingsView(r, {})
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", cam, fx)), JSON.stringify(["switch", "tabs", "effect", "setting", "setting"]))
+    compare(kindsOf(stopsOf(r, 1, false, "effect", cam, fx)), JSON.stringify(["switch", "info", "tabs", "effect", "setting", "setting"]))
     var noBg = feedAll(snap(rev9({ cameras: one })), setLines(brioGroups().concat([globalGroups()[1]]))).record
-    compare(kindsOf(Model.cursorStops(noBg, 1, false, "effect", Model.settingsView(noBg, {}, {}), Model.effectSettingsView(noBg, {}))),
-            JSON.stringify(["switch", "tabs", "setting"]), "no effect row without a background effect")
-    compare(kindsOf(Model.cursorStops(snap({ cameras: one, denoise: true }), 1, false, "effect")), JSON.stringify(["switch", "tabs"]),
+    compare(kindsOf(stopsOf(noBg, 1, false, "effect", Model.settingsView(noBg, {}, {}), Model.effectSettingsView(noBg, {}))),
+            JSON.stringify(["switch", "info", "tabs", "setting"]), "no effect row without a background effect")
+    compare(kindsOf(stopsOf(snap({ cameras: one, denoise: true }), 1, false, "effect")), JSON.stringify(["switch", "info", "tabs"]),
             "below revision 9: no effect stops, no noise removal switch")
   }
 
@@ -1117,11 +1143,12 @@ TestCase {
     var activeLoopback = previewRecord("active", 1, 0)
     var activePipewire = previewRecord("active", 0, 1)
     var startingLoopback = previewRecord("starting", 1, 0)
-    // R1: the switch off never starts or holds the camera
+    // R1: hidden (the switch off) never starts or holds the camera, and the
+    // panel then draws a strip, so frames of a camera others use are not read
     compare(Model.shouldPreview(1, true, false, idle), false, "switch off, idle")
     compare(Model.shouldPreview(1, true, false, activeOnlyPreview), false, "switch off, active for preview leases only")
-    compare(Model.shouldPreview(1, true, false, activeLoopback), true, "switch off, active, loopback 1")
-    compare(Model.shouldPreview(1, true, false, activePipewire), true, "switch off, active, PipeWire 1")
+    compare(Model.shouldPreview(1, true, false, activeLoopback), false, "hidden, active, loopback 1: a strip, no frames")
+    compare(Model.shouldPreview(1, true, false, activePipewire), false, "hidden, active, PipeWire 1")
     compare(Model.shouldPreview(1, true, false, startingLoopback), false, "switch off, starting: not active yet")
     compare(Model.shouldPreview(1, true, false, snap({ state: "active" })), false, "unknown split")
     // the switch on starts it in any state the daemon can show
@@ -1302,7 +1329,7 @@ TestCase {
     compare(badPath.text, "Preview unavailable: XDG_RUNTIME_DIR is not set")
     var idle = placeholderFor({})
     compare(idle.mode, "note", "nothing shown or starting: one line, no empty frame area")
-    compare(idle.text, "Camera idle; turn on Preview to start it")
+    compare(idle.text, "Preview off", "the strip's Show preview says the rest")
     compare(idle.error, false)
     var activeOff = placeholderFor({ record: previewRecord("active", 0, 0) })
     compare(activeOff.text, "Preview off", "active for other previews only")
@@ -1342,13 +1369,13 @@ TestCase {
     compare(Model.previewControlsShown(r5, ""), true)
     compare(Model.previewControlsShown(r5, "XDG_RUNTIME_DIR is not set"), false)
     compare(Model.previewControlsShown(previewRecord("idle", 0, 0, 4), ""), false)
-    compare(kindsOf(Model.cursorStops(r5, 2, true, "effect")), JSON.stringify(["switch", "preview", "fps", "tabs"]))
-    compare(kindsOf(Model.cursorStops(r5, 2, true, "camera")), JSON.stringify(["switch", "preview", "fps", "tabs", "camera", "camera", "next"]))
-    compare(kindsOf(Model.cursorStops(r5, 2, true, "status")), JSON.stringify(["switch", "preview", "fps", "tabs"]))
-    var without = Model.cursorStops(r5, 2, false).map(function(s) { return s.kind })
+    compare(kindsOf(stopsOf(r5, 2, true, "effect")), JSON.stringify(["switch", "info", "tabs", "preview"]), "narrow: the strip under the tab row")
+    compare(kindsOf(stopsOf(r5, 2, true, "camera")), JSON.stringify(["switch", "info", "tabs", "preview", "camera"]))
+    compare(kindsOf(stopsOf(r5, 2, true, "mic")), JSON.stringify(["switch", "info", "tabs", "preview"]))
+    var without = stopsOf(r5, 2, false).map(function(s) { return s.kind })
     compare(without.indexOf("preview"), -1)
-    compare(Model.cursorStops(r5, 2).length, without.length, "no previewControls: no preview stops")
-    compare(JSON.stringify(Model.cursorStops(Model.withLink("not-running"), 2, true)), "[]")
+    compare(stopsOf(r5, 2).length, without.length, "no previewControls: no preview stops")
+    compare(JSON.stringify(stopsOf(Model.withLink("not-running"), 2, true)), "[]")
     var fps = Model.fpsOptions(30)
     compare(JSON.stringify(fps.map(function(o) { return o.value })), "[15,30]")
     compare(fps[1].selected, true)
@@ -1825,7 +1852,7 @@ TestCase {
       var view = Model.settingsView(all, "g" + gi, {})
       compare(view.groups.length, 5, "a group cut to nothing by the row cap is drawn, to say so")
       compare(view.rowCount, gi < 4 ? 16 : 0, "one group open: its rows only")
-      compare(Model.cursorStops(all, 0, false, "camera", view).filter(function(s) { return s.kind === "setting" }).length, view.rowCount,
+      compare(stopsOf(all, 0, false, "camera", view).filter(function(s) { return s.kind === "setting" }).length, view.rowCount,
               "the keyboard walks exactly the rows drawn")
       compare(view.groups[gi].truncation, gi < 4 ? "" : "Showing 0 of 16 settings")
     }
@@ -2225,21 +2252,27 @@ TestCase {
     compare(v.groups[1].glyph, Model.GLYPH_COLLAPSED)
     compare(v.rowCount, 5)
     var kinds = function(view) {
-      return JSON.stringify(Model.cursorStops(r, 1, false, "camera", view).map(function(s) { return s.kind + s.index }))
+      return JSON.stringify(stopsOf(r, 1, false, "camera", view).map(function(s) { return s.kind + s.index }))
     }
-    compare(kinds(v), JSON.stringify(["switch-1", "tabs-1", "camera0", "reset-1", "group0", "setting0", "setting1", "setting2", "setting3", "setting4",
-                                      "group1", "group2", "group3"]), "Reset first: it is on the settings' title line")
+    compare(kinds(v), JSON.stringify(["switch-1", "info-1", "tabs-1", "camera-1", "group0", "setting0", "setting1", "setting2", "setting3", "setting4",
+                                      "group1", "group2", "group3", "reset-1"]), "Reset last: a quiet link at the bottom")
     var open = Model.settingsView(r, "exposure", {})
-    compare(kinds(open), JSON.stringify(["switch-1", "tabs-1", "camera0", "reset-1", "group0", "group1", "group2", "setting0", "setting1", "setting2",
-                                         "setting3", "setting4", "group3"]), "opening Exposure closed Image")
-    var t = Model.viewRow(open, 1)
-    compare(t.id, "camera.exposure.exposure_time_absolute")
-    compare(t.enabled + ":" + t.reason, "false:Set exposure to manual to change this", "a greyed row is drawn, with its reason, and is a stop")
-    compare(t.valueText, "1250 ×100 µs")
+    compare(kinds(open), JSON.stringify(["switch-1", "info-1", "tabs-1", "camera-1", "group0", "group1", "group2", "setting0", "setting1", "setting2",
+                                         "setting3", "group3", "reset-1"]), "opening Exposure closed Image; its manual time hidden")
+    compare(Model.viewRow(open, 1).id, "camera.exposure.gain", "the exposure time is hidden while its rule fails")
     compare(Model.viewRow(open, 0).widget, "segmented")
-    compare(Model.viewRow(open, 3).widget, "switch")
+    compare(Model.viewRow(open, 2).widget, "switch")
     compare(Model.viewRow(open, 9), null)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", v)), JSON.stringify(["switch", "tabs"]),
+    compare(Model.viewRow(v, 4).widget, "switch", "an int of two values is a switch")
+    compare(Model.viewRow(v, 4).checked, true, "at its maximum: on")
+    // manual: the time is revealed under the mode, at depth 1
+    var manual = feedAll(r, [deltaLine([{ id: "camera.exposure.auto_exposure", value: "manual", stored: true, enabled: true, disabled_reason: "" },
+                                             { id: "camera.exposure.exposure_time_absolute", value: 1250, stored: false, enabled: true, disabled_reason: "" }])]).record
+    var t = Model.viewRow(Model.settingsView(manual, "exposure", {}), 1)
+    compare(t.id, "camera.exposure.exposure_time_absolute")
+    compare(t.depth, 1, "under its master")
+    compare(t.valueText, "1250 ×100 µs")
+    compare(kindsOf(stopsOf(r, 1, false, "effect", v)), JSON.stringify(["switch", "info", "tabs"]),
             "the settings are stops on the Camera tab only")
     // a draft shows until it is confirmed
     var d = {}
@@ -2257,12 +2290,12 @@ TestCase {
     compare(JSON.stringify(Model.settingsView(other, {}, {}).groups.map(function(g) { return g.expanded })), JSON.stringify([true, false]))
     // the hint replaces everything: no stops
     var old = snap({ cameras: [cameraObjects()[0]] })
-    compare(kinds(Model.settingsView(old, {}, {})), JSON.stringify(["switch-1", "tabs-1", "camera0"]))
-    compare(kinds(undefined), JSON.stringify(["switch-1", "tabs-1", "camera0"]))
-    verify(Model.stopHasIndex("group") && Model.stopHasIndex("setting") && Model.stopHasIndex("camera") && !Model.stopHasIndex("reset"))
-    var stops = Model.cursorStops(r, 1, true, "camera", v)
-    compare(Model.stopIndex(stops, "setting", 2), 9, "after the preview's two stops, the tab row, the camera row, Reset and the header")
-    compare(Model.stopIndex(stops, "group", 3), 14)
+    compare(kinds(Model.settingsView(old, {}, {})), JSON.stringify(["switch-1", "info-1", "tabs-1", "camera-1"]))
+    compare(kinds(undefined), JSON.stringify(["switch-1", "info-1", "tabs-1", "camera-1"]))
+    verify(Model.stopHasIndex("group") && Model.stopHasIndex("setting") && !Model.stopHasIndex("camera") && !Model.stopHasIndex("reset"))
+    var stops = stopsOf(r, 1, true, "camera", v)
+    compare(Model.stopIndex(stops, "setting", 2), 8, "after the header's two stops, the strip's button, the tab row, the camera dropdown and the group's header")
+    compare(Model.stopIndex(stops, "group", 3), 13)
     compare(Model.openGroupId({ image: true }, r.settings), "image", "anything but a group id or \"\" reads as the default")
     compare(Model.openGroupId("nope", r.settings), "image", "a group the set does not have: the default")
     compare(Model.openGroupId("focus", r.settings), "focus")
@@ -2467,7 +2500,7 @@ TestCase {
     var r = withAutoFrame(true, { stage_values: [zoomEntry(1.24)] })
     var v = Model.effectSettingsView(r, {})
     compare(liveOf(v, "auto_frame"), "Zoom 1.24\u00d7")
-    compare(liveOf(v, "background"), "", "another group has none")
+    compare(liveOf(v, "background"), null, "the background group draws nothing while the effect is off (its strength is hidden)")
     compare(liveOf(v, "video"), "")
     compare(Model.groupLiveText(r, "auto_frame"), "Zoom 1.24\u00d7")
     compare(Model.groupLiveText(r, "background"), "")
@@ -2496,8 +2529,12 @@ TestCase {
     compare(v.reset, false)
     compare(v.title, "")
     compare(JSON.stringify(v.groups.map(function(g) { return g.id + ":" + g.expanded + ":" + g.rows.map(function(x) { return x.id }).join(",") })),
-            JSON.stringify(["background:true:" + strengthId, "video:true:" + denoiseId]),
-            "every global group open, the effect choice left to the dedicated row")
+            JSON.stringify(["background-follows:true:" + strengthId, "video:true:" + denoiseId]),
+            "every global group open, the effect choice left to the dedicated row, its dependents first")
+    compare(v.groups[0].lead, true, "the choice's dependents: drawn under the choice row")
+    compare(v.groups[0].heading, false)
+    compare(v.groups[0].rows[0].depth, 1, "under the choice")
+    compare(v.groups[1].heading, false, "a group that is one setting draws no heading")
     compare(v.rowCount, 2)
     compare(v.truncation, "")
     compare(v.groups[0].truncation, "", "the skipped setting is not a truncation")
@@ -2527,7 +2564,7 @@ TestCase {
     compare(Model.effectSettingsShown(v), false)
     compare(Model.effectRows(r).length, 0)
     compare(Model.effectModeView(r, {}).hint, Model.DAEMON_NO_EFFECTS)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", Model.settingsView(r, {}, {}), v)), JSON.stringify(["switch", "tabs"]))
+    compare(kindsOf(stopsOf(r, 1, false, "effect", Model.settingsView(r, {}, {}), v)), JSON.stringify(["switch", "info", "tabs"]))
     compare(Model.effectSettingsView(Model.withLink("not-running"), {}).visible, false)
     var cleared = Model.reduce(r, line({ v: 1, type: "settings_clear", rev: 9, serial: 2 })).record
     compare(Model.effectSettingsView(cleared, {}).visible, false)
@@ -2538,12 +2575,12 @@ TestCase {
     var v = Model.effectSettingsView(r, {})
     compare(JSON.stringify(Model.effectRows(r)), JSON.stringify([]), "no read-only strength beside the adjustable one")
     var cam = Model.settingsView(r, {}, {})
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", cam, v)), JSON.stringify(["switch", "tabs", "effect", "setting", "setting"]),
+    compare(kindsOf(stopsOf(r, 1, false, "effect", cam, v)), JSON.stringify(["switch", "info", "tabs", "effect", "setting", "setting"]),
             "the choice row, then the generic rows; no group header is a stop")
-    var stops = Model.cursorStops(r, 1, false, "effect", cam, v)
-    compare(Model.stopIndex(stops, "setting", 1), 4)
+    var stops = stopsOf(r, 1, false, "effect", cam, v)
+    compare(Model.stopIndex(stops, "setting", 1), 5)
     compare(Model.stopIndex(stops, "denoise", -1), -1)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "camera", cam, v).filter(function(s) { return s.kind === "setting" })), JSON.stringify(["setting", "setting", "setting", "setting", "setting"]),
+    compare(kindsOf(stopsOf(r, 1, false, "camera", cam, v).filter(function(s) { return s.kind === "setting" })), JSON.stringify(["setting", "setting", "setting", "setting", "setting"]),
             "the Camera tab walks the camera's view only")
     var replace = withGlobals({ cameras: [cameraObjects()[0]], effect: "replace", background_image: "/tmp/a.png" }, { effect: "replace" })
     compare(Model.effectRows(replace).map(function(x) { return x.label }).join(","), "Background image", "the image row stays")
@@ -2552,10 +2589,12 @@ TestCase {
   function test_global_row_disabled_with_its_reason() {
     var r = withGlobals({ cameras: [cameraObjects()[0]] }, { effect: "none", denoiseOk: false })
     var v = Model.effectSettingsView(r, {})
-    var strength = Model.viewRow(v, 0)
-    compare(strength.enabled + ":" + strength.reason, "false:Choose Blur to change this")
-    var dn = Model.viewRow(v, 1)
-    compare(dn.enabled + ":" + dn.reason + ":" + dn.value, "false:Not installed:false")
+    compare(Model.findSetting(r, strengthId).enabled, false)
+    compare(v.groups.map(function(g) { return g.id }).join(","), "video", "the strength is hidden while its rule fails (no kind: an older daemon)")
+    var dn = Model.viewRow(v, 0)
+    compare(dn.enabled + ":" + dn.reason + ":" + dn.value, "false:Not installed:false", "no kind and no rule: greyed in place, as before")
+    compare(dn.greyed, true)
+    compare(dn.help, "Not installed", "its reason, under the cursor")
     compare(Model.settingDescription(dn), "Unavailable. Off. Not installed")
     // refused: a greyed row never runs
     var go = function(id, value) { return Model.intentArgv({ verb: "setting", id: id, value: value, camera: brioId }, cli, r) }
@@ -2563,6 +2602,7 @@ TestCase {
     compare(go(denoiseId, true), null)
     // a delta enables it
     var d = Model.reduce(r, line(deltaLine([{ id: strengthId, value: 50, stored: false, enabled: true, disabled_reason: "" }]))).record
+    compare(Model.viewRow(Model.effectSettingsView(d, {}), 0).id, strengthId, "enabled: shown, under the choice")
     compare(Model.viewRow(Model.effectSettingsView(d, {}), 0).enabled, true)
   }
 
@@ -2601,8 +2641,8 @@ TestCase {
     compare(cam.groups.length, 0)
     var v = Model.effectSettingsView(r, {})
     compare(v.visible, true)
-    compare(v.groups.length, 2)
-    compare(kindsOf(Model.cursorStops(r, 0, false, "camera", cam, v)), JSON.stringify(["switch", "tabs"]))
+    compare(v.groups.length, 1, "the strength hidden while the effect is off")
+    compare(kindsOf(stopsOf(r, 0, false, "camera", cam, v)), JSON.stringify(["switch", "info", "tabs"]))
     // a camera group with no camera is not a v1 line
     // is refused, and the set commits without it
     var bad = feedAll(snap(rev9({})), setLines(brioGroups(), { camera: "" })).record
@@ -2632,7 +2672,7 @@ TestCase {
     // the caps are a scope's own: sixteen camera groups leave the global ones
     var many = feedAll(snap(rev9({})), setLines(groupsOf(16, 1).concat(globalGroups()), { camera: brioId, per: 8 })).record
     compare(Model.settingsView(many, {}, {}).groups.length, 16)
-    compare(Model.effectSettingsView(many, {}).groups.length, 2)
+    compare(Model.effectSettingsView(many, {}).groups.length, 1, "the strength hidden while the effect is off")
     compare(Model.settingsView(many, {}, {}).truncation, "")
   }
 
@@ -2852,8 +2892,8 @@ TestCase {
     compare(ov.groups.length, 2, "a group of skipped rows only is drawn, to say so")
     compare(ov.groups[0].truncation, "Showing 0 of 1 settings")
     compare(ov.truncation, "")
-    compare(JSON.stringify(Model.cursorStops(o, 0, false, "camera", ov).map(function(s) { return s.kind + s.index })),
-            JSON.stringify(["switch-1", "tabs-1", "reset-1", "group0", "group1"]), "nothing to walk in it")
+    compare(JSON.stringify(stopsOf(o, 0, false, "camera", ov).map(function(s) { return s.kind + s.index })),
+            JSON.stringify(["switch-1", "info-1", "tabs-1", "group0", "group1", "reset-1"]), "nothing to walk in it")
   }
 
   // F7: a full set older than the committed one (same serial and camera)
@@ -2892,7 +2932,9 @@ TestCase {
     for (var i = 0; i < choices.length; i++)
       verify(Model.settingsView(r, choices[i], {}).groups.filter(function(g) { return g.expanded }).length <= 1, JSON.stringify(choices[i]))
     var v = Model.settingsView(r, "exposure", {})
-    var flicker = Model.viewRow(v, 4)
+    compare(v.groups[2].rows.map(function(x) { return x.id.split(".")[2] }).join(","), "auto_exposure,gain,keep_framerate,power_line_frequency",
+            "the exposure time is hidden while its rule fails (no kind: an older daemon)")
+    var flicker = Model.viewRow(v, 3)
     compare(flicker.widget, "segmented")
     compare(flicker.selectedIndex, 2)
     compare(Model.choiceCursorStart(flicker), 2, "lands on the current choice")
@@ -2907,8 +2949,10 @@ TestCase {
     var other = Model.settingsView(feedAll(snap(rev7({})), setLines(brioGroups(), { camera: fhdId })).record, "exposure", {})
     verify(other.setKey !== v.setKey, "another camera's rows have another key, whatever their place")
     // m7: a greyed row tells its value and why it is greyed
-    compare(Model.settingDescription(Model.viewRow(v, 1)), "Unavailable. 1250 ×100 µs. Set exposure to manual to change this")
-    compare(Model.settingDescription(Model.viewRow(v, 2)), "0")
+    var focus = Model.settingsView(r, "focus", {})
+    compare(Model.settingDescription(Model.viewRow(focus, 1)), "Unavailable. 40. Turn off continuous autofocus to change this",
+            "no rule and no kind: greyed in place")
+    compare(Model.settingDescription(Model.viewRow(v, 1)), "0")
     compare(Model.settingDescription({ enabled: false, valueText: "", reason: "Not now" }), "Unavailable. Not now")
     compare(Model.settingDescription(null), "")
   }
@@ -2916,12 +2960,12 @@ TestCase {
   // ---- the panel tabs and the Status tab ---------------------------------------
 
   function test_panel_tab_value() {
-    compare(JSON.stringify(Model.PANEL_TABS), JSON.stringify(["effect", "camera", "mic", "status"]))
+    compare(JSON.stringify(Model.PANEL_TABS), JSON.stringify(["effect", "camera", "mic"]))
     compare(Model.PANEL_TAB_DEFAULT, "effect")
     compare(Model.panelTabValue("effect"), "effect")
     compare(Model.panelTabValue("camera"), "camera")
     compare(Model.panelTabValue("mic"), "mic")
-    compare(Model.panelTabValue("status"), "status")
+    compare(Model.panelTabValue("status"), "effect", "the Status tab of an older version reads as the default (its Details are behind the header's (i))")
     var bad = [undefined, null, "", "Camera", " camera", "camera ", "cameras", "live", "Mic", "microphone", 1, 0, true, ["camera"], { tab: "camera" },
                "<b>status</b>", "status\n", NaN]
     for (var i = 0; i < bad.length; i++) compare(Model.panelTabValue(bad[i]), "effect", JSON.stringify(bad[i]) + " " + i)
@@ -2934,8 +2978,8 @@ TestCase {
   function test_panel_tab_options() {
     var o = Model.panelTabOptions("camera")
     compare(JSON.stringify(o.map(function(x) { return x.value })), JSON.stringify(Model.PANEL_TABS))
-    compare(JSON.stringify(o.map(function(x) { return x.label })), JSON.stringify(["Effect", "Camera", "Mic", "Status"]))
-    compare(JSON.stringify(o.map(function(x) { return x.selected })), JSON.stringify([false, true, false, false]))
+    compare(JSON.stringify(o.map(function(x) { return x.label })), JSON.stringify(["Effects", "Camera", "Mic"]))
+    compare(JSON.stringify(o.map(function(x) { return x.selected })), JSON.stringify([false, true, false]))
     compare(Model.panelTabOptions("mic")[2].selected, true)
     verify(o.every(function(x) { return typeof x.description === "string" && x.description !== "" && !/[<>&]/.test(x.description) }))
     compare(Model.panelTabOptions("junk")[0].selected, true, "anything else reads as the default")
@@ -2944,8 +2988,9 @@ TestCase {
 
   function test_settings_entry_panel_tab() {
     var settings = { cliPath: "/x", previewEnabled: true }
-    compare(JSON.stringify(Model.settingsEntry("m", settings, { panelTab: "status" })),
-            JSON.stringify({ id: "m", cliPath: "/x", previewEnabled: true, panelTab: "status" }))
+    compare(JSON.stringify(Model.settingsEntry("m", settings, { panelTab: "mic" })),
+            JSON.stringify({ id: "m", cliPath: "/x", previewEnabled: true, panelTab: "mic" }))
+    compare(Model.settingsEntry("m", settings, { panelTab: "status" }), null, "the Status tab is gone: never written")
     compare(JSON.stringify(Model.settingsEntry("m", { panelTab: "camera" }, { panelTab: "effect" })),
             JSON.stringify({ id: "m", panelTab: "effect" }), "replaces the stored tab")
     var bad = ["Camera", "", "live", 1, null, true, ["camera"], "camera "]
@@ -2953,7 +2998,7 @@ TestCase {
       compare(Model.settingsEntry("m", settings, { panelTab: bad[i] }), null, JSON.stringify(bad[i]))
     compare(Model.settingsEntry("m", settings, { panelTab: "camera", previewFps: 20 }), null, "one bad value refuses the write")
     verify(Model.settingsHold({ panelTab: "camera" }, { panelTab: "camera" }))
-    verify(!Model.settingsHold({ panelTab: "camera" }, { panelTab: "status" }))
+    verify(!Model.settingsHold({ panelTab: "camera" }, { panelTab: "mic" }))
     // a tab is no preview preference: choosing one changes neither of them
     compare(JSON.stringify(Model.previewPrefsChosen({ enabled: true, fps: 30 }, { panelTab: "status" })),
             JSON.stringify({ enabled: true, fps: 30 }))
@@ -2990,26 +3035,474 @@ TestCase {
     compare(Model.consumersByKind(Model.emptyRecord("not-running")), "")
   }
 
-  function test_status_rows() {
-    var r = snap({ consumers: 2, loopback_consumers: 1, pipewire_consumers: 1, preview_consumers: 0,
-                   pipewire_output: "streaming", interface_revision: 6 })
-    compare(JSON.stringify(Model.statusRows(r)), JSON.stringify([
-      { label: "State", value: "idle" },
-      { label: "Camera", value: "Logitech MX Brio" },
-      { label: "Consumers", value: "2" },
-      { label: "Used by", value: "Apps 1 · PipeWire 1 · Preview 0" },
-      { label: "Output", value: "NV12 1920x1080@30" },
-      { label: "PipeWire", value: "streaming" },
-      { label: "D-Bus API", value: "revision 6" }
-    ]))
-    var old = snap({ interface_revision: undefined, output_mode: "", consumers: -1, active_camera: "", active_camera_name: "" })
-    compare(JSON.stringify(Model.statusRows(old).map(function(x) { return x.label + "=" + x.value })), JSON.stringify([
-      "State=idle", "Camera=none", "Consumers=—", "Output=—", "PipeWire=—", "D-Bus API=—"]))
-    compare(Model.statusRows(Model.emptyRecord("not-running")).length, 0)
-    compare(Model.statusRows(snap({ state: "dancing" })).length, 0)
+  // ---- the visibility rule: disabled_kind (revision 28) and enabled_when, for layout only
+
+  // The effects as a revision-28 daemon publishes them: every setting with
+  // its disabled_kind. `o.nvidia` false: the machine has no NVIDIA GPU, so
+  // the Maxine stages cannot run: the module's probe reason, passed through
+  // as `unavailable` (what a typical machine without the driver gets;
+  // `o.hwKind` another kind), and with `o.provider` "onnx" the open-model
+  // module provides the cut-out: the background choice runs, and its Model
+  // and Runs on rows are live.
+  function kindGroups(o) {
+    var opt = merged({ effect: "none", relight: false, nvidia: true, provider: "maxine", hwKind: "unavailable" }, o || {})
+    var g = function(s) { return merged(s, { scope: "global" }) }
+    var off = function(reason, kind) { return { enabled: false, disabled_reason: reason, disabled_kind: kind } }
+    var hwReason = opt.hwKind === "unavailable" ? "No NVIDIA driver loaded" : "Needs an NVIDIA GPU"
+    var hw = opt.nvidia ? {} : off(hwReason, opt.hwKind)
+    // The background stage runs when Maxine or the open-model module can do it.
+    var bgRuns = opt.nvidia || opt.provider === "onnx"
+    var relightOn = opt.relight && opt.nvidia
+    var dep = function(on, reason) { return on ? {} : off(reason, "parent_off") }
+    var modeOpts = [{ value: "none", label: "Off" }, { value: "blur", label: "Blur" }, { value: "replace", label: "Replace" }]
+    return [
+      { id: "background", label: "Background effect", settings: [
+        g(enumS(modeId, "Effect", modeOpts, merged({ value: opt.effect, "default": "none", disabled_kind: "" }, bgRuns || opt.effect !== "none" ? {} : hw))),
+        g(intS(strengthId, "Blur strength", merged({ min: 0, max: 100, value: 50, "default": 50, unit: "%",
+               enabled_when: [{ id: modeId, op: "eq", value: "blur" }] }, opt.effect === "blur" ? {} : (bgRuns ? off("Choose Blur to change this", "parent_off") : hw))))] },
+      { id: "eye_contact", label: "Eye contact", settings: [
+        g(boolS("effect.eye_contact.enabled", "Eye contact", merged({ value: false }, hw))),
+        g(boolS("effect.eye_contact.look_away", "Natural look-away", merged({ value: false,
+               enabled_when: [{ id: "effect.eye_contact.enabled", op: "eq", value: true }] }, opt.nvidia ? off("Turn on eye contact to change this", "parent_off") : hw)))] },
+      { id: "video", label: "Video", settings: [
+        g(boolS(denoiseId, "Noise removal", merged({ value: false }, hw))),
+        g(boolS("effect.video.enhance", "Enhance low-resolution camera", merged({ value: false },
+               opt.nvidia ? off("The camera already captures at full resolution", "not_applicable") : hw))),
+        g(enumS("effect.video.enhance_method", "Enhancement method", [{ value: "ai", label: "AI" }, { value: "fast", label: "Fast" }],
+               merged({ enabled_when: [{ id: "effect.video.enhance", op: "eq", value: true }] }, off("Turn on enhancement to change this", "parent_off")))),
+        g(boolS("effect.video.hdr", "HDR look", merged({ value: false }, opt.nvidia ? off("Not installed", "not_installed") : hw)))] },
+      { id: "lighting", label: "Lighting", settings: [
+        g(boolS("effect.lighting.relight", "Relighting", merged({ value: relightOn }, hw))),
+        g(intS("effect.lighting.direction", "Light direction", merged({ min: -90, max: 90, step: 5, value: 0, "default": 0,
+               enabled_when: [{ id: "effect.lighting.relight", op: "eq", value: true }] }, relightOn ? {} : (opt.nvidia ? off("Turn on relighting to change this", "parent_off") : hw)))),
+        g(intS("effect.lighting.brightness", "Brightness", merged({ min: 50, max: 200, step: 5, value: 100, "default": 100,
+               enabled_when: [{ id: "effect.lighting.relight", op: "eq", value: true }] }, relightOn ? {} : (opt.nvidia ? off("Turn on relighting to change this", "parent_off") : hw))))] },
+      { id: "cutout_onnx", label: "Open-model cut-out", settings: [
+        g(enumS("effect.cutout_onnx.model", "Model", [{ value: "modnet", label: "MODNet" }],
+               opt.provider === "maxine" ? off("Handled by NVIDIA Maxine video effects instead", "other_provider") : {})),
+        g(enumS("effect.cutout_onnx.device", "Runs on", [{ value: "auto", label: "Automatic" }, { value: "cpu", label: "CPU" }],
+               opt.provider === "maxine" ? off("Handled by NVIDIA Maxine video effects instead", "other_provider") : {}))] }
+    ]
+  }
+  function kindRecord(o) {
+    return feedAll(snap(rev9({ interface_revision: 28, cameras: [cameraObjects()[0]] })), setLines(brioGroups().concat(kindGroups(o)))).record
+  }
+  function viewIds(v) {
+    return JSON.stringify(v.groups.map(function(g) {
+      return (g.heading ? g.label.toUpperCase() + ":" : "") + g.rows.map(function(r) { return (r.depth ? ">" : "") + r.label }).join(",")
+    }))
   }
 
-  // ---- review round: scope-aware camera changes, no-camera sets, per-row fallback
+  function test_disabled_kind_and_rule_parsed() {
+    compare(Model.disabledKind("parent_off"), "parent_off")
+    compare(JSON.stringify(Model.DISABLED_KINDS), JSON.stringify(["parent_off", "not_applicable", "not_installed", "needs_hardware",
+                                                                  "other_provider", "unavailable", "busy", "device"]))
+    var unknown = ["", "PARENT_OFF", "dependency", 3, null, undefined, "parent_off ", "__proto__"]
+    for (var i = 0; i < unknown.length; i++) compare(Model.disabledKind(unknown[i]), "", JSON.stringify(unknown[i]))
+    var r = kindRecord()
+    compare(Model.findSetting(r, "effect.video.hdr").kind, "not_installed")
+    compare(Model.findSetting(r, denoiseId).kind, "", "enabled: no kind")
+    var w = Model.settingWhen([{ id: "a.b", op: "eq", value: true }, { id: "a.c", op: "in", value: ["x", 2, false] }])
+    compare(JSON.stringify(w), JSON.stringify({ conditions: [{ id: "a.b", op: "eq", value: true }, { id: "a.c", op: "in", value: ["x", 2, false] }], known: true }))
+    compare(Model.settingWhen([{ id: "a.b", op: "gt", value: 1 }]).known, false, "an operator this plugin does not know")
+    compare(Model.settingWhen([{ id: "A", op: "eq", value: 1 }]).known, false, "an id off the grammar")
+    compare(Model.settingWhen([{ id: "a.b", op: "in", value: [1, 2, 3, 4, 5, 6, 7, 8, 9] }]).known, false, "an in of more than 8")
+    compare(Model.settingWhen([{ id: "a.b", op: "eq", value: { x: 1 } }]).known, false)
+    compare(Model.settingWhen("nope").conditions.length, 0)
+    compare(Model.settingWhen([1, 2, 3, 4, 5].map(function(n) { return { id: "a.b" + n, op: "eq", value: n } })).known, false, "more than 4")
+    var values = { "a.b": true, "a.c": 2 }
+    compare(Model.whenHolds(w, values), true)
+    compare(Model.whenHolds(w, { "a.b": false, "a.c": 2 }), false)
+    compare(Model.whenHolds(w, { "a.b": true }), null, "a setting the set does not hold: cannot be told")
+    compare(Model.whenHolds(Model.settingWhen([{ id: "a.b", op: "gt", value: 1 }, { id: "a.c", op: "ne", value: 2 }]), values), false,
+            "a failing known condition fails, whatever the unknown one")
+    compare(Model.whenHolds(Model.settingWhen([{ id: "a.b", op: "gt", value: 1 }]), values), null)
+    // a delta carries the kind with `enabled`
+    var d = Model.reduce(r, line(deltaLine([{ id: "effect.video.hdr", enabled: false, disabled_reason: "Busy", disabled_kind: "busy" }],
+                                           { camera: brioId }))).record
+    compare(Model.findSetting(d, "effect.video.hdr").kind, "busy")
+    var e = Model.reduce(r, line(deltaLine([{ id: "effect.video.hdr", value: true, enabled: true, disabled_reason: "" }]))).record
+    compare(Model.findSetting(e, "effect.video.hdr").kind, "", "enabled: none")
+    var old = Model.reduce(r, line(deltaLine([{ id: "effect.video.hdr", enabled: false, disabled_reason: "x" }]))).record
+    compare(Model.findSetting(old, "effect.video.hdr").kind, "", "a change without the key (an older daemon): none")
+  }
+
+  function test_kind_placement() {
+    var row = function(o) { return merged({ enabled: false, kind: "", when: { conditions: [], known: true } }, o) }
+    compare(Model.settingPlacement(row({ enabled: true }), {}), "shown")
+    compare(Model.settingPlacement(row({ kind: "parent_off" }), {}), "hidden")
+    var listed = ["not_applicable", "not_installed", "needs_hardware", "other_provider", "unavailable"]
+    for (var i = 0; i < listed.length; i++) compare(Model.settingPlacement(row({ kind: listed[i] }), {}), "unavailable", listed[i])
+    compare(Model.settingPlacement(row({ kind: "busy" }), {}), "greyed")
+    compare(Model.settingPlacement(row({ kind: "device" }), {}), "greyed")
+    // no kind (an older daemon, "" or a word not known): greyed, but a failing rule hides it
+    var rule = Model.settingWhen([{ id: "m.x", op: "eq", value: true }])
+    compare(Model.settingPlacement(row({ when: rule }), { "m.x": false }), "hidden", "older daemon: an unmet rule reads as parent_off")
+    compare(Model.settingPlacement(row({ when: rule }), { "m.x": true }), "greyed", "the rule holds, still disabled: greyed in place")
+    compare(Model.settingPlacement(row({ when: rule }), {}), "greyed", "a rule on a setting not in the set: in place")
+    compare(Model.settingPlacement(row({ kind: "busy", when: rule }), { "m.x": false }), "greyed", "a kind wins over the rule")
+    // enabled stays the daemon's: a row the plugin's rule reading says holds is never made enabled
+    var r = kindRecord()
+    var hidden = Model.findSetting(r, "effect.eye_contact.look_away")
+    compare(hidden.enabled, false)
+    compare(Model.rowMaster(hidden), "effect.eye_contact.enabled")
+    compare(Model.rowMaster(Model.findSetting(r, denoiseId)), "")
+  }
+
+  function test_kind_layout_of_the_effects() {
+    var r = kindRecord()
+    var v = Model.effectSettingsView(r, {})
+    compare(viewIds(v), JSON.stringify(["Eye contact", "Noise removal", "Relighting"]),
+            "the default: one switch per effect; a group that is one master draws no heading; dependents hidden")
+    compare(JSON.stringify(v.unavailable.map(function(e) { return e.label + "|" + e.reason + "|" + e.setup })), JSON.stringify([
+      "Enhance low-resolution camera|The camera already captures at full resolution|false",
+      "HDR look|Not installed|true",
+      "Open-model cut-out|Handled by NVIDIA Maxine video effects instead|true"]),
+      "not applicable (nothing to set up), not installed (Setup), and another module's group as one entry (Setup: the engine is chosen there)")
+    var na = Model.notAvailableView(v, false)
+    compare(na.visible, true)
+    compare(na.text, "Not available now (3)")
+    compare(na.entries.length, 0, "closed: one counted line")
+    compare(na.glyph, Model.GLYPH_COLLAPSED)
+    var open = Model.notAvailableView(v, true)
+    compare(open.entries.length, 3)
+    compare(open.glyph, Model.GLYPH_EXPANDED)
+    compare(JSON.stringify(Model.notAvailableStops(open)), JSON.stringify([{ kind: "unavailable", index: -1 },
+      { kind: "unavailable-setup", index: 1, id: "video:effect.video.hdr" }, { kind: "unavailable-setup", index: 2, id: "cutout_onnx:effect.cutout_onnx.model" }]),
+            "the line, then each Setup button, with its entry's key")
+    compare(JSON.stringify(Model.notAvailableStops(na)), JSON.stringify([{ kind: "unavailable", index: -1 }]))
+    compare(Model.notAvailableView({ unavailable: [] }, true).visible, false)
+    compare(JSON.stringify(Model.notAvailableStops(Model.notAvailableView(null, true))), "[]")
+    // a master on reveals its dependents under it
+    var lit = Model.effectSettingsView(kindRecord({ relight: true, effect: "blur" }), {})
+    compare(viewIds(lit), JSON.stringify([">Blur strength", "Eye contact", "Noise removal", "Relighting,>Light direction,>Brightness"]))
+    compare(lit.groups[0].lead, true)
+    var stops = stopsOf(kindRecord({ relight: true, effect: "blur" }), 1, false, "effect", null, lit)
+    compare(kindsOf(stops), JSON.stringify(["switch", "info", "tabs", "effect", "setting", "setting", "setting", "setting", "setting", "setting", "unavailable",
+                                            "more", "away"]))
+  }
+
+  function test_kind_no_nvidia() {
+    // No NVIDIA driver: the Maxine stages' probe reason arrives as
+    // `unavailable`, and the open-model module provides the background effect.
+    var r = kindRecord({ nvidia: false, provider: "onnx" })
+    var mode = Model.effectModeView(r, {})
+    compare(mode.visible, true, "the open-model module runs the background effect: the choice row")
+    compare(mode.enabled, true)
+    var v = Model.effectSettingsView(r, {})
+    compare(viewIds(v), JSON.stringify(["OPEN-MODEL CUT-OUT:Model,Runs on"]), "the open-model module provides: its Model and Runs on rows in the main list")
+    compare(v.groups[0].rows.map(function(x) { return x.enabled }).join(","), "true,true", "live, not greyed")
+    compare(JSON.stringify(v.unavailable.map(function(e) { return e.label + "|" + e.reason + "|" + e.setup })), JSON.stringify([
+      "Eye contact|No NVIDIA driver loaded|true", "Noise removal|No NVIDIA driver loaded|true",
+      "Enhance low-resolution camera|No NVIDIA driver loaded|true", "HDR look|No NVIDIA driver loaded|true", "Relighting|No NVIDIA driver loaded|true"]),
+      "each stage once (its dependents are not listed apart from it), each with Setup")
+    compare(Model.notAvailableView(v, false).text, "Not available now (5)")
+    compare(kindsOf(stopsOf(r, 1, false, "effect", null, v)), JSON.stringify(["switch", "info", "tabs", "effect", "setting", "setting", "unavailable", "more", "away"]))
+    // the driver loaded, no GPU: needs_hardware, Setup too
+    var hw = Model.effectSettingsView(kindRecord({ nvidia: false, provider: "onnx", hwKind: "needs_hardware" }), {})
+    compare(hw.unavailable.map(function(e) { return e.reason + "|" + e.setup })[0], "Needs an NVIDIA GPU|true")
+  }
+
+  function test_not_available_setup_kinds() {
+    var setup = ["unavailable", "needs_hardware", "not_installed", "other_provider"]
+    for (var i = 0; i < setup.length; i++) compare(Model.notAvailableSetup(setup[i]), true, setup[i])
+    var none = ["not_applicable", "parent_off", "busy", "device", "", undefined, "__proto__"]
+    for (var j = 0; j < none.length; j++) compare(Model.notAvailableSetup(none[j]), false, String(none[j]))
+  }
+
+  function test_not_available_count_is_real() {
+    var list = []
+    for (var i = 0; i < Model.SETTINGS_ROW_CAP + 5; i++) list.push({ key: "g:x" + i, label: "X" + i, reason: "No", setup: false })
+    var closed = Model.notAvailableView({ unavailable: list }, false)
+    compare(closed.count, Model.SETTINGS_ROW_CAP + 5, "the real count, not the cap")
+    compare(closed.text, "Not available now (" + (Model.SETTINGS_ROW_CAP + 5) + ")")
+    compare(closed.note, "")
+    var open = Model.notAvailableView({ unavailable: list }, true)
+    compare(open.entries.length, Model.SETTINGS_ROW_CAP, "the rows drawn are capped")
+    compare(open.note, "Showing " + Model.SETTINGS_ROW_CAP + " of " + (Model.SETTINGS_ROW_CAP + 5) + " entries")
+    compare(Model.notAvailableView({ unavailable: list.slice(0, 2) }, true).note, "", "not cut: no note")
+  }
+
+  function test_camera_tab_all_unavailable_draws_its_line() {
+    // Every camera row in the "Not available now" list: the section is drawn
+    // (its line), so the line's cursor stop is a drawn one.
+    var groups = [{ id: "image", label: "Image", settings: [
+      intS("camera.image.x", "X", { enabled: false, disabled_reason: "No", disabled_kind: "not_applicable" }),
+      intS("camera.image.y", "Y", { enabled: false, disabled_reason: "No", disabled_kind: "not_applicable" })] }]
+    var r = feedAll(snap(rev7({ interface_revision: 28 })), setLines(groups)).record
+    var v = Model.settingsView(r, null, {})
+    compare(v.groups.length, 0)
+    compare(v.hint, "", "not the empty-camera sentence: there is something to say")
+    compare(v.visible, true, "drawn: the Not available now line")
+    var na = Model.notAvailableView(v, false)
+    compare(na.text, "Not available now (2)")
+    var stops = stopsOf(r, 1, false, "camera", v, null, null, null, null, { notAvailable: na })
+    compare(kindsOf(stops).indexOf("unavailable") >= 0, true)
+  }
+
+  function test_cursor_anchored_by_row() {
+    var a = [{ kind: "switch", index: -1 }, { kind: "tabs", index: -1 }, { kind: "setting", index: 0, id: "x.a" },
+             { kind: "setting", index: 1, id: "x.b" }, { kind: "unavailable", index: -1 }]
+    // a row revealed above the cursor (on x.b): it stays on x.b
+    var b = [{ kind: "switch", index: -1 }, { kind: "tabs", index: -1 }, { kind: "setting", index: 0, id: "x.a" },
+             { kind: "setting", index: 1, id: "x.a1" }, { kind: "setting", index: 2, id: "x.b" }, { kind: "unavailable", index: -1 }]
+    compare(Model.cursorAfter(a, 3, b), 4, "a reveal above: same row")
+    compare(Model.cursorAfter(b, 4, a), 3, "a hide above: same row")
+    compare(Model.cursorAfter(a, 4, b), 5, "a stop of one kind: by its kind")
+    compare(Model.cursorAfter(b, 3, a), 3, "its own row gone: the index, kept")
+    compare(Model.cursorAfter(b, 5, a.slice(0, 2)), 1, "kept in range")
+    compare(Model.cursorAfter(a, 0, []), 0)
+    compare(Model.cursorAfter(null, 2, a), 2, "nothing before: the index")
+    var s1 = [{ kind: "suggestion", index: 0 }, { kind: "suggestion", index: 1 }]
+    compare(Model.cursorAfter(s1, 1, [{ kind: "tabs", index: -1 }].concat(s1)), 2, "no id: by index")
+    // the stops of the views carry the row ids
+    var lit = kindRecord({ relight: true })
+    var v = Model.effectSettingsView(lit, {})
+    var stops = stopsOf(lit, 1, false, "effect", null, v)
+    var ids = stops.filter(function(st) { return st.kind === "setting" }).map(function(st) { return st.id })
+    compare(JSON.stringify(ids), JSON.stringify(["effect.eye_contact.enabled", denoiseId, "effect.lighting.relight",
+                                                 "effect.lighting.direction", "effect.lighting.brightness"]))
+  }
+
+  function test_preview_held_where_drawn() {
+    var narrow = Model.panelLayout(true, true, true)
+    var wide = Model.panelLayout(false, true, true)
+    compare(Model.previewHeld(true, narrow, "effect"), true)
+    compare(Model.previewHeld(true, narrow, "camera"), true)
+    compare(Model.previewHeld(true, narrow, "mic"), false, "narrow Mic tab: no preview drawn, none held (the camera is not kept streaming)")
+    compare(Model.previewHeld(true, wide, "mic"), true, "wide: the preview column stays on every tab")
+    compare(Model.previewHeld(false, wide, "effect"), false, "closed: nothing held")
+    compare(Model.previewHeld(true, null, "nope"), true, "an unknown tab reads as the default")
+  }
+
+  // A preview that fails on the wide layout's Mic tab: the layout does not
+  // follow the error placeholder, so the hold stays, the failure is not
+  // cleared and nothing relaunches (the panel never flaps 920/520).
+  function test_preview_error_keeps_the_layout_and_the_hold() {
+    var failed = { mode: "note", text: "Preview stopped by signal 9", error: true }
+    var wide = Model.panelLayout(false, true, true)
+    compare(JSON.stringify(wide), JSON.stringify({ wide: true, width: 920 }))
+    compare(Model.previewHeld(true, wide, "mic"), true, "held on the Mic tab while it fails")
+    compare(JSON.stringify(Model.previewStripView(failed, true, true, wide, "mic")),
+            JSON.stringify({ mode: "frame", text: "Preview stopped by signal 9", error: true, button: "" }),
+            "the error inside the wide frame area")
+    compare(JSON.stringify(Model.previewStripView(failed, true, true, wide, "effect")),
+            JSON.stringify({ mode: "frame", text: "Preview stopped by signal 9", error: true, button: "" }))
+    // the placeholder is not an input: the old signature's placeholder in
+    // the switch's place reads as not shown
+    compare(Model.panelLayout(false, failed, true).wide, false, "a placeholder is never the switch")
+    compare(Model.panelLayout(false, { mode: "image" }, true).wide, false)
+  }
+
+  function test_bar_hand_over() {
+    compare(Model.barHandOver(true), true, "the widget is complete: the bar's hand-over")
+    compare(Model.barHandOver(false), false, "the base widget's default, as the widget is created")
+    compare(Model.barHandOver(undefined), false)
+    compare(Model.barHandOver("true"), false)
+  }
+
+  function test_group_breaks() {
+    var g = function(heading, lead) { return { heading: heading, lead: lead === true } }
+    var list = Model.markGroupBreaks([g(false, true), g(false), g(false), g(true), g(false), g(false), g(true)], true, true)
+    compare(list.map(function(x) { return x.breakAbove }).join(","), ",rule,,gap,rule,,gap",
+            "the lead is the section above; a headless group after a headed section is ruled off; headed groups get a gap")
+    compare(Model.markGroupBreaks([g(true), g(false)], false, false).map(function(x) { return x.breakAbove }).join(","), ",rule",
+            "the first group, nothing above: no gap")
+    var v = Model.effectSettingsView(kindRecord({ relight: true }), {})
+    compare(v.groups.map(function(x) { return x.breakAbove }).join(","), "rule,,", "under the Background heading: one rule, then rows of one rhythm")
+    var old = kindGroups()
+    for (var a = 0; a < old.length; a++) for (var b = 0; b < old[a].settings.length; b++) delete old[a].settings[b].disabled_kind
+    var ov = Model.effectSettingsView(feedAll(snap(rev9({ cameras: [cameraObjects()[0]] })), setLines(brioGroups().concat(old))).record, {})
+    compare(ov.groups.map(function(x) { return (x.heading ? "H" : "-") + x.breakAbove }).join(","), "-rule,Hgap,-rule,Hgap",
+            "Relighting after the VIDEO section is ruled off from it")
+  }
+
+  function test_kind_older_daemon_fallback() {
+    // no disabled_kind at all: a failing rule hides, everything else is greyed in place
+    var groups = kindGroups()
+    for (var g = 0; g < groups.length; g++) for (var i = 0; i < groups[g].settings.length; i++) delete groups[g].settings[i].disabled_kind
+    var r = feedAll(snap(rev9({ cameras: [cameraObjects()[0]] })), setLines(brioGroups().concat(groups))).record
+    var v = Model.effectSettingsView(r, {})
+    compare(viewIds(v), JSON.stringify(["Eye contact", "VIDEO:Noise removal,Enhance low-resolution camera,HDR look", "Relighting",
+                                        "OPEN-MODEL CUT-OUT:Model,Runs on"]))
+    compare(v.unavailable.length, 0, "nothing in the list without the key")
+    compare(Model.viewRow(v, 2).greyed, true)
+    compare(Model.viewRow(v, 2).help, "The camera already captures at full resolution", "its reason under the cursor")
+    compare(Model.notAvailableView(v, false).visible, false)
+  }
+
+  function test_kind_greyed_in_place_and_nesting() {
+    // busy and device stay where they are, greyed, the reason on hover
+    var groups = [{ id: "white_balance", label: "White balance", settings: [
+      boolS("camera.white_balance.white_balance_automatic", "Automatic white balance", { value: false }),
+      intS("camera.white_balance.white_balance_temperature", "Temperature", { min: 2000, max: 7500, value: 4000, "default": 5000,
+           enabled_when: [{ id: "camera.white_balance.white_balance_automatic", op: "eq", value: false }] }),
+      intS("camera.white_balance.red", "Red", { enabled: false, disabled_reason: "The camera holds this while streaming", disabled_kind: "busy",
+           description: "The red gain" }),
+      intS("camera.white_balance.blue", "Blue", { enabled: false, disabled_reason: "Read-only on this camera", disabled_kind: "device" })] }]
+    var r = feedAll(snap(rev7({ interface_revision: 28 })), setLines(groups)).record
+    var v = Model.settingsView(r, null, {})
+    var rows = v.groups[0].rows
+    compare(rows.map(function(x) { return x.label + ":" + x.depth + ":" + x.greyed }).join(","),
+            "Automatic white balance:0:false,Temperature:1:false,Red:0:true,Blue:0:true", "the manual row under the auto switch; busy and device in place")
+    compare(rows[2].help, "The camera holds this while streaming. The red gain", "the reason, then the description")
+    compare(rows[0].help, "", "nothing to say")
+    compare(v.unavailable.length, 0)
+    // the auto switch on: the manual row hidden
+    var auto = Model.reduce(r, line(deltaLine([{ id: "camera.white_balance.white_balance_automatic", value: true, enabled: true },
+      { id: "camera.white_balance.white_balance_temperature", enabled: false, disabled_reason: "Turn off automatic white balance to change this",
+        disabled_kind: "parent_off" }], { rev: 6, serial: 2 }))).record
+    compare(Model.settingsView(auto, null, {}).groups[0].rows.map(function(x) { return x.label }).join(","), "Automatic white balance,Red,Blue")
+    // a group all of whose rows are elsewhere is no accordion entry
+    var gone = [{ id: "image", label: "Image", settings: [intS("camera.image.x", "X", { enabled: false, disabled_reason: "No", disabled_kind: "not_applicable" })] },
+                { id: "focus", label: "Focus", settings: [intS("camera.focus.y", "Y")] }]
+    var gv = Model.settingsView(feedAll(snap(rev7({ interface_revision: 28 })), setLines(gone)).record, null, {})
+    compare(gv.groups.map(function(g) { return g.id + ":" + g.expanded }).join(","), "focus:true", "the first group drawn opens")
+    compare(gv.unavailable.map(function(e) { return e.label }).join(","), "X", "the Camera tab has its own list")
+    compare(gv.truncation, "", "a group placed elsewhere is not a truncation")
+  }
+
+  function test_two_value_int_is_a_switch() {
+    var two = { type: "int", min: 0, max: 1, step: 1, value: 1 }
+    compare(Model.settingWidget(two), "switch")
+    compare(Model.intIsSwitch(two), true)
+    compare(Model.settingWidget({ type: "int", min: 0, max: 2, step: 1 }), "slider", "three values: a slider")
+    compare(Model.settingWidget({ type: "int", min: 0, max: 10, step: 10 }), "switch", "two values by its step")
+    compare(Model.switchChecked(two, 1), true)
+    compare(Model.switchChecked(two, 0), false)
+    compare(Model.switchFlip(two), 0, "on: writes the minimum")
+    compare(Model.switchFlip(merged(two, { value: 0 })), 1, "off: writes the maximum")
+    compare(Model.switchFlip({ type: "bool", value: true }), false)
+    compare(Model.switchFlip({ type: "bool", value: false }), true)
+    compare(Model.switchFlip(null), null)
+    // written as an int, through the row's grammar
+    var r = brio({ cameras: [cameraObjects()[0]] })
+    var row = Model.viewRow(Model.settingsView(r, null, {}), 4)
+    compare(row.id, "camera.image.backlight_compensation")
+    compare(row.widget, "switch")
+    compare(JSON.stringify(Model.intentArgv({ verb: "setting", id: row.id, value: Model.switchFlip(row), camera: brioId }, cli, r)),
+            JSON.stringify([cli, "settings", "set", "--camera=" + brioId, "--", row.id, "0"]))
+  }
+
+  function test_preview_strip_and_layout() {
+    var hidden = { mode: "hidden", text: "", error: false }
+    var note = { mode: "note", text: "Preview off", error: false }
+    var box = { mode: "box", text: "Starting preview…", error: false }
+    var image = { mode: "image", text: "", error: false }
+    var failed = { mode: "note", text: "Preview stream error: x", error: true }
+    var narrow = Model.panelLayout(true, true, true)
+    var wide = Model.panelLayout(false, true, true)
+    compare(JSON.stringify(wide), JSON.stringify({ wide: true, width: 920 }), "two columns while the preview is shown")
+    compare(JSON.stringify(narrow), JSON.stringify({ wide: false, width: 520 }), "the narrow setting: one column")
+    compare(JSON.stringify(Model.panelLayout(false, false, true)), JSON.stringify({ wide: false, width: 520 }), "preview hidden: the settings column only")
+    compare(Model.panelLayout(false, true, false).wide, false, "cannot run here (old daemon, no runtime dir): one column")
+    compare(Model.panelLayout(false, "true", true).wide, false, "only a real true")
+    compare(Model.panelLayout(undefined, true, true).wide, true)
+    compare(Model.PANEL_HEIGHT_CAP, 860)
+    compare(Model.narrowPanelValue(true), true)
+    var notNarrow = [false, "true", 1, null, undefined, {}]
+    for (var i = 0; i < notNarrow.length; i++) compare(Model.narrowPanelValue(notNarrow[i]), false, JSON.stringify(notNarrow[i]))
+    // the strip
+    compare(JSON.stringify(Model.previewStripView(note, false, true, narrow, "effect")),
+            JSON.stringify({ mode: "strip", text: "Preview off", error: false, button: "show" }), "off by default: a strip with Show preview")
+    compare(Model.previewStripView(note, false, false, narrow, "effect").button, "", "cannot run here: no button")
+    compare(JSON.stringify(Model.previewStripView(failed, true, true, narrow, "camera")),
+            JSON.stringify({ mode: "strip", text: "Preview stream error: x", error: true, button: "hide" }), "on but failed: Hide")
+    compare(Model.previewStripView(image, true, true, narrow, "effect").mode, "frame")
+    compare(Model.previewStripView(image, true, true, narrow, "mic").mode, "none", "narrow: no preview on the Mic tab")
+    compare(Model.previewStripView(note, false, true, narrow, "mic").mode, "none")
+    compare(Model.previewStripView(image, true, true, wide, "mic").mode, "frame", "wide: the preview column stays")
+    compare(Model.previewStripView(hidden, false, true, narrow, "effect").mode, "none")
+    compare(Model.previewStripView(null, false, true, null, "effect").mode, "none")
+    // memory: the shown or hidden state is the stored previewEnabled, read back at the next open
+    var shown = Model.settingsEntry("m", { panelTab: "camera" }, { previewEnabled: true })
+    compare(JSON.stringify(shown), JSON.stringify({ id: "m", panelTab: "camera", previewEnabled: true }))
+    compare(Model.previewSettings(Model.settingsFromEntry(shown)).enabled, true, "restored as shown")
+    compare(Model.previewSettings({}).enabled, false, "nothing stored: hidden")
+    compare(Model.previewSettings(Model.settingsFromEntry(Model.settingsEntry("m", shown, { previewEnabled: false }))).enabled, false, "restored as hidden")
+    // the wide layout's summary
+    var r = micRecord({ cameras: [cameraObjects()[0]], loopback_consumers: 1, pipewire_consumers: 0, preview_consumers: 0 })
+    compare(JSON.stringify(Model.previewSummaryRows(r).map(function(x) { return x.label + "=" + x.value })),
+            JSON.stringify(["Camera=Logitech MX Brio", "Format=NV12 1920x1080@30", "Apps=1", "Mic=Processing"]))
+    compare(Model.previewSummaryRows(Model.withLink("not-running")).length, 0)
+  }
+
+  function test_camera_picker() {
+    var r = Model.reduce(snap(), line({ v: 1, type: "cameras", active_camera: brioId,
+      cameras: cameraObjects().concat([{ id: "next", name: "Odd", usb: "", active: false }]), cameras_truncated: false })).record
+    var v = Model.cameraPickerView(r)
+    compare(v.visible, true)
+    compare(v.value, brioId)
+    compare(JSON.stringify(v.options.map(function(o) { return o.label })), JSON.stringify(["Logitech MX Brio", "FHD Camera", "Odd (cannot be chosen)"]))
+    compare(v.notes.length, 1, "why it cannot be chosen")
+    compare(Model.cameraChoice(r, fhdId), fhdId)
+    compare(Model.cameraChoice(r, brioId), null, "the active one: nothing")
+    compare(Model.cameraChoice(r, "next"), null, "one that cannot be chosen")
+    compare(Model.cameraChoice(r, "nope"), null)
+    compare(Model.cameraChoice(r, ""), null)
+    compare(Model.cameraPickerView(snap({ cameras: [] })).visible, false)
+    compare(Model.cameraPickerView(Model.withLink("not-running")).visible, false)
+  }
+
+  function test_mic_view_off_and_on() {
+    var off = Model.micView(micRecord({ mic: micObj({ state: "off", consumers: 0 }) }))
+    compare(off.hostOn, false)
+    compare(off.explainer, Model.MIC_EXPLAINER_TEXT, "off: what it is, and nothing else")
+    compare(off.stateLine, "")
+    var on = Model.micView(micRecord({ mic: micObj({ state: "active", consumers: 1, latency_ms: 12.4 }) }))
+    compare(on.stateLine, "Processing, 1 app recording, adds 12 ms")
+    compare(on.explainer, "")
+    compare(Model.micView(micRecord({ mic: micObj({ state: "passthrough", consumers: 0, latency_ms: 0 }) })).stateLine, "On, not processed, no app recording")
+    compare(Model.micView(micRecord({ mic: micObj({ state: "active", consumers: 3 }) })).stateLine, "Processing, 3 apps recording, adds 20 ms")
+  }
+
+  function test_details_rows() {
+    var r = snap({ consumers: 2, loopback_consumers: 1, pipewire_consumers: 1, preview_consumers: 0,
+                   pipewire_output: "streaming", interface_revision: 6 })
+    compare(JSON.stringify(Model.detailsRows(r)), JSON.stringify([
+      { label: "State", value: "idle" },
+      { label: "Camera", value: "Logitech MX Brio" },
+      { label: "USB id", value: "046d:0944" },
+      { label: "Output", value: "NV12 1920x1080@30" },
+      { label: "PipeWire", value: "streaming" },
+      { label: "Used by", value: "Apps 1 · PipeWire 1 · Preview 0" },
+      { label: "Daemon API", value: "revision 6" },
+      { label: "Plugin", value: Model.PLUGIN_VERSION }
+    ]))
+    var old = snap({ interface_revision: undefined, output_mode: "", consumers: -1, active_camera: "", active_camera_name: "" })
+    compare(JSON.stringify(Model.detailsRows(old).map(function(x) { return x.label + "=" + x.value })), JSON.stringify([
+      "State=idle", "Camera=none", "Output=—", "PipeWire=—", "Used by=—", "Daemon API=—", "Plugin=" + Model.PLUGIN_VERSION]))
+    compare(JSON.stringify(Model.detailsRows(Model.emptyRecord("not-running"))),
+            JSON.stringify([{ label: "State", value: "unavailable" }, { label: "Plugin", value: Model.PLUGIN_VERSION }]), "unavailable: the plugin's version still")
+    // the live figures while active, and the microphone where there is one
+    var active = Model.reduce(snap({ state: "active", consumers: 1, interface_revision: 6 }),
+                              line({ v: 1, type: "stats", fps: 29.97, latency_ms: 12, cpu_percent: 5, gpu_percent: 9 })).record
+    verify(Model.detailsRows(active).some(function(x) { return x.label === "Frame rate" && x.value === "30.0 fps" }))
+    var mic = micRecord({ cameras: [cameraObjects()[0]] })
+    verify(Model.detailsRows(mic).some(function(x) { return x.label === "Microphone" }))
+    // Copy: one line each, under the product's name
+    compare(Model.detailsText([{ label: "State", value: "idle" }, { label: "Plugin", value: "1.2.3" }]), "Omarchy Broadcast\nState: idle\nPlugin: 1.2.3")
+    compare(Model.detailsText(null), "Omarchy Broadcast")
+  }
+
+  function test_header_state_sentences() {
+    compare(Model.headerState(snap()), "Ready: starts when an app uses the camera")
+    compare(Model.headerState(snap({ state: "off", enabled: false })), "Off")
+    compare(Model.headerState(snap({ state: "starting" })), "Starting\u2026")
+    compare(Model.headerState(snap({ state: "error", error: "x" })), "Error")
+    compare(Model.headerState(Model.emptyRecord("connecting")), "Connecting\u2026")
+    compare(Model.headerState(Model.emptyRecord("not-running")), "Unavailable")
+    var one = snap({ state: "active", consumers: 1, loopback_consumers: 1, pipewire_consumers: 0, preview_consumers: 0, interface_revision: 6 })
+    compare(Model.headerState(one), "In use by 1 app")
+    var withFps = Model.reduce(one, line({ v: 1, type: "stats", fps: 29.97, latency_ms: 12, cpu_percent: 5, gpu_percent: 9 })).record
+    compare(Model.headerState(withFps), "In use by 1 app, 30 fps")
+    compare(Model.headerState(snap({ state: "active", consumers: 3, loopback_consumers: 2, pipewire_consumers: 1, preview_consumers: 0, interface_revision: 6 })),
+            "In use by 3 apps")
+    compare(Model.headerState(snap({ state: "active", consumers: 1, loopback_consumers: 0, pipewire_consumers: 0, preview_consumers: 1, interface_revision: 6 })),
+            "Preview only")
+    compare(Model.headerState(snap({ state: "active", consumers: 1 })), "In use", "an unknown split")
+    compare(Model.MAIN_SWITCH_LABEL, "Virtual camera")
+  }
 
   function test_queued_global_write_survives_a_camera_change_and_reset() {
     var g = { verb: "setting", id: strengthId, value: 70, scope: "global" }
@@ -3541,10 +4034,10 @@ TestCase {
     compare(Model.batterySaverNow(undefined), "")
     // the keyboard stop, on the Effect tab only
     var v = Model.batterySaverView(r, batteryConfig("on_battery"), "")
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", null, null, null, null, v)).indexOf("battery") >= 0, true)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "camera", null, null, null, null, v)).indexOf("battery"), -1)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect")).indexOf("battery"), -1, "no view: no stop")
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", null, null, null, null, Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), ""))).indexOf("battery"), -1)
+    compare(kindsOf(stopsOf(r, 1, false, "effect", null, null, null, null, v)).indexOf("battery") >= 0, true)
+    compare(kindsOf(stopsOf(r, 1, false, "camera", null, null, null, null, v)).indexOf("battery"), -1)
+    compare(kindsOf(stopsOf(r, 1, false, "effect")).indexOf("battery"), -1, "no view: no stop")
+    compare(kindsOf(stopsOf(r, 1, false, "effect", null, null, null, null, Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), ""))).indexOf("battery"), -1)
   }
 
   // ---- the Mode dropdown (interface revision 22; `auto` from 23)
@@ -3673,16 +4166,16 @@ TestCase {
   function test_battery_saver_mode_stop() {
     var r = snap({ interface_revision: 23 })
     var v = Model.batterySaverView(r, batteryConfig("off", { options: batteryModesAuto() }), null)
-    var stops = Model.cursorStops(r, 1, false, "effect", null, null, null, null, v).map(function(s) { return s.kind })
+    var stops = stopsOf(r, 1, false, "effect", null, null, null, null, v).map(function(s) { return s.kind })
     var at = stops.indexOf("battery")
     compare(at >= 0, true)
     compare(stops[at + 1], "battery-mode", "right after the switch")
     compare(Model.stopHasIndex("battery-mode"), false)
-    compare(Model.cursorStops(r, 1, false, "camera", null, null, null, null, v).map(function(s) { return s.kind }).indexOf("battery-mode"), -1)
+    compare(stopsOf(r, 1, false, "camera", null, null, null, null, v).map(function(s) { return s.kind }).indexOf("battery-mode"), -1)
     var hidden = Model.batterySaverView(snap({ interface_revision: 21 }), batteryConfig("off"), null)
-    compare(Model.cursorStops(r, 1, false, "effect", null, null, null, null, hidden).map(function(s) { return s.kind }).indexOf("battery-mode"), -1, "hidden: no stop")
+    compare(stopsOf(r, 1, false, "effect", null, null, null, null, hidden).map(function(s) { return s.kind }).indexOf("battery-mode"), -1, "hidden: no stop")
     var grey = Model.batterySaverView(r, batteryConfig("off", { enabled: false, disabled_reason: "x" }), null)
-    compare(Model.cursorStops(r, 1, false, "effect", null, null, null, null, grey).map(function(s) { return s.kind }).indexOf("battery-mode") >= 0, true,
+    compare(stopsOf(r, 1, false, "effect", null, null, null, null, grey).map(function(s) { return s.kind }).indexOf("battery-mode") >= 0, true,
             "greyed: still a stop, as the switch is")
   }
 
@@ -3819,8 +4312,8 @@ TestCase {
     compare(Model.settingValueText(mode, "3840x2160@30"), "3840x2160 \u00b7 30 fps")
     var v = Model.settingsView(r, {}, {})
     compare(v.groups[0].id, "capture")
-    compare(v.groups[0].expanded, false, "Image stays the group open by default")
-    compare(v.groups[1].expanded, true)
+    compare(v.groups[0].expanded, true, "the first group, in the daemon's order, is open by default")
+    compare(v.groups[1].expanded, false)
     v = Model.settingsView(r, "capture", {})
     compare(v.groups[0].expanded, true, "opened by the user")
     compare(v.groups[0].rows[0].widget, "dropdown")
@@ -4156,7 +4649,7 @@ TestCase {
     var r = micRecord({ cameras: [cameraObjects()[0]] })
     var ids = function(v) { return JSON.stringify(v.groups.map(function(g) { return g.id })) }
     compare(ids(Model.micSettingsView(r, {})), JSON.stringify(["input", "noise", "voice"]), "the Mic tab draws the mic groups")
-    compare(ids(Model.effectSettingsView(r, {})), JSON.stringify(["background", "video"]), "the Effect tab does not")
+    compare(ids(Model.effectSettingsView(r, {})), JSON.stringify(["video"]), "the Effect tab does not (its strength hidden: the effect is off)")
     compare(ids(Model.settingsView(r, {}, {})), JSON.stringify(["image", "white_balance", "exposure", "focus"]), "nor the Camera tab")
     var v = Model.micSettingsView(r, {})
     compare(v.visible, true)
@@ -4183,8 +4676,10 @@ TestCase {
     var none = Model.micSettingsView(micRecord({}, { modules: false }), {})
     compare(ids(none), JSON.stringify(["input"]))
     compare(none.note, Model.MIC_NO_MODULES_TEXT)
-    compare(Model.micSettingsView(micRecord({ mic: micObj({ state: "off" }) }, { modules: false }), {}).note, Model.MIC_NO_MODULES_OFF_TEXT,
-            "the switch is off: only that none is installed")
+    var offView = Model.micSettingsView(micRecord({ mic: micObj({ state: "off" }) }, { modules: false }), {})
+    compare(offView.visible, false, "the switch is off: nothing but what the microphone is (micView)")
+    compare(offView.groups.length + offView.unavailable.length, 0)
+    compare(Model.micSettingsView(micRecord({ mic: micObj({ state: "off" }) }), {}).visible, false, "with modules too")
     compare(Model.MIC_NO_MODULES_OFF_TEXT, "No microphone modules installed")
     // no mic group at all (the worker never answered): the note alone
     var empty = Model.micSettingsView(withGlobals(rev13({})), {})
@@ -4196,7 +4691,7 @@ TestCase {
     compare(Model.micSettingsView(snap(rev13({})), {}).visible, false)
     // an older daemon gives no surface: the groups stay where they were drawn (the Effect tab)
     var plain = micRecord({}, { surface: undefined })
-    compare(ids(Model.effectSettingsView(plain, {})), JSON.stringify(["background", "video", "input", "noise", "voice"]))
+    compare(ids(Model.effectSettingsView(plain, {})), JSON.stringify(["video", "input", "noise", "voice"]))
     compare(Model.micSettingsView(plain, {}).groups.length, 0)
     // without the mic surface a node name is no option value
     compare(JSON.stringify(Model.findSetting(plain, "mic.input.device").options.map(function(o) { return o.value })), JSON.stringify(["default"]))
@@ -4362,13 +4857,13 @@ TestCase {
   function test_mic_tab_stops() {
     var r = micRecord({ cameras: [cameraObjects()[0]] })
     var mv = Model.micSettingsView(r, {})
-    var stops = Model.cursorStops(r, 1, false, "mic", Model.settingsView(r, {}, {}), Model.effectSettingsView(r, {}), mv)
-    compare(kindsOf(stops), JSON.stringify(["switch", "tabs", "mic-host", "setting", "setting", "setting", "setting", "setting", "setting", "setting", "setting"]))
-    compare(JSON.stringify(stops.slice(3).map(function(s) { return s.index })), JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7]))
-    compare(Model.stopIndex(stops, "mic-host", -1), 2)
-    compare(kindsOf(Model.cursorStops(snap(rev9({})), 1, false, "mic")), JSON.stringify(["switch", "tabs"]), "an old daemon: no control")
-    compare(kindsOf(Model.cursorStops(r, 1, false, "status")), JSON.stringify(["switch", "tabs"]))
-    compare(Model.stopIndex(Model.cursorStops(r, 1, false, "camera"), "mic-host", -1), -1, "another tab's stop")
+    var stops = stopsOf(r, 1, false, "mic", Model.settingsView(r, {}, {}), Model.effectSettingsView(r, {}), mv)
+    compare(kindsOf(stops), JSON.stringify(["switch", "info", "tabs", "mic-host", "setting", "setting", "setting", "setting", "setting", "setting", "setting", "setting"]))
+    compare(JSON.stringify(stops.slice(4).map(function(s) { return s.index })), JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7]))
+    compare(Model.stopIndex(stops, "mic-host", -1), 3)
+    compare(kindsOf(stopsOf(snap(rev9({})), 1, false, "mic")), JSON.stringify(["switch", "info", "tabs"]), "an old daemon: no control")
+    compare(kindsOf(stopsOf(r, 1, false, "status")), kindsOf(stopsOf(r, 1, false, "effect")), "a stored Status tab reads as the Effects tab")
+    compare(Model.stopIndex(stopsOf(r, 1, false, "camera"), "mic-host", -1), -1, "another tab's stop")
   }
 
   function test_module_kind_and_mic_pins() {
@@ -4445,7 +4940,8 @@ TestCase {
                       { path: userDir + "/office.png", label: "office", bundled: false, media_type: "image", width: 1920, height: 1080, duration_ms: 0, poster: "" }
                     ], items_truncated: false }, o || {})
   }
-  function rev15(o) { return withGlobals(merged({ interface_revision: 15, cameras: [cameraObjects()[0]] }, o || {})) }
+  // The replacement background chosen (the Background row is drawn only then).
+  function rev15(o, g) { return withGlobals(merged({ interface_revision: 15, cameras: [cameraObjects()[0]] }, o || {}), merged({ effect: "replace" }, g || {})) }
   // `media list background --json` as the producer prints it: the header
   // (`items` the count, unless `o.items_count` says otherwise), then one
   // `media_item` line per item (a non-object item is printed as it is).
@@ -4871,10 +5367,20 @@ TestCase {
     compare(clipped.source, "", "a clipped path is never loaded")
     compare(clipped.label, "end name", "named from the display copy")
     compare(Model.backgroundRowView(rev15({ interface_revision: 14 }), tools, false).visible, false)
+    // only while Replace is the choice shown (a draft counts: the row comes with the click)
+    var off = rev15({}, { effect: "none" })
+    compare(Model.backgroundRowView(off, tools, false).visible, false, "effect off: no image row")
+    compare(Model.backgroundRowView(rev15({}, { effect: "blur" }), tools, false).visible, false, "Blur: no image row")
+    var draft = {}
+    draft[modeId] = "replace"
+    compare(Model.backgroundRowView(off, tools, false, null, draft).visible, true, "Replace clicked: at once")
+    compare(Model.backgroundRowDrawn(off, draft), true)
+    compare(Model.backgroundRowShown(off), true, "the gallery's flows stay offered whatever the choice")
+    compare(kindsOf(stopsOf(off, 1, false, "effect", null, null, null)).indexOf("background"), -1, "no stop while not drawn")
     // a keyboard stop of its own, after the effect row
-    compare(kindsOf(Model.cursorStops(rev15(), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "tabs", "effect", "background"]))
-    compare(kindsOf(Model.cursorStops(rev15({ interface_revision: 14 }), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "tabs", "effect"]))
-    compare(kindsOf(Model.cursorStops(rev15(), 1, false, "camera", null, null, null)).indexOf("background"), -1)
+    compare(kindsOf(stopsOf(rev15(), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "info", "tabs", "effect", "background"]))
+    compare(kindsOf(stopsOf(rev15({ interface_revision: 14 }), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "info", "tabs", "effect"]))
+    compare(kindsOf(stopsOf(rev15(), 1, false, "camera", null, null, null)).indexOf("background"), -1)
   }
 
   function test_backgrounds_section() {
@@ -5170,11 +5676,14 @@ TestCase {
     verify(Model.placeholderSupported(rev17()))
     verify(!Model.placeholderSupported(rev17({ interface_revision: 16 })), "revision 16: no away image")
     verify(!Model.placeholderSupported(Model.emptyRecord("not-running")))
-    // the panel's Away image... button: a stop of its own, after the Background row
-    compare(kindsOf(Model.cursorStops(rev17(), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "tabs", "effect", "background", "away"]))
-    compare(kindsOf(Model.cursorStops(rev17({ interface_revision: 16 }), 1, false, "effect", null, null, null)),
-            JSON.stringify(["switch", "tabs", "effect", "background"]), "revision 16: no button")
-    compare(kindsOf(Model.cursorStops(rev17(), 1, false, "camera", null, null, null)).indexOf("away"), -1)
+    // the panel's Away image... button: a stop of its own, under More (the
+    // Background row only while Replace is chosen)
+    compare(kindsOf(stopsOf(rev17(), 1, false, "effect", null, null, null)), JSON.stringify(["switch", "info", "tabs", "effect", "background", "more", "away"]))
+    compare(kindsOf(stopsOf(rev17(), 1, false, "effect", null, null, null, null, null, { moreOpen: false })),
+            JSON.stringify(["switch", "info", "tabs", "effect", "background", "more"]), "More closed: only its line")
+    compare(kindsOf(stopsOf(rev17({ interface_revision: 16 }), 1, false, "effect", null, null, null)),
+            JSON.stringify(["switch", "info", "tabs", "effect", "background"]), "revision 16: no button, so no More")
+    compare(kindsOf(stopsOf(rev17(), 1, false, "camera", null, null, null)).indexOf("away"), -1)
     // the reads are unchanged: the away gallery is listed by its flow only
     compare(JSON.stringify(Model.setupReads(rev17())), JSON.stringify(["modules", "order", "config", "files", "media"]))
   }
@@ -5810,14 +6319,15 @@ TestCase {
     var r = healthRecord({ cameras: [cameraObjects()[0]] })
     var sv = Model.settingsView(r, {}, {})
     var hv = Model.healthView(r)
-    var stops = Model.cursorStops(r, 1, false, "camera", sv, Model.effectSettingsView(r, {}), Model.micSettingsView(r, {}), hv)
-    compare(kindsOf(stops.slice(0, 7)), JSON.stringify(["switch", "tabs", "camera", "suggestion", "recommended", "recommended-changes", "reset"]))
-    compare(stops[3].index, 0)
+    var stops = stopsOf(r, 1, false, "camera", sv, Model.effectSettingsView(r, {}), Model.micSettingsView(r, {}), hv)
+    compare(kindsOf(stops.slice(0, 7)), JSON.stringify(["switch", "info", "tabs", "camera", "suggestion", "recommended", "recommended-changes"]))
+    compare(stops[stops.length - 1].kind, "reset", "Reset to defaults at the bottom")
+    compare(stops[4].index, 0)
     compare(Model.stopHasIndex("suggestion"), true)
-    compare(Model.stopIndex(stops, "suggestion", 0), 3)
-    compare(Model.stopIndex(stops, "recommended", -1), 4)
-    compare(kindsOf(Model.cursorStops(r, 1, false, "camera", sv, null, null)).indexOf("suggestion"), -1, "no health view: no stops")
-    compare(kindsOf(Model.cursorStops(r, 1, false, "effect", sv, Model.effectSettingsView(r, {}), null, hv)).indexOf("suggestion"), -1, "the Camera tab's only")
+    compare(Model.stopIndex(stops, "suggestion", 0), 4)
+    compare(Model.stopIndex(stops, "recommended", -1), 5)
+    compare(kindsOf(stopsOf(r, 1, false, "camera", sv, null, null)).indexOf("suggestion"), -1, "no health view: no stops")
+    compare(kindsOf(stopsOf(r, 1, false, "effect", sv, Model.effectSettingsView(r, {}), null, hv)).indexOf("suggestion"), -1, "the Camera tab's only")
   }
 
   // Two suggestions (noise removal and the effect) and three changes: folded,
@@ -5830,8 +6340,8 @@ TestCase {
                  { setting: "camera.exposure.power_line_frequency", label: "Anti-flicker", value: "50 Hz", current: "60 Hz" }]
     var r = healthRecord({ cameras: [cameraObjects()[0]], camera_health: healthObj({ suggestions: two, recommended: three }) }, { effect: "none" })
     var sv = Model.settingsView(r, {}, {})
-    var stopsOf = function(v) {
-      return kindsOf(Model.cursorStops(r, 1, false, "camera", sv, null, null, v).filter(function(s) {
+    var healthStops = function(v) {
+      return kindsOf(stopsOf(r, 1, false, "camera", sv, null, null, v).filter(function(s) {
         return ["suggestion", "suggestions-more", "recommended", "recommended-changes"].indexOf(s.kind) >= 0 }))
     }
     var v = Model.healthView(r)
@@ -5839,14 +6349,14 @@ TestCase {
     compare(v.shownSuggestions, 1)
     compare(JSON.stringify(v.more), JSON.stringify({ visible: true, text: "+1 more", glyph: Model.GLYPH_COLLAPSED }))
     compare(JSON.stringify(v.changes), JSON.stringify({ open: false, text: "3 changes: Sharpness, Contrast, Anti-flicker", glyph: Model.GLYPH_COLLAPSED }))
-    compare(stopsOf(v), JSON.stringify(["suggestion", "suggestions-more", "recommended", "recommended-changes"]))
+    compare(healthStops(v), JSON.stringify(["suggestion", "suggestions-more", "recommended", "recommended-changes"]))
     // open the suggestions
     var open = Model.healthOpenAfter(null, v, "suggestions")
     compare(JSON.stringify(open), JSON.stringify({ camera: brioId, suggestions: true, changes: false }))
     v = Model.healthView(r, open)
     compare(v.shownSuggestions, 2)
     compare(JSON.stringify(v.more), JSON.stringify({ visible: true, text: "Fewer suggestions", glyph: Model.GLYPH_EXPANDED }))
-    compare(stopsOf(v), JSON.stringify(["suggestion", "suggestion", "suggestions-more", "recommended", "recommended-changes"]))
+    compare(healthStops(v), JSON.stringify(["suggestion", "suggestion", "suggestions-more", "recommended", "recommended-changes"]))
     // then the changes: the suggestions stay open
     open = Model.healthOpenAfter(open, v, "changes")
     compare(JSON.stringify(open), JSON.stringify({ camera: brioId, suggestions: true, changes: true }))
@@ -5895,7 +6405,7 @@ TestCase {
   function test_shutter_closed_tab() {
     var shut = Model.healthView(shutterRecord("active", "closed"))
     var o = Model.panelTabOptions("effect", shut)
-    compare(JSON.stringify(o.map(function(x) { return x.glyph })), JSON.stringify(["", Model.GLYPH_WARNING, "", ""]))
+    compare(JSON.stringify(o.map(function(x) { return x.glyph })), JSON.stringify(["", Model.GLYPH_WARNING, ""]))
     compare(o[1].name, "Camera, shutter closed")
     var both = Model.healthView(snap(rev20({ interface_revision: 26, state: "active", consumers: 1,
                                              camera_health: healthObj({ shutter: "closed", warnings: ["Shared USB hub"] }) })))
@@ -5935,11 +6445,11 @@ TestCase {
   function test_panel_tab_warning() {
     var r = healthRecord({ camera_health: healthObj({ warnings: ["Shared USB hub"] }) })
     var o = Model.panelTabOptions("effect", Model.healthView(r))
-    compare(JSON.stringify(o.map(function(x) { return x.glyph })), JSON.stringify(["", Model.GLYPH_WARNING, "", ""]))
-    compare(JSON.stringify(o.map(function(x) { return x.name })), JSON.stringify(["Effect", "Camera, with a warning", "Mic", "Status"]))
+    compare(JSON.stringify(o.map(function(x) { return x.glyph })), JSON.stringify(["", Model.GLYPH_WARNING, ""]))
+    compare(JSON.stringify(o.map(function(x) { return x.name })), JSON.stringify(["Effects", "Camera, with a warning", "Mic"]))
     compare(o[1].label, "Camera", "the label itself stays")
     var none = Model.panelTabOptions("effect", Model.healthView(healthRecord()))
-    compare(JSON.stringify(none.map(function(x) { return x.glyph })), JSON.stringify(["", "", "", ""]), "no warnings: no sign")
+    compare(JSON.stringify(none.map(function(x) { return x.glyph })), JSON.stringify(["", "", ""]), "no warnings: no sign")
     compare(none[1].name, "Camera")
     var other = Model.reduce(r, line(healthLine({ camera: fhdId, warnings: ["Shared USB hub"] }))).record
     compare(Model.panelTabOptions("effect", Model.healthView(other))[1].glyph, "", "another camera's warning: no sign")

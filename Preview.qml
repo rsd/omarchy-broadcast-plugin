@@ -19,9 +19,9 @@ import "Model.js" as Model
 //
 // Run rule (Model.shouldPreview, R1): a panel is open (a registered holder),
 // the daemon has the preview (interface revision 5) and the frame path is
-// usable, and either the persisted Preview switch is on or the stream is
-// already active for loopback or PipeWire consumers. Opening a panel never
-// starts the camera; closing the last one stops the preview.
+// usable, and the preview is shown (the persisted `previewEnabled`, the
+// panel's Show preview and Hide). Opening a panel with the preview hidden
+// never starts the camera; closing the last one stops the preview.
 //
 // Holders register by identity (hold/release, idempotent); a widget gives its
 // registration back in Component.onDestruction, which is all that may happen
