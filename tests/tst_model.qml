@@ -775,7 +775,7 @@ TestCase {
   function test_unavailable_messages() {
     var m = Model.unavailableMessage(Model.emptyRecord("not-running"))
     compare(m.title, "omarchy-broadcastd is not running")
-    compare(m.commandText, "systemctl --user start omarchy-broadcastd")
+    compare(m.commandText, "systemctl --user enable --now omarchy-broadcastd")
     compare(Model.unavailableMessage(snap()).title, "")
     var c = Model.unavailableMessage(Model.withLink("cli-missing", "omarchy-broadcast CLI not found: /nope"))
     compare(c.title, "omarchy-broadcast CLI not found:")
@@ -4388,7 +4388,7 @@ TestCase {
     compare(g9.modules + ":" + g9.config + ":" + g9.text, "true:false:")
     var gone = Model.setupGate(Model.emptyRecord("not-running"))
     compare(gone.text, "omarchy-broadcastd is not running")
-    compare(gone.commandText, "systemctl --user start omarchy-broadcastd")
+    compare(gone.commandText, "systemctl --user enable --now omarchy-broadcastd")
     var s = Model.withSetupRead(Model.emptySetup(), "order", { ok: true })
     compare(s.order.ok, true)
     compare(s.modules, null)
