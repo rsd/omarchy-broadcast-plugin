@@ -343,6 +343,12 @@ ok=0
 [ "$result" = "done" ] || { echo "harness: no result within ${limit}s" >&2; ok=1; }
 if [ "$ok" -eq 0 ] && [ "$leftovers" -ne 0 ]; then echo "harness: $leftovers process(es) left running" >&2; ok=1; fi
 if [ "$ok" -eq 0 ]; then sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -q 'qml: ALL OK' || ok=1; fi
+# A QML binding loop floods the user journal at run time: none may appear.
+if [ "$ok" -eq 0 ] && sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -qi 'binding loop'; then
+  echo "harness: QML binding loop warning(s) in the log:" >&2
+  sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -i 'binding loop' | sort | uniq -c | head -5 >&2
+  ok=1
+fi
 case $screens in
   "$work"/*)
     if [ "$ok" -ne 0 ] || [ "${KEEP_WORK:-}" = 1 ]; then echo "screens: $screens"

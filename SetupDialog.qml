@@ -1061,7 +1061,7 @@ Item {
                       // list's rows are as wide as the box), within the line.
                       readonly property real listWidth: row.widget === "dropdown"
                         ? widestOption() + 2 * Style.spacing.controlPaddingX + Style.space(36) : 0
-                      TextMetrics {
+                      FontMetrics {
                         id: optionProbe
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.body
@@ -1069,8 +1069,7 @@ Item {
                       function widestOption() {
                         var widest = 0
                         for (var i = 0; i < row.options.length; i++) {
-                          optionProbe.text = row.options[i].label
-                          widest = Math.max(widest, optionProbe.advanceWidth)
+                          widest = Math.max(widest, optionProbe.advanceWidth(row.options[i].label))
                         }
                         return widest
                       }

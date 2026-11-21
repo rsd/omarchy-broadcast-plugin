@@ -640,7 +640,9 @@ Column {
                 implicitWidth: Math.max(Style.space(220), labelsWidth + 2 * Style.spacing.controlPaddingX + Style.space(36))
                 implicitHeight: choiceList.implicitHeight
 
-                TextMetrics {
+                // Measured without writing to the metrics (a TextMetrics'
+                // text set inside the labelsWidth binding would loop).
+                FontMetrics {
                   id: labelProbe
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -650,8 +652,7 @@ Column {
                   var options = settingRow.row.options
                   var widest = 0
                   for (var i = 0; i < options.length; i++) {
-                    labelProbe.text = options[i].label
-                    widest = Math.max(widest, labelProbe.advanceWidth)
+                    widest = Math.max(widest, labelProbe.advanceWidth(options[i].label))
                   }
                   return widest
                 }
