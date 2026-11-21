@@ -1149,7 +1149,8 @@ var PREVIEW_RETRY_HINT = "Reopen the panel to retry."
 // A preview preference the shell did not store (no layout entry to write, or
 // an entry over SETTINGS_KEY_CAP): it holds for this session only.
 var PREVIEW_UNSAVED_TEXT = "Could not save the preview setting"
-var PREVIEW_FPS_TOOLTIPS = { 15: "Lighter; uses less CPU", 30: "Smoother, closer to what apps see; uses more CPU" }
+var PREVIEW_RATE_TOOLTIP = "How often this preview refreshes. The camera feed apps receive is not affected."
+var PREVIEW_FPS_TOOLTIPS = { 15: PREVIEW_RATE_TOOLTIP, 30: PREVIEW_RATE_TOOLTIP }
 
 // $XDG_RUNTIME_DIR -> { path, reason }: the frame file the daemon writes,
 // or "" and why the preview cannot be used. The directory must be absolute
@@ -1439,7 +1440,7 @@ function fpsOptions(fps) {
   var out = []
   for (var i = 0; i < PREVIEW_FPS_CHOICES.length; i++) {
     var v = PREVIEW_FPS_CHOICES[i]
-    out.push({ value: v, label: v + " fps", tooltip: PREVIEW_FPS_TOOLTIPS[v], selected: v === current })
+    out.push({ value: v, label: v === 30 ? "30 fps" : String(v), tooltip: PREVIEW_FPS_TOOLTIPS[v], selected: v === current })
   }
   return out
 }
@@ -3056,7 +3057,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.2"
+var PLUGIN_VERSION = "0.37.3"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"
@@ -3192,7 +3193,8 @@ var PREVIEW_SHOW_LABEL = "Show preview"
 var PREVIEW_HIDE_LABEL = "Hide preview"
 var PREVIEW_GRID_LABEL = "Grid"
 var PREVIEW_GRID_TOOLTIP = "Rule-of-thirds grid over the preview"
-var PREVIEW_RATE_TOOLTIP = "Preview refresh rate (not the camera's)"
+var PREVIEW_RATE_LABEL = "Preview:"
+var PREVIEW_RATE_NAME = "Preview refresh rate"
 function previewStripView(placeholder, switchOn, controls, layout, tab) {
   var p = isPlainObject(placeholder) ? placeholder : { mode: "hidden", text: "", error: false }
   var out = { mode: "none", text: "", error: false, button: "" }

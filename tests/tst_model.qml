@@ -1388,9 +1388,10 @@ TestCase {
     var fps = Model.fpsOptions(30)
     compare(JSON.stringify(fps.map(function(o) { return o.value })), "[15,30]")
     compare(fps[1].selected, true)
-    compare(fps[0].label, "15 fps")
-    compare(fps[1].tooltip, "Smoother, closer to what apps see; uses more CPU")
-    compare(fps[0].tooltip, "Lighter; uses less CPU")
+    compare(fps[0].label, "15")
+    compare(fps[1].label, "30 fps")
+    compare(fps[1].tooltip, "How often this preview refreshes. The camera feed apps receive is not affected.")
+    compare(fps[0].tooltip, fps[1].tooltip)
     compare(Model.fpsOptions(42)[0].selected, true, "anything else reads as 15")
   }
 
