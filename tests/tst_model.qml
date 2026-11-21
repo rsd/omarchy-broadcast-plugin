@@ -525,7 +525,8 @@ TestCase {
     compare(kindsOf(Model.cursorStops(one, { tab: "camera", cameraCount: 1, preview: { mode: "strip", button: "" } })),
             JSON.stringify(["switch", "info", "tabs", "camera"]), "a strip without a button is no stop")
     compare(kindsOf(Model.cursorStops(one, null)), JSON.stringify(["switch", "info", "tabs"]), "no parts: the header and the tab row")
-    compare(stopsOf(Model.emptyRecord("not-running"), 3, true, "camera").length, 0)
+    compare(kindsOf(Model.cursorStops(Model.emptyRecord("not-running"), null)), JSON.stringify(["start"]), "a stopped daemon: only Start")
+    compare(stopsOf(Model.withLink("unreachable"), 3, true, "camera").length, 0)
     compare(Model.clampCursor(-3, 5), 0)
     compare(Model.clampCursor(9, 5), 4)
     compare(Model.clampCursor(2, 0), 0)
@@ -781,11 +782,38 @@ TestCase {
     verify(!/[<>&]/.test(Model.tooltipText(hostile)))
   }
 
+  function test_start_command() {
+    var cli = "/usr/bin/omarchy-broadcast"
+    compare(JSON.stringify(Model.startArgv(cli)), JSON.stringify([cli, "start"]))
+    compare(Model.startArgv("omarchy-broadcast"), null, "relative path")
+    compare(Model.startArgv(""), null)
+    var gone = Model.emptyRecord("not-running")
+    compare(JSON.stringify(Model.intentArgv({ verb: "start" }, cli, gone)), JSON.stringify([cli, "start"]))
+    compare(Model.intentArgv({ verb: "start" }, "", gone), null, "no usable CLI")
+    var links = ["connecting", "unreachable", "cli-missing", "cli-failed", "unsupported"]
+    for (var i = 0; i < links.length; i++)
+      compare(Model.intentArgv({ verb: "start" }, cli, Model.withLink(links[i], "x")), null, links[i])
+    compare(Model.intentArgv({ verb: "start" }, cli, snap()), null, "a running daemon is never started")
+    verify(Model.isStartIntent({ verb: "start" }))
+    verify(!Model.isStartIntent({ verb: "next" }))
+    compare(Model.startFailureText(2, "error: unrecognized subcommand 'start'", cli), Model.START_UNSUPPORTED_TEXT)
+    compare(Model.startFailureText(1, "omarchy-broadcast: boom <b>", cli), "Could not start omarchy-broadcastd: boom b")
+    compare(Model.startFailureText(4, "", cli), "Could not start omarchy-broadcastd (status 4)")
+    compare(Model.startFailureText(-1, "", cli), "omarchy-broadcast CLI not found: " + cli)
+    verify(Model.startFailureText(1, new Array(5000).join("e"), cli).length <= Model.DETAIL_CAP + 60)
+  }
+
   function test_unavailable_messages() {
     var m = Model.unavailableMessage(Model.emptyRecord("not-running"))
     compare(m.title, "omarchy-broadcastd is not running")
     compare(m.commandText, "systemctl --user enable --now omarchy-broadcastd")
+    compare(m.hint, "To start it at every login:")
+    compare(m.startable, true)
     compare(Model.unavailableMessage(snap()).title, "")
+    compare(Model.unavailableMessage(snap()).startable, false)
+    var links0 = ["connecting", "unreachable", "cli-missing", "cli-failed", "unsupported"]
+    for (var l0 = 0; l0 < links0.length; l0++)
+      compare(Model.unavailableMessage(Model.withLink(links0[l0], "x")).startable, false, links0[l0])
     var c = Model.unavailableMessage(Model.withLink("cli-missing", "omarchy-broadcast CLI not found: /nope"))
     compare(c.title, "omarchy-broadcast CLI not found:")
     compare(c.path, "/nope")
@@ -1384,7 +1412,7 @@ TestCase {
     var without = stopsOf(r5, 2, false).map(function(s) { return s.kind })
     compare(without.indexOf("preview"), -1)
     compare(stopsOf(r5, 2).length, without.length, "no previewControls: no preview stops")
-    compare(JSON.stringify(stopsOf(Model.withLink("not-running"), 2, true)), "[]")
+    compare(JSON.stringify(stopsOf(Model.withLink("not-running"), 2, true)), JSON.stringify([{ kind: "start", index: -1 }]))
     var fps = Model.fpsOptions(30)
     compare(JSON.stringify(fps.map(function(o) { return o.value })), "[15,30]")
     compare(fps[1].selected, true)

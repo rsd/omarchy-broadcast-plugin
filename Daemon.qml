@@ -744,8 +744,9 @@ Singleton {
     commandArmed = false
     commandStarted = false
     runningIntent = null
-    var failure = !started ? Model.commandFailureText(-1, "", cliPath)
-      : (commandExitCode === 0 ? "" : Model.commandFailureText(commandExitCode, commandStderr.text, cliPath))
+    var failureOf = Model.isStartIntent(intent) ? Model.startFailureText : Model.commandFailureText
+    var failure = !started ? failureOf(-1, "", cliPath)
+      : (commandExitCode === 0 ? "" : failureOf(commandExitCode, commandStderr.text, cliPath))
     // A setup write's result is the dialog's to show, not the panel's.
     if (Model.isSetupIntent(intent)) setupError = failure
     else commandError = failure
@@ -823,6 +824,14 @@ Singleton {
 
   function selectCamera(id) {
     return request({ verb: "select", id: id })
+  }
+
+  // Start the stopped daemon through the CLI's `start` (D-Bus activation;
+  // the plugin never runs systemctl). The watch, still running, picks the
+  // daemon up when it appears.
+  function startDaemon() {
+    if (commandBusy) return false
+    return request({ verb: "start" })
   }
 
   function nextCamera() {

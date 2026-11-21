@@ -711,6 +711,14 @@ function commandErrorParts(text) {
 // plain text the user can copy (drawn on a line of its own); the plugin never
 // runs it.
 function unavailableMessage(record) {
+  var msg = unavailableMessageText(record)
+  // The Start button: only for a stopped daemon, never for a missing CLI or
+  // an error (unknownState and the other links get none).
+  msg.startable = !unknownState(record) && !!record && record.link === "not-running"
+  return msg
+}
+
+function unavailableMessageText(record) {
   var link = record ? record.link : "connecting"
   var detail = record ? record.linkText : ""
   if (unknownState(record)) {
@@ -723,7 +731,7 @@ function unavailableMessage(record) {
     return { title: "", path: "", detail: "", hint: "", commandText: "" }
   case "not-running":
     return { title: "omarchy-broadcastd is not running", path: "", detail: "",
-             hint: "Start it, and at every login, with:", commandText: "systemctl --user enable --now omarchy-broadcastd" }
+             hint: "To start it at every login:", commandText: "systemctl --user enable --now omarchy-broadcastd" }
   case "unreachable":
     return { title: "omarchy-broadcastd is not answering", path: "", detail: detail,
              hint: "Retrying every 2 s. Its log:", commandText: "journalctl --user -u omarchy-broadcastd" }
@@ -731,8 +739,9 @@ function unavailableMessage(record) {
     // The text ends on the path it searched or was given, when it names one.
     var parts = splitTrailingPath(detail !== "" ? detail : CLI_MISSING_TEXT)
     return { title: parts.text, path: parts.path, detail: "",
-             hint: "Install omarchy-broadcast-git\n"
-               + "from the AUR (see the README).\n"
+             hint: "Install omarchy-broadcast-bin\n"
+               + "or -git from the AUR\n"
+               + "(see the README).\n"
                + "Or set the cliPath setting.",
              commandText: "" }
   case "cli-failed":
@@ -970,6 +979,22 @@ function commandFailureText(code, stderrLine, cliPath) {
   return sanitize(text, DETAIL_CAP + 60)
 }
 
+// The panel's message when the `start` command failed. A CLI that predates
+// `start` answers with clap's "unrecognized subcommand" (exit 2).
+var START_UNSUPPORTED_TEXT = "This omarchy-broadcast version cannot start the daemon; use the command below"
+function startFailureText(code, stderrLine, cliPath) {
+  if (code === 2 && typeof stderrLine === "string" && /unrecognized subcommand/i.test(stderrLine.slice(0, STDERR_CAP)))
+    return START_UNSUPPORTED_TEXT
+  if (code === -1) return commandFailureText(code, stderrLine, cliPath)
+  var detail = typeof stderrLine === "string" ? stderrLine.slice(0, STDERR_CAP).replace(/^omarchy-broadcast:\s*/, "") : ""
+  detail = sanitize(detail, DETAIL_CAP)
+  return sanitize("Could not start omarchy-broadcastd" + (detail !== "" ? ": " + detail : " (status " + code + ")"), DETAIL_CAP + 60)
+}
+
+function isStartIntent(intent) {
+  return isPlainObject(intent) && intent.verb === "start"
+}
+
 // The watch's exit, for the panel. `crashed` is Quickshell's exitStatus
 // (1 = killed by a signal, whose number is then the exit code).
 function watchExitText(code, crashed, delayMs) {
@@ -1039,6 +1064,12 @@ function selectArgv(cli, id) {
   return [cli, "camera", "--", safe]
 }
 
+// Start the stopped daemon: the CLI's `start` D-Bus-activates it without
+// changing its state. The plugin never runs systemctl.
+function startArgv(cli) {
+  return cliUsable(cli) ? [cli, "start"] : null
+}
+
 function nextArgv(cli) {
   return cliUsable(cli) ? [cli, "camera", "next"] : null
 }
@@ -1058,6 +1089,7 @@ function intentArgv(intent, cli, record) {
   case "enable": return available(record) ? enableArgv(cli, intent.on === true) : null
   case "select": return available(record) ? selectArgv(cli, intent.id) : null
   case "next": return canNext(record) ? nextArgv(cli) : null
+  case "start": return record && record.link === "not-running" && !unknownState(record) ? startArgv(cli) : null
   case "setup": return setupIntentArgv(cli, record, intent)
   case "setting": return settingIntentArgv(cli, record, intent)
   case "mic-host": return micSupported(record) ? micHostArgv(cli, intent.on === true) : null
@@ -3057,7 +3089,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.4"
+var PLUGIN_VERSION = "0.37.5"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"
@@ -3765,9 +3797,10 @@ function recommendedArgv(cli, record, intent) {
 //           "Not available now" line and its Setup buttons.
 // A stop that stands for one of several rows (a setting, a group header, a
 // Setup button) carries the row's `id` too (cursorAfter anchors on it).
-// Nothing is a stop while the daemon is unavailable: no control is drawn.
+// While the daemon is unavailable the only stop is "start" (a stopped daemon).
 function cursorStops(record, p) {
-  if (!available(record)) return []
+  // The one control drawn while the daemon is down: the Start button.
+  if (!available(record)) return unavailableMessage(record).startable ? [{ kind: "start", index: -1 }] : []
   var q = isPlainObject(p) ? p : {}
   var stops = [{ kind: "switch", index: -1 }, { kind: "info", index: -1 }]
   if (q.details === true) {
