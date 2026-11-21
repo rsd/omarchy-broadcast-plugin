@@ -2669,6 +2669,19 @@ Item {
             onClicked: root.toggleGrid()
           }
 
+          // "Preview:" names the rate pair, so it is not read as the
+          // camera's rate.
+          Text {
+            objectName: "fpsLabel"
+            textFormat: Text.PlainText
+            height: fpsChoices.height
+            verticalAlignment: Text.AlignVCenter
+            text: Model.PREVIEW_RATE_LABEL
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
           // The rate the preview asks for: one stop, Left/Right walk it.
           // The shell's ButtonGroup, driven by the panel cursor
           // (cursorIndex and hovered), never by Tab focus.
@@ -2683,7 +2696,7 @@ Item {
             background: Commons.Color.background
             accent: root.accent
             fontFamily: root.fontFamily
-            Accessible.name: Model.PREVIEW_RATE_TOOLTIP
+            Accessible.name: Model.PREVIEW_RATE_NAME
             onHovered: function(index, isHovered) { if (isHovered) root.setFpsCursor(index) }
             onChanged: function(value) { root.chooseFps(Model.PREVIEW_FPS_CHOICES.indexOf(Number(value))) }
           }

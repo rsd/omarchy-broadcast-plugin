@@ -316,7 +316,7 @@ ShellRoot {
     function fpsChip(w, value) {
       var group = find(w, "fpsChoices")
       var kids = group ? group.children : []
-      for (var i = 0; i < kids.length; i++) if (kids[i].text === value + " fps") return kids[i]
+      for (var i = 0; i < kids.length; i++) if (kids[i].text === (value === 30 ? "30 fps" : String(value))) return kids[i]
       return null
     }
     // A light palette for one screenshot, and back: the theme's foundational
