@@ -991,6 +991,14 @@ function startFailureText(code, stderrLine, cliPath) {
   return sanitize("Could not start omarchy-broadcastd" + (detail !== "" ? ": " + detail : " (status " + code + ")"), DETAIL_CAP + 60)
 }
 
+// How long a one-shot command (never the long-lived watch) may run before the
+// plugin kills it: `start` (the CLI bounds it at 30 s itself), then the rest.
+var START_TIMEOUT_MS = 45000
+var COMMAND_TIMEOUT_MS = 30000
+function commandTimeoutText(ms) {
+  return "omarchy-broadcast did not answer within " + Math.max(1, Math.round(ms / 1000)) + " s"
+}
+
 function isStartIntent(intent) {
   return isPlainObject(intent) && intent.verb === "start"
 }
@@ -3089,7 +3097,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.6"
+var PLUGIN_VERSION = "0.37.7"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"

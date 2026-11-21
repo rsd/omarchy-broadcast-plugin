@@ -83,6 +83,9 @@ Singleton {
   property string commandError: ""
   // A command is running or queued: its result has not arrived yet.
   property bool commandBusy: false
+  // The daemon's `start` is the command running (not just any command): the
+  // Start button's "Starting\u2026".
+  readonly property bool starting: Model.isStartIntent(runningIntent)
   // An on/off toggle waits (the bar's middle click, the panel switch): a
   // command other than a camera setting write or a setup write is running or
   // queued. Those writes never hold it; an on/off ask goes ahead of setting
@@ -140,6 +143,14 @@ Singleton {
   // The intent of the running command.
   property var runningIntent: null
   property bool commandArmed: false
+  // The command's watchdog fired: it is being killed, and its end reports the
+  // timeout (Model.commandTimeoutText), not an exit status.
+  property bool commandTimedOut: false
+  // How long a one-shot command may run (never the long-lived watch): `start`
+  // (the CLI bounds it at 30 s itself), then every other one. The harness
+  // shortens them.
+  property int startTimeoutMs: Model.START_TIMEOUT_MS
+  property int commandTimeoutMs: Model.COMMAND_TIMEOUT_MS
   property bool commandStarted: false
   property int commandExitCode: 0
   property var commandStderr: Model.firstLineStart()
@@ -708,6 +719,7 @@ Singleton {
     if (!argv) return false
     commandStderr = Model.firstLineStart()
     commandStarted = false
+    commandTimedOut = false
     commandArmed = true
     commandBusy = true
     runningIntent = intent
@@ -716,7 +728,19 @@ Singleton {
     lastCommand = argv
     commandProc.command = argv
     commandProc.running = true
+    // One shot per command, stopped when it ends (commandEnded): no polling.
+    commandWatchdog.interval = Model.isStartIntent(intent) ? startTimeoutMs : commandTimeoutMs
+    commandWatchdog.restart()
     return true
+  }
+
+  // The watchdog: a command that outlived its bound is killed (SIGKILL: a
+  // binary that hangs may well ignore SIGTERM), and commandEnded then clears
+  // the busy state and says so on the failure line.
+  function commandTimeout() {
+    if (!commandArmed || !commandProc.running) return
+    commandTimedOut = true
+    commandProc.signal(9)
   }
 
   function settleMicAwait() {
@@ -741,16 +765,20 @@ Singleton {
   function commandEnded() {
     var started = commandStarted
     var intent = runningIntent
+    var timedOut = commandTimedOut
+    commandWatchdog.stop()
     commandArmed = false
     commandStarted = false
+    commandTimedOut = false
     runningIntent = null
     var failureOf = Model.isStartIntent(intent) ? Model.startFailureText : Model.commandFailureText
-    var failure = !started ? failureOf(-1, "", cliPath)
+    var failure = timedOut ? Model.commandTimeoutText(commandWatchdog.interval)
+      : !started ? failureOf(-1, "", cliPath)
       : (commandExitCode === 0 ? "" : failureOf(commandExitCode, commandStderr.text, cliPath))
     // A setup write's result is the dialog's to show, not the panel's.
     if (Model.isSetupIntent(intent)) setupError = failure
     else commandError = failure
-    var ok = started && commandExitCode === 0
+    var ok = started && !timedOut && commandExitCode === 0
     // Whatever it changed (or not), the dialog shows the daemon's word: read
     // again, unless a change line since it started has done so already.
     if (Model.isSetupIntent(intent) && (!ok || !setupChangeSeen)) Qt.callLater(root.refreshSetup)
@@ -1292,6 +1320,12 @@ Singleton {
     onStarted: root.mediaStarted = true
     onExited: function(exitCode, exitStatus) { root.mediaExitCode = exitStatus === 0 ? exitCode : 128 + exitCode }
     onRunningChanged: if (!running && root.mediaArmed) root.mediaEnded()
+  }
+
+  // Bounds one command (commandTimeout); started by armCommand.
+  property Timer commandWatchdog: Timer {
+    repeat: false
+    onTriggered: root.commandTimeout()
   }
 
   property Process commandProc: Process {

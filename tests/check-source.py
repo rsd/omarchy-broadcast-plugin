@@ -77,6 +77,12 @@ widget would hide.
   - the visibility rule: `enabled` is the daemon's word; `enabled_when` and
     `disabled_kind` are read for layout only (settingPlacement, rowMaster),
     never to decide a row's `enabled` or a write;
+  - systemctl and journalctl appear in the QML/JS only as whole command
+    lines shown to copy (commandText, hint, Model.DIAGNOSTIC_COMMANDS),
+    never as an argv element or on a line that builds a command;
+  - every one-shot command is bounded by a one-shot watchdog Timer (Daemon
+    commandWatchdog: started by armCommand, stopped when it ends), the
+    watch is not;
   - the plugin's version in Model.PLUGIN_VERSION is the manifest's;
   - the battery saver: the panel's switch and its Mode dropdown are drawn
     from Model.batterySaverView only, the panel holds the configuration read
@@ -449,8 +455,19 @@ check("flushSettings walks only the drafts, bounded by Model.withSetting",
 check("a move is made a value of its enabled row before it is kept",
       "var v = row && row.enabled ? Model.rowValue(row, value) : null" in block(daemon, "function moveSetting"))
 timers = re.findall(r"property Timer (\w+): Timer \{", daemon)
-check("the Daemon's timers are the backoff, the settings debounce, the microphone switch's bounded wait and the gallery step's watchdog",
-      sorted(timers) == ["backoffTimer", "mediaWatchdog", "micWaitTimer", "settingsTimer"], str(timers))
+check("the Daemon's timers are the backoff, the settings debounce, the microphone switch's bounded wait and the gallery step's and the command's watchdogs",
+      sorted(timers) == ["backoffTimer", "commandWatchdog", "mediaWatchdog", "micWaitTimer", "settingsTimer"], str(timers))
+command_timer = block(daemon, "property Timer commandWatchdog")
+check("the command watchdog is a one-shot, (re)started only by armCommand, stopped when a command ends, and never bounds the watch",
+      "repeat: false" in command_timer and "onTriggered: root.commandTimeout()" in command_timer
+      and re.findall(r"commandWatchdog\.(\w+)\(", daemon) == ["restart", "stop"]
+      and "commandWatchdog.restart()" in block(daemon, "function armCommand")
+      and "commandWatchdog.stop()" in block(daemon, "function commandEnded")
+      and "Model.isStartIntent(intent) ? startTimeoutMs : commandTimeoutMs" in block(daemon, "function armCommand")
+      and "commandWatchdog" not in block(daemon, "property Process watchProc"))
+check("the Start button's label follows Daemon.starting (the start command only), not any busy command",
+      "readonly property bool starting: Model.isStartIntent(runningIntent)" in daemon
+      and 'text: Daemon.starting ? "Starting\\u2026" : "Start"' in panel)
 media_timer = block(daemon, "property Timer mediaWatchdog")
 check("the gallery watchdog is a one-shot, (re)started only by startMediaStep and stopped when a step ends",
       "repeat: false" in media_timer and "onTriggered: root.mediaTimeout()" in media_timer
@@ -869,6 +886,41 @@ check("the health's suggestions and changes fold, drawn and walked from healthVi
       and "Math.min(Number(health.shownSuggestions) || 0, hints.length)" in block(model, "function cursorStops"))
 check("the health's lists are capped before they are walked",
       all(c in block(model, "function healthFields") for c in ("i < HEALTH_WARNINGS_CAP", "j < HEALTH_SUGGESTIONS_CAP", "k < HEALTH_RECOMMENDED_CAP")))
+
+# ---- systemctl and journalctl are display text, never run -------------------
+# The plugin starts the daemon through the CLI's `start` and never runs
+# systemctl or journalctl. Either word may appear in QML/JS only inside a
+# string literal that is a whole command line shown to copy (a `commandText:`
+# or `hint:` value, or an entry of DIAGNOSTIC_COMMANDS): never a bare word
+# (an argv element), never outside a string, never on a line that builds a
+# command (`command:`, `.command =`, argv, Process).
+service_words = re.compile(r"\b(?:systemctl|journalctl)\b")
+string_literal = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+service_hits = 0
+service_bad = []
+for path, src in list(sources.items()) + list(js_sources.items()):
+    if path.parent.name == "tests" or path.parent.name == "harness":
+        continue
+    for n, line in enumerate(src.splitlines(), 1):
+        if not service_words.search(line):
+            continue
+        service_hits += 1
+        where = f"{path.name}:{n}"
+        outside = re.sub(r"//.*$", "", string_literal.sub('""', line))
+        if service_words.search(outside):
+            service_bad.append(f"{where}: outside a string literal")
+            continue
+        literals = [l for l in string_literal.findall(line) if service_words.search(l)]
+        if any(re.fullmatch(r'"\s*(?:systemctl|journalctl)\s*"', l) for l in literals):
+            service_bad.append(f"{where}: a bare word (an argv element)")
+        if any(not re.match(r'"(?:systemctl|journalctl)\s', l) for l in literals):
+            service_bad.append(f"{where}: not the start of a displayed command line")
+        if re.search(r"\bcommand\s*[:=]|\bargv\b|\bProcess\b|\bexec\w*\(", line):
+            service_bad.append(f"{where}: on a line that builds a command")
+        if not re.search(r"\b(?:commandText|hint)\s*:|\bDIAGNOSTIC_COMMANDS\b", line):
+            service_bad.append(f"{where}: not a commandText/hint value or a diagnostic entry")
+check("systemctl and journalctl appear only as displayed command text, never in an argv",
+      not service_bad and service_hits > 0, "; ".join(service_bad) or "no occurrence found: the pattern is broken")
 
 # ---- pending re-arm through Qt.callLater (rule 8) ---------------------------
 check("command retry deferred with Qt.callLater", "Qt.callLater(root.flushPending)" in daemon_src)
