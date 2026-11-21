@@ -108,10 +108,10 @@ The plugin is only a client, so install the daemon before it. The daemon is a se
 - `omarchy-broadcast-onnx-git`: the open-model effects, which run on any GPU or on the CPU. Without an NVIDIA GPU, install `onnxruntime-cpu` first, or pick it at the provider prompt.
 - `omarchy-broadcast-maxine-vfx-git`, `omarchy-broadcast-maxine-ar-git` and `omarchy-broadcast-maxine-afx-git`: the NVIDIA Maxine effects, for NVIDIA GPUs only. Each needs its NVIDIA Maxine SDK package, which you build yourself (see [`docs/setup/maxine.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/setup/maxine.md) in the omarchy-broadcast repository).
 
-For example:
+Each package also comes prebuilt, with `-bin` in place of `-git` (for example `omarchy-broadcast-bin`); the prebuilt packages install the same files without compiling. For example:
 
 ```sh
-yay -S omarchy-broadcast-git omarchy-broadcast-onnx-git
+yay -S omarchy-broadcast-bin omarchy-broadcast-onnx-bin
 ```
 
 The virtual camera needs the `v4l2loopback` kernel module, set up once as described in [`docs/setup/loopback.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/setup/loopback.md). Then start the daemon, and have it start at every login:
