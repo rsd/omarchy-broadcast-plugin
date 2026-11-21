@@ -741,7 +741,7 @@ function unavailableMessageText(record) {
     return { title: parts.text, path: parts.path, detail: "",
              hint: "Install omarchy-broadcast-bin\n"
                + "or -git from the AUR\n"
-               + "(see the README).\n"
+               + "(see INSTALL.md).\n"
                + "Or set the cliPath setting.",
              commandText: "" }
   case "cli-failed":
@@ -3097,7 +3097,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.7"
+var PLUGIN_VERSION = "0.37.8"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"
