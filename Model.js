@@ -103,10 +103,6 @@ var REVISION_MAX = 4294967295
 // Material Design glyphs from the bar's Nerd Font (checked by rendering them).
 var GLYPH_WEBCAM = String.fromCodePoint(0xF05A0)
 var GLYPH_WEBCAM_OFF = String.fromCodePoint(0xF1737)
-var GLYPH_VIDEO = String.fromCodePoint(0xF0567)
-var GLYPH_VIDEO_OUTLINE = String.fromCodePoint(0xF0BDC)
-var GLYPH_VIDEO_OFF = String.fromCodePoint(0xF0568) // mdi-video-off, filled: a closed camera shutter on the bar
-var GLYPH_VIDEO_OFF_OUTLINE = String.fromCodePoint(0xF0BDB)
 var GLYPH_ALERT = String.fromCodePoint(0xF0028)
 var GLYPH_WARNING = String.fromCodePoint(0xF002A) // mdi-alert-outline
 var GLYPH_RADIO_ON = String.fromCodePoint(0xF043E)
@@ -597,28 +593,31 @@ function visualKey(record) {
   return record.state
 }
 
-// state -> { glyph, colorRole: foreground | accent | urgent, dimmed }.
-// starting and active share the accent and differ by glyph (outline vs
-// filled); off and unavailable are both dimmed and differ by glyph. A
-// non-empty `error` outside the `error` state only shows in the tooltip and
-// the panel. A `warning` never changes the visual: it follows `state` only.
+// state -> { glyph, colorRole: foreground | accent | urgent, dimmed, faded }.
+// The webcam glyph family: idle, starting and active share the webcam and
+// differ by colour (foreground, accent at half strength, accent); off is the
+// crossed-out webcam and unavailable the warning sign, both dimmed. `faded`
+// is the half-strength accent of `starting`; `dimmed` the muted look of off
+// and unavailable. A non-empty `error` outside the `error` state only shows
+// in the tooltip and the panel. A `warning` never changes the visual: it
+// follows `state` only.
 function visualFor(key) {
   switch (key) {
-  case "off": return { key: key, glyph: GLYPH_WEBCAM_OFF, colorRole: "foreground", dimmed: true }
-  case "idle": return { key: key, glyph: GLYPH_WEBCAM, colorRole: "foreground", dimmed: false }
-  case "starting": return { key: key, glyph: GLYPH_VIDEO_OUTLINE, colorRole: "accent", dimmed: false }
-  case "active": return { key: key, glyph: GLYPH_VIDEO, colorRole: "accent", dimmed: false }
-  case "error": return { key: key, glyph: GLYPH_ALERT, colorRole: "urgent", dimmed: false }
-  default: return { key: "unavailable", glyph: GLYPH_VIDEO_OFF_OUTLINE, colorRole: "foreground", dimmed: true }
+  case "off": return { key: key, glyph: GLYPH_WEBCAM_OFF, colorRole: "foreground", dimmed: true, faded: false }
+  case "idle": return { key: key, glyph: GLYPH_WEBCAM, colorRole: "foreground", dimmed: false, faded: false }
+  case "starting": return { key: key, glyph: GLYPH_WEBCAM, colorRole: "accent", dimmed: false, faded: true }
+  case "active": return { key: key, glyph: GLYPH_WEBCAM, colorRole: "accent", dimmed: false, faded: false }
+  case "error": return { key: key, glyph: GLYPH_ALERT, colorRole: "urgent", dimmed: false, faded: false }
+  default: return { key: "unavailable", glyph: GLYPH_WARNING, colorRole: "foreground", dimmed: true, faded: false }
   }
 }
 
 // The bar's visual: visualFor(visualKey(record)), except that while the
-// camera's privacy shutter is closed (shutterClosed) the glyph is the filled
-// video-off one. The key, colour role and dimming stay the state's own.
+// camera's privacy shutter is closed (shutterClosed) the glyph is the
+// crossed-out webcam. The key, colour role and dimming stay the state's own.
 function barVisual(record) {
   var v = visualFor(visualKey(record))
-  if (shutterClosed(record)) v.glyph = GLYPH_VIDEO_OFF
+  if (shutterClosed(record)) v.glyph = GLYPH_WEBCAM_OFF
   return v
 }
 
@@ -3057,7 +3056,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.1"
+var PLUGIN_VERSION = "0.37.2"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"

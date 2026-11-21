@@ -214,7 +214,8 @@ BarWidget {
     text: root.visual.glyph
     active: root.visual.colorRole !== "foreground"
     activeColor: root.visual.colorRole === "urgent" ? root.urgentColor : Commons.Color.accent
-    dimmed: root.visual.dimmed
+    // The kit renders `dimmed` as reduced opacity; `faded` (starting) uses it too.
+    dimmed: root.visual.dimmed || root.visual.faded
     tooltipText: Model.tooltipText(root.record)
     onPressed: function(buttonCode) { root.press(buttonCode) }
 

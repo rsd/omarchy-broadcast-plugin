@@ -840,7 +840,7 @@ Item {
           textFormat: Text.PlainText
           anchors.left: parent.left
           y: Math.round((hero.topHeight - implicitHeight) / 2)
-          opacity: root.visual.dimmed ? 0.5 : 1.0
+          opacity: root.visual.dimmed || root.visual.faded ? 0.5 : 1.0
           text: root.visual.glyph
           color: root.glyphColor
           font.family: root.fontFamily
