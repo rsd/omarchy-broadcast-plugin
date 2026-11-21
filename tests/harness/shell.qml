@@ -999,8 +999,8 @@ ShellRoot {
       h.eq("starting glyph", A().iconButton.text, glyphOf("starting"))
       h.eq("starting uses the accent", A().iconButton.active, true)
       h.eq("starting accent colour", String(A().iconButton.activeColor), String(Commons.Color.accent))
-      h.eq("starting not dimmed", A().iconButton.dimmed, false)
-      h.check("starting differs from active", glyphOf("starting") !== glyphOf("active"))
+      h.eq("starting is faded (the kit dims it)", A().iconButton.dimmed, true)
+      h.eq("starting shares the webcam glyph with active", glyphOf("starting"), glyphOf("active"))
     })
     h.grabStep(function() { return strip }, "bar-starting.png")
     h.step("active with stats", function() {
@@ -3738,7 +3738,7 @@ ShellRoot {
     h.step("health: the Camera tab and the bar show the closed shutter", function() {
       h.eq("the Camera tab carries the caution sign", h.find(A(), "tab-camera").iconText, h.model.GLYPH_WARNING)
       h.eq("and names the shutter and the warning", h.find(A(), "tab-camera").Accessible.name, "Camera, shutter closed, with a warning")
-      h.eq("the bar glyph is video-off", A().iconButton.text, h.model.GLYPH_VIDEO_OFF)
+      h.eq("the bar glyph is crossed-out webcam", A().iconButton.text, h.model.GLYPH_WEBCAM_OFF)
       h.check("the tooltip says so", A().iconButton.tooltipText.indexOf("camera shutter closed") >= 0, A().iconButton.tooltipText)
       h.check("the accessible name says so", A().iconButton.Accessible.name.indexOf("camera shutter closed") >= 0)
     })
@@ -3750,7 +3750,7 @@ ShellRoot {
     h.step("health: the tab and the bar clear", function() {
       h.eq("no caution sign", h.find(A(), "tab-camera").iconText, "")
       h.eq("plain name", h.find(A(), "tab-camera").Accessible.name, "Camera")
-      h.eq("the filled video glyph", A().iconButton.text, h.model.GLYPH_VIDEO)
+      h.eq("the active webcam glyph", A().iconButton.text, h.model.GLYPH_WEBCAM)
       h.check("no phrase", A().iconButton.tooltipText.indexOf("shutter") < 0, A().iconButton.tooltipText)
     })
     h.step("health: closed again, then no session runs", function() {

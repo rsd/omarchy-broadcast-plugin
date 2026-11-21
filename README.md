@@ -14,12 +14,12 @@ The icon follows the daemon state. Colours come from the active theme.
 |---|---|---|
 | `off` | webcam, crossed out | dimmed; the privacy switch is off |
 | `idle` | webcam | normal colour; on, no application is using the camera |
-| `starting` | video camera, outline | accent colour |
-| `active` | video camera, filled | accent colour; the camera and GPU run |
+| `starting` | webcam | accent colour at half strength |
+| `active` | webcam | accent colour; the camera and GPU run |
 | `error` | alert circle | urgent colour; the daemon reports an error |
-| unavailable | video camera, crossed out outline | dimmed; the daemon is not running, does not answer, or the CLI is missing or unsupported |
+| unavailable | warning sign | dimmed; the daemon is not running, does not answer, or the CLI is missing or unsupported |
 
-While a session runs and the camera's privacy shutter is closed (daemon interface revision 26 or later), the icon is a filled video camera, crossed out, in the state's colour, and the tooltip says "camera shutter closed".
+While a session runs and the camera's privacy shutter is closed (daemon interface revision 26 or later), the icon is the crossed-out webcam, in the state's colour, and the tooltip says "camera shutter closed".
 
 While applications record from the Omarchy Broadcast Mic, a microphone glyph in the accent colour (the urgent colour while the microphone reports an error) shows beside the camera's icon, after it on a horizontal bar and under it on a vertical one, whatever the camera's state. Its tooltip gives the microphone's state and how many applications record from it, and the error when there is one. It follows the daemon's reports in the `watch` stream; the plugin does not poll for it. A left click on it opens the panel on the Mic tab (for that opening only: the tab the panel remembers is not changed) or, when the panel is open, closes it; a right click opens the setup dialog, as on the camera's icon; a middle click does nothing (turning the camera on or off is the camera icon's).
 
