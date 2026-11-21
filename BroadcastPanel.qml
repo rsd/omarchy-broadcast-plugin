@@ -12,8 +12,8 @@ import "Model.js" as Model
 // stays):
 //
 //   wide    the header across the top; under it, on the left, the live
-//           preview (16:9, its controls drawn over the frame: Hide, a
-//           rule-of-thirds grid and the preview's refresh rate) and a short
+//           preview (16:9, its controls in a row under the frame: a
+//           rule-of-thirds grid, the preview's refresh rate and Hide) and a short
 //           summary (camera, format, apps, microphone); on the right the
 //           tab row and the tab shown
 //   narrow  one column: the header (its state line under the title and the
@@ -2535,14 +2535,15 @@ Item {
       }
     }
 
-    // ---- the preview's frame: 16:9, what apps receive, its controls drawn
-    // over it. In the left column (wide) or above the tabs (narrow).
+    // ---- the preview's frame: 16:9, what apps receive, its controls in a
+    // row under it. In the left column (wide) or above the tabs (narrow).
     Item {
       id: previewBlock
       objectName: "previewBlock"
       parent: root.layout.wide ? wideSlot : narrowSlot
       width: parent ? parent.width : 0
-      implicitHeight: root.previewPlace.mode === "frame" ? previewFrame.height : 0
+      implicitHeight: root.previewPlace.mode === "frame"
+                      ? previewFrame.height + (previewControlsRow.visible ? Style.space(8) + previewControlsRow.height : 0) : 0
       height: implicitHeight
       visible: root.previewPlace.mode === "frame"
 
@@ -2613,40 +2614,25 @@ Item {
             opacity: 0.45
           }
         }
+      }
 
-        // The controls over the frame: the grid and the refresh rate on the
-        // left, Hide on the right; only where the preview can run. Each
-        // group on a solid backing of the theme's background, so it reads
-        // over any picture (the chips' own fills are see-through), and the
-        // chosen rate's selected fill stands out against it.
-        Rectangle {
-          objectName: "previewOverlayBacking"
-          visible: overlayLeft.visible
-          x: overlayLeft.x - Style.space(4)
-          y: overlayLeft.y - Style.space(4)
-          width: overlayLeft.width + Style.space(8)
-          height: overlayLeft.height + Style.space(8)
-          radius: Style.cornerRadius
-          color: Commons.Color.background
-        }
-        Rectangle {
-          objectName: "previewHideBacking"
-          visible: hideButton.visible
-          x: hideButton.x - Style.space(4)
-          y: hideButton.y - Style.space(4)
-          width: hideButton.width + Style.space(8)
-          height: hideButton.height + Style.space(8)
-          radius: Style.cornerRadius
-          color: Commons.Color.background
-        }
+      // The controls under the frame, a row of their own (never over the
+      // picture): the grid and the refresh rate on the left, Hide on the
+      // right; only where the preview can run.
+      Item {
+        id: previewControlsRow
+        objectName: "previewControlsRow"
+        y: previewFrame.height + Style.space(8)
+        width: parent.width
+        height: visible ? Math.max(overlayLeft.height, hideButton.height) : 0
+        visible: root.previewControls
+
         Row {
           id: overlayLeft
           objectName: "previewOverlay"
           anchors.left: parent.left
-          anchors.bottom: parent.bottom
-          anchors.margins: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(8)
-          visible: root.previewControls
 
           Button {
             id: gridButton
@@ -2706,9 +2692,7 @@ Item {
           id: hideButton
           objectName: "previewHide"
           anchors.right: parent.right
-          anchors.bottom: parent.bottom
-          anchors.margins: Style.space(8)
-          visible: root.previewControls
+          anchors.verticalCenter: parent.verticalCenter
           text: Model.PREVIEW_HIDE_LABEL
           tooltipText: "Hide the preview (it stops; the panel remembers)"
           bordered: true

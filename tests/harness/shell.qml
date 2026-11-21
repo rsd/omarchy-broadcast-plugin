@@ -1802,7 +1802,8 @@ ShellRoot {
       h.eq("two columns, 920", A().layout.wide + "," + A().popup.contentWidth, "true,920")
       h.eq("the frame in the left column", h.find(A(), "previewColumn").visible && h.find(A(), "previewBlock").parent.parent === h.find(A(), "previewColumn"), true)
       h.eq("the summary under it", h.find(A(), "previewSummary").visible, true)
-      h.eq("its controls over the frame", h.find(A(), "previewOverlay").visible && h.find(A(), "previewHide").visible, true)
+      h.eq("its controls under the frame", h.find(A(), "previewOverlay").visible && h.find(A(), "previewHide").visible, true)
+      h.check("the controls row is below the frame, not over it", h.find(A(), "previewControlsRow").mapToItem(h.find(A(), "previewFrame"), 0, 0).y >= h.find(A(), "previewFrame").height)
       h.check("source is the expected path", String(img.source).indexOf("file://" + framePath + "?") === 0, String(img.source))
       h.eq("no frame dropped", P().droppedFrames, 0)
       h.eq("stops", h.content(A()).stops.map(function(st) { return st.kind }).join(","), "switch,info,preview,grid,fps,tabs")
@@ -1854,7 +1855,7 @@ ShellRoot {
       h.eq("entry id", call.id, shellRoot.moduleName)
       h.eq("entry", JSON.stringify(call.entry), JSON.stringify({ id: shellRoot.moduleName, cliPath: shellRoot.cli, previewEnabled: true }))
       h.eq("switch on", P().switchOn, true)
-      h.eq("Hide offered over the frame", h.find(A(), "previewHide").visible, true)
+      h.eq("Hide offered under the frame", h.find(A(), "previewHide").visible, true)
       h.eq("still the first start", P().starts, 1)
       // the other monitor's panel
       B().open()
@@ -6166,9 +6167,9 @@ ShellRoot {
     h.step("measure: wide, the preview live, the default state", function() {
       h.eq("two columns", A().layout.wide + "," + A().popup.contentWidth, "true,920")
       h.eq("the preview on the left, its summary under it", h.find(A(), "previewColumn").visible && h.find(A(), "previewSummary").visible, true)
-      h.eq("the controls over the frame on a solid backing of the theme's background",
-           h.find(A(), "previewOverlayBacking").visible && h.find(A(), "previewHideBacking").visible
-           && String(h.find(A(), "previewOverlayBacking").color) === String(Commons.Color.background), true)
+      h.eq("the controls in a row under the frame, no backing plate",
+           h.find(A(), "previewControlsRow").visible && h.find(A(), "previewHide").visible
+           && !h.find(A(), "previewOverlayBacking") && !h.find(A(), "previewHideBacking"), true)
       h.check("the state line under the title, beside the controls (wide)",
               h.find(A(), "heroState").mapToItem(C(), 0, 0).y < h.find(A(), "enableSwitch").mapToItem(C(), 0, h.find(A(), "enableSwitch").height).y)
       measure("wide-preview-live")
@@ -6216,7 +6217,7 @@ ShellRoot {
       h.check("the reason inside the frame area", h.find(A(), "previewBlock").visible && t.visible && t.text.indexOf("stopped by signal 9") !== -1, t.text)
       h.eq("drawn as an error", t.color, Commons.Color.urgent)
       h.eq("no strip in the wide layout", h.find(A(), "previewStrip").visible, false)
-      h.eq("Hide over the frame", h.find(A(), "previewHide").visible, true)
+      h.eq("Hide under the frame", h.find(A(), "previewHide").visible, true)
       h.removeFile("preview-exit")
     }, function() { return h.writerIdle() })
     h.grabStep(function() { return A().popup }, "m9-preview-error-wide-mic.png")
