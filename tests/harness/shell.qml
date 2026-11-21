@@ -1211,6 +1211,52 @@ ShellRoot {
     })
     h.grabStep(function() { return strip }, "bar-unavailable.png")
     h.grabStep(function() { return A().popup }, "panel-unavailable.png")
+    // the Start button: `<cli> start` as an argv, never systemctl
+    h.step("start button shown", function() {
+      var b = h.find(A(), "startDaemonButton")
+      h.eq("visible", b.visible, true)
+      h.eq("enabled", b.enabled, true)
+      h.eq("label", b.text, "Start")
+      h.eq("login line stays as text", h.find(A(), "unavailableCommand").text, "systemctl --user enable --now omarchy-broadcastd")
+      h.writeFile("delay", ["0.6"])
+    }, function() { return h.writerIdle() })
+    h.step("press Start from the keyboard", function() {
+      var c = h.content(A())
+      h.eq("one stop: Start", JSON.stringify(c.stops.map(function(st) { return st.kind })), JSON.stringify(["start"]))
+      c.setCursor("start", -1)
+      h.eq("cursor on Start", c.currentStop.kind, "start")
+      h.eq("button shows the cursor", h.find(A(), "startDaemonButton").hasCursor, true)
+      h.markLog()
+      h.key(Qt.Key_Return)
+    },
+           function() { return S().commandBusy })
+    h.step("busy: disabled", function() {
+      h.eq("disabled", h.find(A(), "startDaemonButton").enabled, false)
+      h.eq("busy label", h.find(A(), "startDaemonButton").text, "Starting\u2026")
+    }, function() { return !S().commandBusy })
+    h.step("start ran as an argv", function() {
+      h.eq("argv", JSON.stringify(h.newLogArgs()), JSON.stringify([["start"]]))
+      h.eq("no error", S().commandError, "")
+      h.eq("enabled again", h.find(A(), "startDaemonButton").enabled, true)
+      h.removeFile("delay")
+      h.writeFile("exit", ["2"])
+      h.writeFile("stderr", ["error: unrecognized subcommand 'start'", "second line"])
+    }, function() { return h.writerIdle() })
+    h.step("old CLI: friendly failure", function() { h.find(A(), "startDaemonButton").clicked() },
+           function() { return S().commandError !== "" && !S().commandBusy })
+    h.step("failure shown, button kept", function() {
+      h.eq("text", S().commandError, h.model.START_UNSUPPORTED_TEXT)
+      h.eq("panel shows it", h.find(A(), "commandError").text, h.model.START_UNSUPPORTED_TEXT)
+      h.eq("button kept", h.find(A(), "startDaemonButton").visible, true)
+      h.writeFile("stderr", ["omarchy-broadcast: boom <b>", "second line"])
+    }, function() { return h.writerIdle() })
+    h.step("other failure: first stderr line, sanitised", function() { h.find(A(), "startDaemonButton").clicked() },
+           function() { return S().commandError.indexOf("Could not start") === 0 })
+    h.step("shown", function() {
+      h.check("text", S().commandError === "Could not start omarchy-broadcastd: boom b", S().commandError)
+      h.writeFile("exit", ["0"])
+      h.removeFile("stderr")
+    }, function() { return h.writerIdle() })
     h.step("new snapshot recovers", function() { h.feed([snapshotLine({})]) },
            function() { return S().record.link === "ok" && S().record.state === "idle" })
 

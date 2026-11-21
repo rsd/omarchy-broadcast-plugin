@@ -576,6 +576,7 @@ Item {
     if (!stop) return
     if (stop.kind === "switch") toggleSwitch()
     else if (stop.kind === "info") toggleDetails()
+    else if (stop.kind === "start") Daemon.startDaemon()
     else if (stop.kind === "details-back") toggleDetails()
     else if (stop.kind === "details-copy") copyDetails()
     else if (stop.kind === "grid") toggleGrid()
@@ -1003,7 +1004,26 @@ Item {
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
-        // Shown, never run: the plugin has no button that starts the daemon.
+        // Starts the daemon through the CLI's `start` (D-Bus activation),
+        // never through systemctl.
+        Button {
+          objectName: "startDaemonButton"
+          visible: root.message.startable
+          enabled: !Daemon.commandBusy
+          text: Daemon.commandBusy ? "Starting\u2026" : "Start"
+          tooltipText: "Start omarchy-broadcastd"
+          bordered: true
+          hasCursor: root.hasCursor("start", -1)
+          foreground: root.foreground
+          background: Commons.Color.background
+          accent: root.accent
+          fontFamily: root.fontFamily
+          Accessible.role: Accessible.Button
+          Accessible.name: text
+          onHovered: function(on) { if (on) root.setCursor("start", -1) }
+          onClicked: Daemon.startDaemon()
+        }
+        // Shown, never run: the command that starts it at every login.
         Text {
           objectName: "unavailableCommand"
           textFormat: Text.PlainText
