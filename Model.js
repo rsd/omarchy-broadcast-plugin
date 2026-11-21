@@ -3057,7 +3057,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.3"
+var PLUGIN_VERSION = "0.37.4"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"
@@ -3182,7 +3182,7 @@ function panelLayout(narrow, switchOn, controls) {
 
 // The preview's place in the panel, exactly as drawn:
 //   { mode, text, error, button }
-// mode: "frame" (the 16:9 area, its controls drawn over it; in the wide
+// mode: "frame" (the 16:9 area, its controls in a row under it; in the wide
 // layout also while the preview fails: `text` and `error` then say why,
 // drawn inside the frame area, see panelLayout), "strip" (one
 // line, `text` and `button`), or "none" (nothing: the daemon is unavailable,
@@ -3730,7 +3730,7 @@ function recommendedArgv(cli, record, intent) {
 //   the header's on/off switch, its (i) (the Details view), then while
 //   `p.details` only the view's Back and Copy;
 //   the preview's (`p.preview`, previewStripView): the strip's button (one
-//   stop, "preview") while it has one, or over the frame, while the preview
+//   stop, "preview") while it has one, or the row under the frame, while the preview
 //   can run (`p.previewControls`), Hide ("preview"), the grid and the
 //   refresh rate (one stop for its choices);
 //   the tab row (one stop; Left/Right change the tab): after the preview's
