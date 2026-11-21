@@ -724,7 +724,7 @@ function unavailableMessage(record) {
     return { title: "", path: "", detail: "", hint: "", commandText: "" }
   case "not-running":
     return { title: "omarchy-broadcastd is not running", path: "", detail: "",
-             hint: "Start it with:", commandText: "systemctl --user start omarchy-broadcastd" }
+             hint: "Start it, and at every login, with:", commandText: "systemctl --user enable --now omarchy-broadcastd" }
   case "unreachable":
     return { title: "omarchy-broadcastd is not answering", path: "", detail: detail,
              hint: "Retrying every 2 s. Its log:", commandText: "journalctl --user -u omarchy-broadcastd" }
@@ -732,9 +732,8 @@ function unavailableMessage(record) {
     // The text ends on the path it searched or was given, when it names one.
     var parts = splitTrailingPath(detail !== "" ? detail : CLI_MISSING_TEXT)
     return { title: parts.text, path: parts.path, detail: "",
-             hint: "Install it:\n"
-               + "Arch package: /usr/bin\n"
-               + "install-user.sh: ~/.local/bin\n"
+             hint: "Install omarchy-broadcast-git\n"
+               + "from the AUR (see the README).\n"
                + "Or set the cliPath setting.",
              commandText: "" }
   case "cli-failed":
@@ -3058,7 +3057,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.0"
+var PLUGIN_VERSION = "0.37.1"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"
@@ -3983,7 +3982,7 @@ var SETUP_OLD_PLUGIN = "Update the plugin to show the daemon's configuration."
 var SETUP_LOADING = "Loading…"
 var SETUP_SAVING = "Saving…"
 // Where the daemon looks by default (modules.dirs; docs/modules.md).
-var MODULES_EMPTY_TEXT = "No effect modules installed. A module's manifest goes in ~/.local/share/omarchy-broadcast/modules.d (your own) or /usr/lib/omarchy-broadcast/modules.d (packaged)."
+var MODULES_EMPTY_TEXT = "No effect modules installed. Install omarchy-broadcast-onnx-git from the AUR, or the omarchy-broadcast-maxine-*-git modules for NVIDIA GPUs. A module's manifest goes in ~/.local/share/omarchy-broadcast/modules.d (your own) or /usr/lib/omarchy-broadcast/modules.d (packaged)."
 var ORDER_EMPTY_TEXT = "No effect stages to order"
 var BACKENDS_EMPTY_TEXT = "No backend settings: no module offers a stage."
 var OVERRIDDEN_PREFIX = "Overridden by "

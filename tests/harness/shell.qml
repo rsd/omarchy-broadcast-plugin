@@ -1195,7 +1195,7 @@ ShellRoot {
       h.eq("tooltip", A().iconButton.tooltipText, "Omarchy Broadcast: daemon not running")
       h.eq("hero status line", h.content(A()).heroMeta, "Unavailable")
       h.eq("unavailable title", h.find(A(), "unavailableTitle").text, "omarchy-broadcastd is not running")
-      h.eq("start command as text", h.find(A(), "unavailableCommand").text, "systemctl --user start omarchy-broadcastd")
+      h.eq("start command as text", h.find(A(), "unavailableCommand").text, "systemctl --user enable --now omarchy-broadcastd")
       h.eq("switch hidden", h.find(A(), "enableSwitch").visible, false)
       h.eq("cameras hidden", h.find(A(), "camerasBlock").visible, false)
       A().close()
