@@ -1010,7 +1010,7 @@ Item {
           objectName: "startDaemonButton"
           visible: root.message.startable
           enabled: !Daemon.commandBusy
-          text: Daemon.commandBusy ? "Starting\u2026" : "Start"
+          text: Daemon.starting ? "Starting\u2026" : "Start"
           tooltipText: "Start omarchy-broadcastd"
           bordered: true
           hasCursor: root.hasCursor("start", -1)

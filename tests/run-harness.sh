@@ -268,9 +268,9 @@ if [ "$mode" = mock ]; then
     exit 1
   }
   for tool in omarchy-menu-images omarchy-file-select; do
-    found=$(PATH="$run_path" command -v "$tool" || true)
-    [ "$found" = "$work/bin/$tool" ] || {
-      echo "harness: the mock PATH resolves $tool to '$found', not the fake $work/bin/$tool" >&2
+    tool_found=$(PATH="$run_path" command -v "$tool" || true)
+    [ "$tool_found" = "$work/bin/$tool" ] || {
+      echo "harness: the mock PATH resolves $tool to '$tool_found', not the fake $work/bin/$tool" >&2
       exit 1
     }
   done

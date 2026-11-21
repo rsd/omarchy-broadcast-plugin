@@ -1128,6 +1128,53 @@ ShellRoot {
       h.feed([snapshotLine({})])
     }, function() { return S().record.link === "ok" && h.writerIdle() })
 
+    // the watchdog: a command that never exits is killed, the busy state
+    // clears and the failure line says why; `start` has its own, longer bound
+    h.step("watchdog: a command that never exits", function() {
+      h.writeFile("delay", ["4"])
+      S().commandTimeoutMs = 1700
+      h.markLog()
+      h.check("next runs", S().nextCamera())
+      h.eq("starting is for `start` only", S().starting, false)
+      h.check("busy", S().commandBusy)
+    }, function() { return h.newLogArgs().length >= 1 && S().commandProc.running })
+    h.step("watchdog: killed, cleared, said", function() {}, function() { return !S().commandBusy }, 6000)
+    h.step("watchdog: the failure line", function() {
+      h.eq("one run", JSON.stringify(h.newLogArgs()), JSON.stringify([["camera", "next"]]))
+      h.eq("text", S().commandError, h.model.commandTimeoutText(1700))
+      h.eq("text names the bound", S().commandError, "omarchy-broadcast did not answer within 2 s")
+      h.eq("process gone", S().commandProc.running, false)
+      h.eq("watchdog stopped", S().commandWatchdog.running, false)
+      h.eq("nothing running", S().runningIntent, null)
+      h.removeFile("delay")
+      S().commandTimeoutMs = h.model.COMMAND_TIMEOUT_MS
+    }, function() { return h.writerIdle() })
+    h.step("watchdog: the next command goes through", function() {
+      h.markLog()
+      h.check("next runs", S().nextCamera())
+    }, function() { return h.newLogArgs().length >= 1 && !S().commandBusy })
+    h.step("watchdog: and clears the failure line", function() {
+      h.eq("error cleared", S().commandError, "")
+      h.feed(['{"v":1,"type":"error","code":"daemon-not-running","error":"gone"}'])
+    }, function() { return S().record.link === "not-running" })
+    h.step("watchdog: a `start` that never exits", function() {
+      h.writeFile("delay", ["4"])
+      S().startTimeoutMs = 1200
+      h.markLog()
+      h.check("start runs", S().startDaemon())
+      h.eq("starting", S().starting, true)
+    }, function() { return h.newLogArgs().length >= 1 && S().commandProc.running })
+    h.step("watchdog: the start is killed too", function() {}, function() { return !S().commandBusy }, 6000)
+    h.step("watchdog: the start failure line", function() {
+      h.eq("one run", JSON.stringify(h.newLogArgs()), JSON.stringify([["start"]]))
+      h.eq("text", S().commandError, "omarchy-broadcast did not answer within 1 s")
+      h.eq("starting off", S().starting, false)
+      h.eq("process gone", S().commandProc.running, false)
+      h.removeFile("delay")
+      S().startTimeoutMs = h.model.START_TIMEOUT_MS
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.link === "ok" && h.writerIdle() })
+
     // a failing command shows a capped, sanitised message; a success clears it
     h.step("failing command", function() {
       h.writeFile("exit", ["1"])
