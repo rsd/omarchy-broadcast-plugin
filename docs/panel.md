@@ -61,7 +61,7 @@ The panel is as tall as its content, at most 860 pixels and at most the screen's
 - **Three tabs**, Effects, Camera and Mic, of which one is shown.
   - The tab row is not shown while the daemon is unavailable, and the Details view takes the tabs' place while it is open.
   - The panel remembers the last tab chosen (the `panelTab` setting, see [Configuration](#configuration)) and opens on Effects the first time. A stored `status` from an earlier version reads as Effects.
-- **When the daemon is unavailable**, the reason and, where it helps, a command to copy. The command is text for you to run in a terminal: the plugin never runs `systemctl`. When the daemon is not running, a **Start** button runs the command below. That starts the daemon through D-Bus activation and changes no setting. It needs the daemon's D-Bus activation file, which the AUR packages install, and a CLI that has `start`.
+- **When the daemon is unavailable**, the reason and, where it helps, a command to copy. The command is text for you to run in a terminal: the plugin never runs `systemctl`. When the daemon is not running, a **Start** button runs the command below. That starts the daemon through D-Bus activation and changes no setting. It needs the daemon's D-Bus activation file, which the daemon's packages install, and a CLI that has `start`.
 
   ```sh
   omarchy-broadcast start
@@ -319,7 +319,7 @@ The plugin has six settings, set in the plugin's settings in the shell.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `cliPath` | empty | The absolute path of the `omarchy-broadcast` binary. A leading `~/` means the home directory. A bare name such as `omarchy-broadcast` or a relative path is refused, because a command would then run relative to whatever directory the shell has. Empty: `omarchy-broadcast` on `PATH` (the lookup is in [INSTALL.md](../INSTALL.md#set-the-cli-path-optional)) |
+| `cliPath` | empty | The absolute path of the `omarchy-broadcast` binary. A leading `~/` means the home directory. A bare name such as `omarchy-broadcast` or a relative path is refused, because a command would then run relative to whatever directory the shell has. Empty: `omarchy-broadcast` on `PATH` (the lookup is under "Finding the CLI" in [How it talks to the daemon](development.md#how-it-talks-to-the-daemon)) |
 | `previewEnabled` | off | Whether the panel shows the live preview. The panel's Show preview and Hide preview buttons set it, and the next opening, and the next shell start, restores it. On: the preview runs whenever a panel is open and has a place for it, and starts the camera if it is not already running. Off (hidden): the preview never runs and the panel shows a one-line strip |
 | `previewFps` | 15 | The preview's refresh rate, not the camera's. Also chosen in the row under the frame: 15 or 30. Any other value reads as 15 |
 | `panelTab` | `effect` | The tab the panel shows: `effect` (labelled Effects), `camera` or `mic`. Any other value reads as `effect`, `status` of earlier versions included (the Status tab is now the header's Details view) |
@@ -403,4 +403,4 @@ A setting is greyed, with the daemon's reason, when the camera reports a value t
   omarchy-broadcast settings
   ```
 
-- **Version.** Needs omarchy-broadcast and omarchy-broadcastd 0.22.0 or newer; see [Requirements](../INSTALL.md#requirements). Settings the daemon publishes that the plugin cannot draw safely (unknown type, bad id, out of range numbers, over the caps) are left out. The panel says so where a cap cuts the list.
+- **Version.** Needs omarchy-broadcast and omarchy-broadcastd 0.22.0 or newer; see [Versioning](development.md#versioning). Settings the daemon publishes that the plugin cannot draw safely (unknown type, bad id, out of range numbers, over the caps) are left out. The panel says so where a cap cuts the list.

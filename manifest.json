@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "br.com.dias.omarchy-broadcast",
   "name": "Omarchy Broadcast",
-  "version": "0.37.10",
+  "version": "0.37.11",
   "author": "Raul Dias",
   "license": "MIT OR Apache-2.0",
   "description": "Control the omarchy-broadcast virtual camera from the Omarchy bar: on/off, camera, background effects, camera settings, live preview, backgrounds and the noise-removed microphone. Needs the omarchy-broadcastd daemon.",

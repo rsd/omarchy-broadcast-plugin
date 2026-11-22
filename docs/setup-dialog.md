@@ -27,18 +27,7 @@ omarchy-broadcast modules disable <id>
   - A module refused by a declared conflict or a missing required module shows the daemon's reason ("Conflicts with <name> (<id>)", "Needs the module <id>") as its status.
   - An enabled module that can run shows one note, `<stage>: <reason>`, for each of its stages the daemon refuses (for example `matte: Cannot run together with noise removal`).
   - A module whose conflicts are not enforced (the debug override `modules.forced.<id>`) carries a line in the urgent colour, "Forced: conflicts are not enforced (debug override)", also read out with the row.
-  - The dialog only shows the mark. Either command below sets the override:
-
-    ```sh
-    omarchy-broadcast modules enable <id> --force
-    omarchy-broadcast config set modules.forced.<id> true
-    ```
-
-    This command clears it:
-
-    ```sh
-    omarchy-broadcast modules enable <id>
-    ```
+  - The dialog only shows the mark. How the override is set and cleared is in "Conflicts, requirements and forcing" in the daemon's [`docs/modules.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/modules.md#conflicts-requirements-and-forcing).
 
 - When there is no module, the section says "No effect modules installed", names the AUR packages that provide modules (`omarchy-broadcast-onnx-git`, or the `omarchy-broadcast-maxine-*-git` modules for NVIDIA GPUs) and says where a module's manifest goes: `~/.local/share/omarchy-broadcast/modules.d` for your own, `/usr/lib/omarchy-broadcast/modules.d` for packaged ones.
 
@@ -114,8 +103,8 @@ omarchy-broadcast config set -- <key> <value>
 - Left/Right walk the buttons on offer (a faded one is skipped), and Enter runs one.
 - While no image is chosen and either switch is on the image, a note under the row says black is shown instead. With a daemon at interface revision 21 or later, "either switch" is `output.placeholder` on Away image, or privacy on with its mode Away image.
 - "When there is no camera picture" (`output.placeholder`) is an ordinary row of choices, Black or Away image. With Away image, the image stands in for every frame without a camera picture (the camera switched off, starting, an error, a stall).
-- "When an effect can't run" (`effect.on_failure`) keeps its own choices, its image choice using the same picture.
 - A row a later configuration file sets, or one the daemon greys out, stays read-only with the reason.
+- **Below interface revision 21**, "When an effect can't run" (`effect.on_failure`) is a single row with its own choices, "Hide the camera: black", "Hide the camera: image" and "Show the camera" (written as `none`). Its image choice uses the same picture.
 - **From interface revision 21** the "When an effect can't run" dropdown is gone, replaced by two ordinary rows drawn in the daemon's order:
   - a switch, "Hide the camera when an effect can't run" (`effect.privacy`);
   - the choices "Show instead of the camera" (`effect.privacy_mode`): Black, Away image (offered once an away image is chosen, or while it is the choice in force) and Last frame.
@@ -126,8 +115,6 @@ omarchy-broadcast config set -- <key> <value>
   omarchy-broadcast config set -- effect.privacy true
   omarchy-broadcast config set -- effect.privacy_mode freeze
   ```
-
-  A daemon below revision 21 keeps the single `effect.on_failure` row, with its choices "Hide the camera: black", "Hide the camera: image" and "Show the camera" (written as `none`).
 
 **The battery saver** (from interface revision 22): the Video processing group has the **Battery saver** mode (`video.battery_saver`), chosen from a dropdown with the daemon's own labels:
 
@@ -179,7 +166,7 @@ Diagnostics is read-only. It shows:
 
 ## Where the dialog's changes go
 
-The daemon keeps the dialog's changes in a file of its own, `config.d/50-panel.toml` in its configuration directory (`~/.config/omarchy-broadcast/`). `config.toml` and every other file are never written. A setting that a later file (such as `config.d/90-local.toml`) also sets is shown greyed with "Overridden by <file>", and the daemon refuses to change it: edit or remove it in that file instead.
+The daemon keeps the dialog's changes in a file of its own, `config.d/50-panel.toml` in its configuration directory (`~/.config/omarchy-broadcast/`). `config.toml` and every other file are never written. A setting that a later file (such as `config.d/90-local.toml`) also sets is shown greyed with "Overridden by <file>", and the daemon refuses to change it. How the daemon orders its configuration files is in "Configuration" in its [`docs/setup/daemon.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/setup/daemon.md#configuration).
 
 ## Against an older daemon
 

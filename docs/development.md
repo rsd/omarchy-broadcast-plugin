@@ -1,6 +1,6 @@
 # Development and review
 
-How the plugin talks to the daemon, how to test it, notes for maintainers and marketplace reviewers, and how it is versioned. Back to the [README](../README.md).
+How the plugin talks to the daemon, how to run it from a checkout and test it, notes for maintainers and marketplace reviewers, and how it is versioned. Back to the [README](../README.md).
 
 The plugin is the root of this repository (`manifest.json` and the QML files). Its tests are in [`tests/`](../tests/). Nothing is built or installed by this repository.
 
@@ -17,10 +17,12 @@ The plugin is the root of this repository (`manifest.json` and the QML files). I
 
   Each short-lived process has a time bound, and one that outlives it is stopped with `SIGKILL`, not `SIGTERM`, because a binary that hangs may ignore `SIGTERM`:
   - a command above, 30 s (`COMMAND_TIMEOUT_MS`), and `start`, 45 s (`START_TIMEOUT_MS`);
-  - a setup dialog read (`modules list`, `order show`, `config show`, `config files` and `media list`, one at a time on one child), 30 s. The read then fails with "omarchy-broadcast did not answer within 30 s", and reopening the dialog reads again;
-  - a gallery step (a `media` command, `omarchy-menu-images` or `omarchy-file-select`), 610 s (`MEDIA_WATCHDOG_MS`), just past `omarchy-file-select`'s own 600 s;
-  - the two constant `sh -c` lookups, 5 s (`LOOKUP_TIMEOUT_MS`). A lookup that times out counts as not found;
+  - a setup dialog read (`modules list`, `order show`, `config show`, `config files` and `media list`, one at a time on one child, only while the dialog is open), and `config show` while a panel is open (the Battery saver row, from revision 22), 30 s. The read then fails with "omarchy-broadcast did not answer within 30 s", and reopening the dialog or the panel reads again;
+  - a gallery step (a `media` command, the import included, `omarchy-menu-images` or `omarchy-file-select`, one at a time, only while you use the Background row or the setup dialog's Away image row), 610 s (`MEDIA_WATCHDOG_MS`), just past `omarchy-file-select`'s own 600 s;
+  - the two constant `sh -c` lookups, the CLI resolver (`command -v omarchy-broadcast`) and the gallery tool lookup (`omarchy-menu-images`, `omarchy-file-select`), 5 s (`LOOKUP_TIMEOUT_MS`). A lookup that times out counts as not found;
   - the long-lived `watch --json` child has no bound: it is meant to run, and it restarts with the backoff above when it exits (the `preview --json` child runs while a panel is open and is not bounded either).
+
+  Every child ends with the shell: it exits when its output pipe closes or on `SIGTERM`.
 
   A new click is ignored while one runs. Setting writes and Reset to defaults instead wait behind it (see [Camera settings](panel.md#camera-settings)), and the queue never drops a command that is not a setting write.
 - **What is passed back.** Nothing else the daemon reports is passed back on the command line.
@@ -43,9 +45,33 @@ The plugin is the root of this repository (`manifest.json` and the QML files). I
   omarchy-broadcast start
   ```
 
+- **Finding the CLI.** The plugin looks for `omarchy-broadcast` in two places, in this order: the `cliPath` setting, if set ([Configuration](panel.md#configuration)), and then `PATH`. A `cliPath` that is set but unusable is reported, with no fallback to `PATH`. The plugin resolves the binary when the icon appears, once after each failed start of the CLI, and when the setting changes. It never resolves on a timer, so a CLI installed later is found after a shell reload or a change of the setting.
 - **Reads never start the daemon.** The commands `on`, `off`, `camera`, `settings set`, `settings reset`, `modules enable|disable`, `order set|reset` and `config set` start it through D-Bus activation if you installed that file (see "Service presence and activation" in [`docs/dbus-api.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/dbus-api.md) in the [omarchy-broadcast repository](https://github.com/rsd/omarchy-broadcast)). The plugin avoids sending them while the daemon is known to be down.
 
 When the daemon stops or restarts, the stream says so and the icon shows "unavailable" until the daemon is back. No action is needed. If the watch itself ends, the panel names the exit status or signal and the retry delay.
+
+## Running from a local checkout
+
+To work from a checkout, link its root into the shell's plugin directory:
+
+```sh
+mkdir -p ~/.config/omarchy/plugins
+ln -s /path/to/omarchy-broadcast-plugin ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast
+```
+
+To copy instead of linking, use the command below. Later changes in the checkout then no longer apply. The `tests/` and `.git` directories are not needed at run time and may be left out of the copy.
+
+```sh
+cp -r /path/to/omarchy-broadcast-plugin ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast
+```
+
+With a symlink, a change made in the checkout may not trigger a reload by itself. To remove a linked plugin, delete the link:
+
+```sh
+rm ~/.config/omarchy/plugins/br.com.dias.omarchy-broadcast
+```
+
+The manifest is at the root of the repository, which is what the add command expects. It installs the whole clone, `tests/` included. The shell never loads `tests/`: it reads only the files named by `manifest.json`.
 
 ## Testing the plugin
 
@@ -141,20 +167,21 @@ Notes on the tools:
 
 ## Notes for maintainers and marketplace review
 
-- **Starting the daemon.** The plugin starts the daemon only through the CLI's D-Bus activation (the CLI's `start` command, run by the panel's Start button). It never runs `systemctl`. The line below, shown in the panel and in the docs, is text for the user to copy:
+- **Starting the daemon.** The plugin starts the daemon only through the CLI's D-Bus activation (the CLI's `start` command, run by the panel's Start button). It never runs `systemctl`. The line below, shown in the panel's not-running message and quoted here, is text for the user to copy:
 
   ```sh
   systemctl --user enable --now omarchy-broadcastd
   ```
 
-- **Every `systemctl` and `journalctl` line is display text.** The plugin executes none of them. They are shown in the docs or in the panel for the user to run in a terminal:
-  - `systemctl --user enable --now omarchy-broadcastd` (the panel's not-running message, [INSTALL.md](../INSTALL.md), above);
-  - `systemctl --user restart omarchy-broadcastd` ([INSTALL.md](../INSTALL.md)) and `systemctl --user kill -s HUP omarchy-broadcastd` ([troubleshooting.md](troubleshooting.md)), in the docs only;
-  - `journalctl --user -u omarchy-broadcastd`, in the panel's "not answering" message and in the setup dialog's Diagnostics, and in [INSTALL.md](../INSTALL.md).
+- **Every `systemctl` and `journalctl` line is display text.** The plugin executes none of them. They are shown in the panel or the setup dialog for the user to run in a terminal:
+  - `systemctl --user enable --now omarchy-broadcastd`, in the panel's not-running message (above);
+  - `journalctl --user -u omarchy-broadcastd`, in the panel's "not answering" message and in the setup dialog's Diagnostics ([The setup dialog](setup-dialog.md#diagnostics)).
+
+  Beyond this list, the docs quote only the log command as the setup dialog displays it, in [Diagnostics](setup-dialog.md#diagnostics), and no other `systemctl` or `journalctl` line: the daemon's own fixes are linked in its repository.
 
   `tests/check-source.py` pins this: "systemctl and journalctl appear only as displayed command text".
 
-- **External dependency.** The plugin is a client and needs the external daemon, `omarchy-broadcastd` and its `omarchy-broadcast` CLI, which come from the AUR (`omarchy-broadcast-bin`, prebuilt, or `omarchy-broadcast-git`, built from source; see [INSTALL.md](../INSTALL.md#install-the-daemon)). Nothing in this repository installs it.
+- **External dependency.** The plugin is a client and needs the external daemon, `omarchy-broadcastd` and its `omarchy-broadcast` CLI, installed with the daemon's own guide (see [Before you start](../INSTALL.md#before-you-start)). Nothing in this repository installs it.
 - **External commands the plugin runs**, each as an argument list (the only shell is the two constant `sh -c` scripts described below):
   - `omarchy-broadcast`, the CLI: `watch --json` for the state, `preview --json` for the live preview, `start` for the Start button, and the commands that change the daemon's state, such as `on`, `off`, `settings set`, `modules`, `order`, `config` and `media`;
   - `omarchy-menu-images` and `omarchy-file-select`, Omarchy's image picker and file chooser, for the background and away image galleries;
@@ -162,7 +189,6 @@ Notes on the tools:
 
   The plugin runs no package manager, no `systemctl` and no `journalctl`, and needs no root.
 - **Scan triggers that are not plugin behaviour.** Some marketplace scan triggers are not plugin behaviour.
-  - The `yay` install line (package manager) and the `sudo`/pacman mentions (privilege) in [INSTALL.md](../INSTALL.md) are the daemon's install instructions, for you to run in a terminal. The plugin does not run them.
   - The git clone in `tests/check-all.sh` (a remote build) is test-only: it fetches an Omarchy release for `--omarchy-ref` and is never loaded by the shell.
   - The plugin itself never runs a package manager, `sudo`, `git`, `systemctl` or `journalctl`.
   - The scripts in `tests/` that have the executable bit (the fake CLI and its helpers) are test fixtures, not bundled executables; the shell never loads them.
@@ -174,16 +200,21 @@ Notes on the tools:
 
 The plugin's version is the `version` field of `manifest.json`. It started at 0.16.0, the omarchy-broadcast release it was split from, and is independent of the omarchy-broadcast version from then on. The two are released separately, and matching numbers carry no meaning.
 
-Compatibility is set by the interface, not by version numbers. The plugin needs an `omarchy-broadcast` CLI whose `watch --json` output is schema version (`v`) 1, specified in [`docs/cli-json.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/cli-json.md) in the [omarchy-broadcast repository](https://github.com/rsd/omarchy-broadcast). A change of the schema version requires a new release of the plugin. The daemon's D-Bus interface revision each feature needs:
+Compatibility is set by the interface, not by version numbers. The plugin needs an `omarchy-broadcast` CLI whose `watch --json` output is schema version (`v`) 1, specified in [`docs/cli-json.md`](https://github.com/rsd/omarchy-broadcast/blob/main/docs/cli-json.md) in the [omarchy-broadcast repository](https://github.com/rsd/omarchy-broadcast). A line with a higher version is reported as "Unsupported omarchy-broadcast version", and any other value is refused as malformed. A change of the schema version requires a new release of the plugin.
+
+The daemon's D-Bus interface revision each feature needs is below. The plugin shows the running daemon's revision as "Daemon API" in the Details view. A release in brackets is the omarchy-broadcast and omarchy-broadcastd version, or newer, that the feature needs.
 
 | Revision | Feature | CLI needs |
 |---|---|---|
-| 5 or later | The preview | `preview --json` |
-| 7 or later | The camera settings, with settings schema 1 | |
-| 9 or later | The effects on the Effects tab, and the setup dialog's Modules and Order | |
-| 10 or later | The dialog's Backends, Daemon and configuration files | the `config` command |
-| 13 or later | The microphone | the `mic` command |
-| 15 or later | The background gallery | the `media` command |
-| 28 or later | The placement of disabled settings and the default-microphone switch | |
-
-See [Requirements](../INSTALL.md#requirements) for the rest.
+| 5 or later (0.18.0) | The preview | `preview --json` |
+| 7 or later (0.22.0) | The camera settings, with settings schema 1 | a snapshot that reports `settings_schema`, and the `settings` command |
+| 9 or later (0.24.0) | The effects on the Effects tab, from loadable modules, and the setup dialog's Modules and Order | |
+| 10 or later (0.25.0) | The dialog's Backends, Daemon and configuration files | the `config` command |
+| 13 or later | The microphone | a snapshot that reports `mic`, and the `mic` command |
+| 15 or later | The background gallery, which also needs Omarchy's `omarchy-menu-images` and `omarchy-file-select` on `PATH` | the `media` command and `effect replace --image` |
+| 17 or later | The away image (`output.placeholder`, an editable `effect.fallback_image`, the `away` gallery) | `media list away` and `media import away` |
+| 19 or later | The convert command under a video the CPU path cannot play | |
+| 21 or later | `effect.privacy` and `effect.privacy_mode` in place of `effect.on_failure` | |
+| 22 or later | The battery saver (`video.battery_saver`) | |
+| 23 or later | The battery saver's "On battery or power saver" mode (`auto`) | |
+| 28 or later | The placement of disabled settings (`disabled_kind`) and the default-microphone switch | |

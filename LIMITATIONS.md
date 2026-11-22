@@ -14,7 +14,7 @@ The virtual camera serves one application at a time. The cause and the workaroun
 
 ## Telling active from idle
 
-The `active` state uses the theme's accent colour, so it is distinguished from `idle` by the icon shape and colour together.
+The `active` and `idle` states show the same webcam icon: `active` uses the theme's accent colour and `idle` the normal colour, so the two differ by colour only.
 
 ## Camera names lose markup characters
 

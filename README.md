@@ -60,7 +60,7 @@ The panel has a wide two-column layout and a narrow one-column layout. The previ
 
 ### Install
 
-1. Install the omarchy-broadcast daemon and its CLI. On Omarchy they come from the AUR, with at least one effect module. [INSTALL.md](INSTALL.md#install-the-daemon) has the packages and links the daemon's full guide.
+1. Install the omarchy-broadcast daemon and its CLI with the [daemon's install guide](https://github.com/rsd/omarchy-broadcast/blob/main/INSTALL.md), through its "Check that it works" section.
 2. Install the plugin from the Omarchy plugin marketplace listing, or add it from its git URL and enable it on the bar:
 
    ```sh
@@ -85,21 +85,21 @@ omarchy plugin disable br.com.dias.omarchy-broadcast
 omarchy plugin remove br.com.dias.omarchy-broadcast
 ```
 
-If a placement is left in the bar layout, remove it with the shell's bar commands and reload the shell; [INSTALL.md](INSTALL.md#uninstall) shows how. Removing the plugin does not touch the daemon. [INSTALL.md](INSTALL.md) has every step: the requirements, a local checkout, the `cliPath` setting, updating, the daemon's uninstall steps (linked) and troubleshooting.
+If a placement is left in the bar layout, remove it with the shell's bar commands and reload the shell; [INSTALL.md](INSTALL.md#uninstall) shows how. Removing the plugin does not touch the daemon. [INSTALL.md](INSTALL.md) has every step: what you need, enabling the plugin on the bar, the `cliPath` setting, updating and uninstalling, with links to the daemon's own install and uninstall steps. When something does not work, see [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Documentation
 
-- [INSTALL.md](INSTALL.md): the requirements, the install steps, updating, uninstalling and the connection messages.
+- [INSTALL.md](INSTALL.md): what you need, the install steps, updating and uninstalling.
 - [LIMITATIONS.md](LIMITATIONS.md): what the plugin cannot do, and what to do about it.
 - [docs/panel.md](docs/panel.md): the bar icon, the panel and its tabs, the keyboard, the plugin's settings, the live preview and the camera settings.
 - [docs/setup-dialog.md](docs/setup-dialog.md): every section of the setup dialog.
-- [docs/troubleshooting.md](docs/troubleshooting.md): the messages the panel shows while it works.
-- [docs/development.md](docs/development.md): how the plugin talks to the daemon, the tests and versioning.
+- [docs/troubleshooting.md](docs/troubleshooting.md): every message the bar icon, the panel and the setup dialog show, from the connection to the daemon to the panel at work.
+- [docs/development.md](docs/development.md): how the plugin talks to the daemon, running it from a local checkout, the tests and versioning.
 - The daemon: its [README](https://github.com/rsd/omarchy-broadcast#readme) and [INSTALL.md](https://github.com/rsd/omarchy-broadcast/blob/main/INSTALL.md).
 
 ## Notes for marketplace reviewers
 
-The plugin runs only the `omarchy-broadcast` CLI and Omarchy's image picker and file chooser, plus two constant `sh -c` lookups on PATH. The rest run as argument lists. It runs no package manager and no service manager, and needs no root. The `systemctl` and `journalctl` lines in the docs and the panel (`enable --now`, `restart`, `kill -s HUP`, the log command) are display text for you to run yourself: the plugin executes none of them.
+The plugin runs only the `omarchy-broadcast` CLI and Omarchy's image picker and file chooser, plus two constant `sh -c` lookups on PATH. The rest run as argument lists. It runs no package manager and no service manager, and needs no root. The `systemctl` and `journalctl` lines that the panel and the setup dialog show (`enable --now` and the log command), and that the docs quote, are display text for you to run yourself: the plugin executes none of them.
 The external dependency, the commands it runs, the scan triggers and the test-only code are explained in [docs/development.md](docs/development.md#notes-for-maintainers-and-marketplace-review).
 
 ## Affiliation
