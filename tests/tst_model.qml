@@ -800,6 +800,8 @@ TestCase {
     compare(Model.commandTimeoutText(Model.COMMAND_TIMEOUT_MS), "omarchy-broadcast did not answer within 30 s")
     compare(Model.commandTimeoutText(100), "omarchy-broadcast did not answer within 1 s")
     verify(Model.START_TIMEOUT_MS > 30000 && Model.COMMAND_TIMEOUT_MS >= 30000)
+    compare(Model.LOOKUP_TIMEOUT_MS, 5000)
+    verify(Model.LOOKUP_TIMEOUT_MS < Model.COMMAND_TIMEOUT_MS)
     compare(Model.startFailureText(2, "error: unrecognized subcommand 'start'", cli), Model.START_UNSUPPORTED_TEXT)
     compare(Model.startFailureText(1, "omarchy-broadcast: boom <b>", cli), "Could not start omarchy-broadcastd: boom b")
     compare(Model.startFailureText(4, "", cli), "Could not start omarchy-broadcastd (status 4)")

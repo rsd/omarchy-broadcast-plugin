@@ -85,7 +85,7 @@ omarchy plugin disable br.com.dias.omarchy-broadcast
 omarchy plugin remove br.com.dias.omarchy-broadcast
 ```
 
-Removing the plugin does not touch the daemon. [INSTALL.md](INSTALL.md) has every step: the requirements, a local checkout, the `cliPath` setting, updating, the daemon's uninstall steps (linked) and troubleshooting.
+If a placement is left in the bar layout, remove it with the shell's bar commands and reload the shell; [INSTALL.md](INSTALL.md#uninstall) shows how. Removing the plugin does not touch the daemon. [INSTALL.md](INSTALL.md) has every step: the requirements, a local checkout, the `cliPath` setting, updating, the daemon's uninstall steps (linked) and troubleshooting.
 
 ## Learn more
 
@@ -99,7 +99,7 @@ Removing the plugin does not touch the daemon. [INSTALL.md](INSTALL.md) has ever
 
 ## Notes for marketplace reviewers
 
-The plugin runs only the `omarchy-broadcast` CLI and Omarchy's image picker and file chooser, plus two constant `sh -c` lookups on PATH. The rest run as argument lists. It runs no package manager and no service manager, and needs no root.
+The plugin runs only the `omarchy-broadcast` CLI and Omarchy's image picker and file chooser, plus two constant `sh -c` lookups on PATH. The rest run as argument lists. It runs no package manager and no service manager, and needs no root. The `systemctl` and `journalctl` lines in the docs and the panel (`enable --now`, `restart`, `kill -s HUP`, the log command) are display text for you to run yourself: the plugin executes none of them.
 The external dependency, the commands it runs, the scan triggers and the test-only code are explained in [docs/development.md](docs/development.md#notes-for-maintainers-and-marketplace-review).
 
 ## Affiliation

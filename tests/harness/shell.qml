@@ -1709,6 +1709,38 @@ ShellRoot {
     h.step("widget searching PATH", function() {
       h.widgetA = h.makeWidget(barA, {})
     }, function() { return h.widgetA && S().record.link === "ok" }, 8000)
+    // the resolver's watchdog: a lookup past its bound is killed and counts
+    // as having found nothing; the next one, bounded as usual, finds the CLI.
+    // The watchdog is fired by hand in the same turn as the start, so the
+    // timeout wins over the lookup's own end whatever the machine's load.
+    h.step("resolver: idle before the timed-out lookup", function() {},
+           function() { return !S().resolving && !S().resolveScheduled && !S().resolverProc.running && S().record.link === "ok" })
+    h.step("resolver: a lookup past its bound", function() {
+      h.notes.resolves = S().resolverRuns
+      S().resolverTimeoutMs = 1
+      S().resolve()
+      h.eq("running", S().resolving, true)
+      h.eq("bounded by resolverTimeoutMs", S().resolverWatchdog.interval, 1)
+      h.eq("watchdog armed", S().resolverWatchdog.running, true)
+      S().resolverWatchdog.triggered()
+    }, function() { return !S().resolving && !S().resolverProc.running }, 3000)
+    h.step("resolver: the timed-out lookup ended cleanly, as not found", function() {
+      h.eq("one run", S().resolverRuns - h.notes.resolves, 1)
+      h.eq("watchdog stopped", S().resolverWatchdog.running, false)
+      h.eq("flag cleared", S().resolverTimedOut, false)
+      h.eq("no first line kept", S().resolverFirst, "")
+      h.eq("no lines counted", S().resolverLines, 0)
+      h.eq("no CLI", S().cliPath, "")
+      h.eq("cli-missing", S().record.link, "cli-missing")
+      h.eq("says what was searched", S().record.linkText, h.model.resolverMissText())
+      S().resolverTimeoutMs = h.model.LOOKUP_TIMEOUT_MS
+      S().resolve()
+    }, function() { return !S().resolving && S().cliPath === devCli && S().record.link === "ok" }, 8000)
+    h.step("resolver: bounded as usual, the next lookup finds it", function() {
+      h.eq("one more run", S().resolverRuns - h.notes.resolves, 2)
+      h.eq("source", S().cliSource, "path")
+      h.eq("watchdog stopped", S().resolverWatchdog.running, false)
+    })
     h.step("PATH CLI resolved", function() {
       h.eq("source", S().cliSource, "path")
       h.eq("path", S().cliPath, devCli)
@@ -4425,6 +4457,48 @@ ShellRoot {
     }, function() { return S().record.warning === "" })
     h.wait(250)
     shot("setup-diagnostics.png")
+    // the read watchdog: a read that hangs is killed past its bound and fails
+    // with the timeout, the reads behind it go on, and close + reopen reads
+    // again once the CLI answers
+    h.step("setup: a read that hangs", function() {
+      // per read: modules and order hang, the reads behind them do not
+      h.writeFile("read-delay-modules-list", ["6"])
+      h.writeFile("read-delay-order-show", ["6"])
+      S().readTimeoutMs = 1200
+    }, function() { return h.writerIdle() && !S().readArmed && S().readQueue.length === 0 })
+    h.step("setup: the reads again, the first hangs", function() {
+      h.notes.reads = S().setupReadRuns
+      S().refreshSetup()
+    }, function() { return S().readArmed && S().readKind === "modules" && S().readProc.running && S().readWatchdog.running })
+    h.step("setup: the hung read is killed and fails", function() {},
+           function() { return !!S().setup.modules && S().setup.modules.ok === false && S().readArmed && S().readKind === "order" }, 6000)
+    h.step("setup: the timeout shows, the next read went on", function() {
+      h.eq("the failure", S().setup.modules.error, h.model.commandTimeoutText(1200))
+      h.eq("names the bound", S().setup.modules.error, "omarchy-broadcast did not answer within 1 s")
+      h.key("1")
+      h.eq("the Modules section says so", find("setupHint").text, h.model.commandTimeoutText(1200))
+      h.eq("the next read runs", S().readKind, "order")
+      h.eq("one read after another", S().setupReadRuns, h.notes.reads + 2)
+    }, function() { return h.writerIdle() && !S().readArmed && S().readQueue.length === 0 }, 8000)
+    h.step("setup: nothing left running", function() {
+      h.eq("no read process", S().readProc.running, false)
+      h.eq("watchdog stopped", S().readWatchdog.running, false)
+      h.eq("the hung order read failed too", S().setup.order.error, h.model.commandTimeoutText(1200))
+      h.check("the reads behind it answered", S().setup.config.ok === true && S().setup.files.ok === true)
+      h.removeFile("read-delay-modules-list")
+      h.removeFile("read-delay-order-show")
+      S().readTimeoutMs = h.model.COMMAND_TIMEOUT_MS
+      D().close()
+      h.eq("released", S().setupHeld, false)
+      h.notes.reads = S().setupReadRuns
+      D().open('{"view":"setup"}')
+    }, function() { return D().shown && loaded(["modules", "order", "config", "files"]) && S().setup.modules.ok === true }, 8000)
+    h.step("setup: reopened, the reads answer", function() {
+      h.eq("all four read again", S().setupReadRuns, h.notes.reads + 4)
+      h.eq("modules", S().setup.modules.ok, true)
+      h.eq("order", S().setup.order.ok, true)
+      h.check("the hint is gone", find("setupHint").text !== h.model.commandTimeoutText(1200))
+    })
     // Escape closes through the shell; the reads stop
     h.step("setup: Escape", function() {
       h.markLog()
@@ -4514,6 +4588,38 @@ ShellRoot {
       h.notes.loader.destroy()
       h.notes.loader = null
     })
+    // An overlay destroyed while shown (a plugin reload, update, disable or
+    // removal with the dialog open): its hold goes with it, so no read runs
+    // for a dialog that is gone; the widgets' attach is theirs, untouched.
+    h.step("setup: an overlay destroyed while shown: a revision-10 daemon", function() {
+      h.feed([snapshotLine(rev(10))])
+    }, function() { return S().record.interfaceRevision === 10 && h.writerIdle() })
+    h.step("setup: the overlay opened", function() {
+      var comp = Qt.createComponent("file://" + shellRoot.pluginPath + "/SetupDialog.qml")
+      h.notes.owners = S().attachedCount
+      h.notes.gone = comp.createObject(window.contentItem, { width: 900, height: 760 })
+      h.check("the widgets' singleton", h.notes.gone.daemonService === S())
+      h.notes.gone.open('{"view":"setup"}')
+    }, function() { return h.notes.gone.shown && S().setupHeld && S().setup.modules !== null && !S().readArmed && S().readQueue.length === 0 })
+    h.step("setup: destroyed without a close", function() {
+      h.eq("widgets attached: it did not attach", h.notes.gone.attached, false)
+      h.eq("held", S().setupHeld, true)
+      h.notes.gone.destroy()
+      h.notes.gone = null
+    }, function() { return !S().setupHeld }, 3000)
+    h.step("setup: its hold went with it", function() {
+      h.eq("released", S().setupHeld, false)
+      h.eq("no holder", S().setupHolders.length, 0)
+      h.eq("the widgets still attached", S().attachedCount, h.notes.owners)
+      h.notes.reads = S().setupReadRuns
+      h.feed([snapshotLine(rev(10)), '{"v":1,"type":"config_changed","serial":41}', '{"v":1,"type":"modules_changed","serial":42}'])
+    }, function() { return S().record.configSerial === 41 })
+    h.wait(300)
+    h.step("setup: no read for a dialog that is gone", function() {
+      h.eq("reads", S().setupReadRuns, h.notes.reads)
+      h.eq("nothing armed", S().readArmed, false)
+      h.feed([snapshotLine({})])
+    }, function() { return S().record.interfaceRevision === 4 && h.writerIdle() })
     // An overlay whose singleton no widget attached to (the plugin copy, at
     // another URL than the widgets): it runs the watch itself while shown,
     // with the CLI the resolver finds on PATH (the payload names none).
@@ -4540,6 +4646,28 @@ ShellRoot {
     })
     h.wait(800)
     h.countStep(1, "after the lone overlay closed")
+    // The lone overlay destroyed while shown: it detaches itself (it had
+    // attached), so its watch stops and nothing holds the setup.
+    h.step("setup: the lone overlay again", function() {
+      var comp = Qt.createComponent("file://" + shellRoot.pluginCopy + "/SetupDialog.qml")
+      h.notes.lone = comp.createObject(window.contentItem, { width: 900, height: 760 })
+      h.notes.loneService = h.notes.lone.daemonService
+      h.notes.lone.open('{"view":"setup"}')
+    }, function() { return h.notes.lone.shown && h.notes.loneService.record.link === "ok" && h.notes.loneService.watchProc.running }, 8000)
+    h.step("setup: the lone overlay destroyed without a close", function() {
+      var ls = h.notes.loneService
+      h.eq("attached", h.notes.lone.attached, true)
+      h.eq("one reader", ls.attachedCount, 1)
+      h.eq("held", ls.setupHeld, true)
+      h.notes.lone.destroy()
+      h.notes.lone = null
+    }, function() { return h.notes.loneService.attachedCount === 0 && !h.notes.loneService.setupHeld }, 3000)
+    h.step("setup: its watch stops", function() {
+      h.eq("no reader", h.notes.loneService.attachedCount, 0)
+      h.eq("released", h.notes.loneService.setupHeld, false)
+    }, function() { return !h.notes.loneService.watchProc.running }, 5000)
+    h.wait(800)
+    h.countStep(1, "after the lone overlay was destroyed while shown")
     h.step("setup: back to one widget, as the checks after these expect", function() {
       B().destroy()
       h.widgetB = null
@@ -4644,6 +4772,33 @@ ShellRoot {
       h.feed([snapshotLine(rev(15))])
     }, function() {
       return S().record.interfaceRevision === 15 && !!S().record.settings && h.model.backgroundRowShown(S().record) && h.writerIdle()
+    })
+    // the tool lookup's watchdog: a lookup past its bound is killed and
+    // offers neither tool; the next one, bounded as usual, finds both. Fired
+    // by hand in the same turn as the start, as the resolver's above.
+    h.step("media: tools idle before the timed-out lookup", function() {},
+           function() { return !S().toolsArmed && !S().toolsProc.running })
+    h.step("media: a tool lookup past its bound", function() {
+      h.notes.tools = S().toolsRuns
+      S().toolsTimeoutMs = 1
+      S().probeTools()
+      h.eq("running", S().toolsArmed, true)
+      h.eq("bounded by toolsTimeoutMs", S().toolsWatchdog.interval, 1)
+      h.eq("watchdog armed", S().toolsWatchdog.running, true)
+      S().toolsWatchdog.triggered()
+    }, function() { return !S().toolsArmed && !S().toolsProc.running }, 3000)
+    h.step("media: the timed-out lookup ended cleanly, neither tool offered", function() {
+      h.eq("one run", S().toolsRuns - h.notes.tools, 1)
+      h.eq("watchdog stopped", S().toolsWatchdog.running, false)
+      h.eq("flag cleared", S().toolsTimedOut, false)
+      h.eq("no lines kept", S().toolsLines.length, 0)
+      h.eq("neither tool", JSON.stringify(S().mediaTools), JSON.stringify({ known: true, gallery: "", chooser: "" }))
+      S().toolsTimeoutMs = h.model.LOOKUP_TIMEOUT_MS
+      S().probeTools()
+    }, function() { return !S().toolsArmed && S().mediaTools.gallery !== "" && S().mediaTools.chooser !== "" }, 5000)
+    h.step("media: bounded as usual, the next lookup finds both", function() {
+      h.eq("one more run", S().toolsRuns - h.notes.tools, 2)
+      h.eq("watchdog stopped", S().toolsWatchdog.running, false)
     })
     h.step("media: open the panel's Effect tab", function() {
       A().open()
@@ -4779,7 +4934,11 @@ ShellRoot {
     // say why they are faded meanwhile
     h.step("media: a picker that does not answer", function() {
       h.writeFile("gallery-pick", [mediaBundled + "/dunes.webp"])
-      h.writeFile("gallery-delay", ["8"])
+      // far past the step's deadline below, so a picker the watchdog only
+      // asked to stop (SIGTERM, ignored) fails here rather than ending alone
+      h.writeFile("gallery-delay", ["30"])
+      // a hung picker may ignore SIGTERM: the watchdog kills it
+      h.writeFile("gallery-ignore-term", ["1"])
       S().mediaWatchdogMs = 1500
     }, function() { return h.writerIdle() })
     h.step("media: Gallery…, and the panel opened meanwhile", function() {
@@ -4804,8 +4963,13 @@ ShellRoot {
       h.eq("the failure line", S().commandError, h.model.MEDIA_TIMEOUT_TEXT)
       h.eq("the hint is gone", h.find(A(), "backgroundHint").visible, false)
       h.eq("the buttons are back", h.find(A(), "backgroundButton-0").opacity, 1)
+      h.eq("Add… back too", h.find(A(), "backgroundButton-1").opacity, 1)
+      h.eq("the step is over", S().mediaArmed, false)
+      h.eq("the picker is gone", S().mediaProc.running, false)
+      h.eq("watchdog stopped", S().mediaWatchdog.running, false)
       S().mediaWatchdogMs = h.model.MEDIA_WATCHDOG_MS
       h.removeFile("gallery-delay")
+      h.removeFile("gallery-ignore-term")
       h.removeFile("gallery-pick")
       A().close()
     }, function() { return h.writerIdle() && !A().opened })

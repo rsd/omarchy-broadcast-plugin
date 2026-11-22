@@ -91,7 +91,11 @@
 # --json` print $FAKE_OB_DIR/modules-list, order-show, config-show and
 # config-files (the harness writes the lines); a missing file is a daemon
 # that predates them: an `unsupported-daemon` error line and exit 1. If
-# read-exit exists, a read exits with that status after printing.
+# read-exit exists, a read exits with that status after printing. If
+# read-delay-FILE exists (FILE the read's file above: read-delay-order-show,
+# read-delay-media-list, ...), that read first sleeps that many seconds (a
+# CLI that hangs); per read, so which reads hang does not depend on when the
+# harness removes the file.
 #
 # The setup dialog's writes: `modules enable|disable ID`, `order set
 # ID,ID,...`, `order reset`, `config set -- KEY VALUE` and `config reset --
@@ -417,6 +421,7 @@ fi
 
 # The setup reads: the file's lines, or a daemon that predates them.
 setup_read() {
+  [ -f "$dir/read-delay-$1" ] && sleep "$(cat -- "$dir/read-delay-$1")"
   if [ -f "$dir/$1" ]; then
     cat -- "$dir/$1"
   else

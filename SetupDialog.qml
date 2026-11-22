@@ -245,6 +245,15 @@ Item {
     }
   }
 
+  // Destroyed while shown (a plugin reload, update, disable or removal with
+  // the dialog open): the registrations go back as hideDialog's would, by
+  // identity (both are no-ops for an owner not registered). Nothing is
+  // stopped here: the Daemon stops what nobody holds any more.
+  Component.onDestruction: {
+    Daemon.releaseSetup(root)
+    if (root.attached) Daemon.detach(root)
+  }
+
   // Escape, a click outside the card: closed through the shell, which then
   // forgets the plugin was summoned.
   function dismiss() {

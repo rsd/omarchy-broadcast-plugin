@@ -82,7 +82,10 @@ widget would hide.
     never as an argv element or on a line that builds a command;
   - every one-shot command is bounded by a one-shot watchdog Timer (Daemon
     commandWatchdog: started by armCommand, stopped when it ends), the
-    watch is not;
+    watch is not; so are the setup reads (readWatchdog, as a command) and
+    the two PATH lookups (resolverWatchdog, toolsWatchdog:
+    Model.LOOKUP_TIMEOUT_MS), and a gallery step (mediaWatchdog); every
+    watchdog kills with SIGKILL;
   - the plugin's version in Model.PLUGIN_VERSION is the manifest's;
   - the battery saver: the panel's switch and its Mode dropdown are drawn
     from Model.batterySaverView only, the panel holds the configuration read
@@ -276,6 +279,10 @@ for path, src in sources.items():
         # SettingsView's slider gives back the panel's held count when it
         # is destroyed mid-drag: a registration handed back, nothing stopped.
         allowed = r"Daemon\.detach\(\s*root\s*\)|Preview\.release\(\s*root\s*\)|Daemon\.releaseConfig\(\s*root\s*\)"
+        # The setup dialog hands back its hold, and the attach it made itself
+        # (only when no widget was attached: root.attached).
+        if path.name == "SetupDialog.qml":
+            allowed += r"|Daemon\.releaseSetup\(\s*root\s*\)|if \(root\.attached\) Daemon\.detach\(\s*root\s*\)"
         if path.name == "SettingsView.qml":
             allowed += r"|if \(dragging\) root\.heldChanged\(-1\)"
         only_detach = all(re.fullmatch(allowed, s) for s in statements)
@@ -283,6 +290,9 @@ for path, src in sources.items():
         for bad in ("running", "stop", "\"off\"", "bar.run", "pkill", "kill", "signal("):
             check(f"{path.name}: onDestruction has no {bad}", bad not in body, body.strip())
 check("the widget unregisters on destruction", len(all_bodies) >= 1, "no Component.onDestruction")
+check("the setup dialog hands back its hold and its own attach on destruction",
+      any("Daemon.releaseSetup(root)" in b and "if (root.attached) Daemon.detach(root)" in b
+              for b in destruction_bodies(sources[PLUGIN / "SetupDialog.qml"])))
 check("the widget releases the preview on destruction",
       any("Preview.release(root)" in b for b in destruction_bodies(sources[PLUGIN / "BarWidget.qml"])))
 
@@ -455,8 +465,38 @@ check("flushSettings walks only the drafts, bounded by Model.withSetting",
 check("a move is made a value of its enabled row before it is kept",
       "var v = row && row.enabled ? Model.rowValue(row, value) : null" in block(daemon, "function moveSetting"))
 timers = re.findall(r"property Timer (\w+): Timer \{", daemon)
-check("the Daemon's timers are the backoff, the settings debounce, the microphone switch's bounded wait and the gallery step's and the command's watchdogs",
-      sorted(timers) == ["backoffTimer", "commandWatchdog", "mediaWatchdog", "micWaitTimer", "settingsTimer"], str(timers))
+check("the Daemon's timers are the backoff, the settings debounce, the microphone switch's bounded wait and the watchdogs of the gallery step, the command, the setup read and the two lookups",
+      sorted(timers) == ["backoffTimer", "commandWatchdog", "mediaWatchdog", "micWaitTimer", "readWatchdog",
+                         "resolverWatchdog", "settingsTimer", "toolsWatchdog"], str(timers))
+# The setup read and the two PATH lookups: each one-shot, (re)started only
+# where its Process is started, stopped where it ends, and a timeout kills
+# (SIGKILL) only its own Process.
+for name, proc, starter, ender, interval, flag in (
+        ("read", "readProc", "function nextRead", "function readEnded", "readTimeoutMs", "readArmed"),
+        ("resolver", "resolverProc", "function resolve()", "function resolverFinished", "resolverTimeoutMs", "resolving"),
+        ("tools", "toolsProc", "function probeTools", "function toolsEnded", "toolsTimeoutMs", "toolsArmed")):
+    timer = block(daemon, f"property Timer {name}Watchdog")
+    timeout = block(daemon, f"function {name}Timeout()")
+    check(f"the {name} watchdog is a one-shot, (re)started only where {proc} starts, stopped where it ends, and kills only {proc}",
+          "repeat: false" in timer and f"onTriggered: root.{name}Timeout()" in timer
+          and re.findall(rf"{name}Watchdog\.(\w+)\(", daemon) == ["restart", "stop"]
+          and f"{name}Watchdog.interval = {interval}" in block(daemon, starter)
+          and f"{name}Watchdog.restart()" in block(daemon, starter)
+          and f"{name}Watchdog.stop()" in block(daemon, ender)
+          and f"if (!{flag} || !{proc}.running) return" in timeout
+          and f"{proc}.signal(9)" in timeout
+          and f"{name}Watchdog" not in block(daemon, "property Process watchProc"))
+check("a setup read bounded as a command, the lookups at Model.LOOKUP_TIMEOUT_MS; a timed-out read fails with the timeout text (a rejected one stays rejected)",
+      "property int readTimeoutMs: Model.COMMAND_TIMEOUT_MS" in daemon
+      and "property int resolverTimeoutMs: Model.LOOKUP_TIMEOUT_MS" in daemon
+      and "property int toolsTimeoutMs: Model.LOOKUP_TIMEOUT_MS" in daemon
+      and "var LOOKUP_TIMEOUT_MS = 5000" in model
+      and re.search(r"if \(readRejected\) result = [^\n]*\n\s*else if \(timedOut\) result = Model\.readFailed\(Model\.commandTimeoutText\(readWatchdog\.interval\)\)",
+                    block(daemon, "function readEnded")) is not None
+      and "Model.toolsFromLines(toolsTimedOut ? [] : toolsLines)" in block(daemon, "function toolsEnded"))
+check("only the Daemon's own children are ever signalled, and only with SIGKILL from a watchdog",
+      sorted(re.findall(r"(\w+)\.signal\(", daemon)) == ["commandProc", "mediaProc", "readProc", "resolverProc", "toolsProc"]
+      and re.findall(r"\.signal\((\w+)\)", daemon) == ["9"] * 5)
 command_timer = block(daemon, "property Timer commandWatchdog")
 check("the command watchdog is a one-shot, (re)started only by armCommand, stopped when a command ends, and never bounds the watch",
       "repeat: false" in command_timer and "onTriggered: root.commandTimeout()" in command_timer
@@ -472,6 +512,9 @@ media_timer = block(daemon, "property Timer mediaWatchdog")
 check("the gallery watchdog is a one-shot, (re)started only by startMediaStep and stopped when a step ends",
       "repeat: false" in media_timer and "onTriggered: root.mediaTimeout()" in media_timer
       and re.findall(r"mediaWatchdog\.(\w+)\(", daemon) == ["restart", "stop"])
+check("the gallery watchdog kills the step (SIGKILL: a hung picker or import may ignore SIGTERM)",
+      "mediaProc.signal(9)" in block(daemon, "function mediaTimeout")
+      and "running = false" not in block(daemon, "function mediaTimeout"))
 mic_timer = block(daemon, "property Timer micWaitTimer")
 check("the microphone switch's wait is a one-shot of Model.MIC_SWITCH_WAIT_MS, started only when a mic on/off command ended",
       re.search(r"^\s*repeat:\s*false\s*$", mic_timer, re.M) is not None

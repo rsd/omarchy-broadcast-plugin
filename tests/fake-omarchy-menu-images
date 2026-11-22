@@ -15,7 +15,9 @@
 # /tmp/x.jpg), so a gallery that has directories has rows.
 #
 # Otherwise sleeps $FAKE_OB_DIR/gallery-delay seconds if that file exists (a
-# picker the user leaves open), and, as the real one: prints
+# picker the user leaves open; if $FAKE_OB_DIR/gallery-ignore-term exists
+# too, it ignores SIGTERM meanwhile, as a hung one may), and, as the real
+# one: prints
 # $FAKE_OB_DIR/gallery-stderr to stderr if it exists, and exits with the status in $FAKE_OB_DIR/gallery-exit (default 0).
 # With status 0 it prints the first line of $FAKE_OB_DIR/gallery-pick, the
 # chosen path, without a trailing newline (the real one cats its selection
@@ -43,6 +45,7 @@ for arg in "$@"; do
   fi
 done
 
+[ -f "$dir/gallery-ignore-term" ] && trap '' TERM
 [ -f "$dir/gallery-delay" ] && sleep "$(cat -- "$dir/gallery-delay")"
 [ -f "$dir/gallery-stderr" ] && cat -- "$dir/gallery-stderr" >&2
 status=0

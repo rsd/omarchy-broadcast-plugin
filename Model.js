@@ -995,6 +995,9 @@ function startFailureText(code, stderrLine, cliPath) {
 // plugin kills it: `start` (the CLI bounds it at 30 s itself), then the rest.
 var START_TIMEOUT_MS = 45000
 var COMMAND_TIMEOUT_MS = 30000
+// The two PATH lookups (resolverArgv, toolsArgv: `command -v`, answering at
+// once) are bounded much shorter; a setup read is bounded as a command.
+var LOOKUP_TIMEOUT_MS = 5000
 function commandTimeoutText(ms) {
   return "omarchy-broadcast did not answer within " + Math.max(1, Math.round(ms / 1000)) + " s"
 }
@@ -3097,7 +3100,7 @@ function consumersByKind(record) {
 
 // This plugin's version, for the Details view and its copy (a bug report).
 // tests/check-source.py holds it equal to the manifest's `version`.
-var PLUGIN_VERSION = "0.37.9"
+var PLUGIN_VERSION = "0.37.10"
 var DETAILS_TITLE = "Details"
 var DETAILS_COPY_LABEL = "Copy"
 var DETAILS_COPIED_TEXT = "Copied"

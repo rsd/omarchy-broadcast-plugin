@@ -26,10 +26,12 @@ import "Model.js" as Model
 // recently configured widget's value is the one in force.
 //
 // The setup dialog (SetupDialog.qml, the plugin's overlay) reads its data
-// through here too: while it holds the setup (holdSetup), the four reads of
+// through here too: while it holds the setup (holdSetup), the five reads of
 // Model.SETUP_READS run one at a time on one more child (readProc), when it
 // opens and again whenever the watch reports a change of the configuration
-// or the modules, a new snapshot, or one of its writes has run. Its writes
+// or the modules, a new snapshot, or one of its writes has run. A read still
+// running after Model.COMMAND_TIMEOUT_MS is killed and fails (readWatchdog),
+// so a CLI that hangs never stalls the reads behind it. Its writes
 // go through the same command queue as the panel's. It also forwards the
 // panel hotkey here (openPanel), which opens one bar widget's panel.
 //
@@ -57,7 +59,9 @@ import "Model.js" as Model
 // (backgroundMedia): the panel's thumbnail finds the background in force
 // there (a video's poster). The
 // two tools are looked up on PATH (toolsProc, a fixed script as the
-// resolver's) when a widget attaches and whenever a panel opens.
+// resolver's) when a widget attaches and whenever a panel opens. Both
+// lookups are killed past Model.LOOKUP_TIMEOUT_MS (resolverWatchdog,
+// toolsWatchdog) and then count as having found nothing.
 //
 // The away image (interface revision Model.PLACEHOLDER_REVISION): the setup
 // dialog's Choose... and Add... run the same flows over the `away` gallery
@@ -111,6 +115,10 @@ Singleton {
   property bool resolveScheduled: false
   property string resolverFirst: ""
   property int resolverLines: 0
+  // The resolver's watchdog fired (resolverTimeout): it found nothing. How
+  // long it may run (Model.LOOKUP_TIMEOUT_MS); the harness shortens it.
+  property bool resolverTimedOut: false
+  property int resolverTimeoutMs: Model.LOOKUP_TIMEOUT_MS
 
   // ---- watch process -------------------------------------------------------
   property bool backingOff: false
@@ -206,6 +214,11 @@ Singleton {
   // A line over Model.LINE_CAP, or more than Model.READ_LINES_CAP: the read
   // is stopped and fails.
   property bool readRejected: false
+  // The read's watchdog fired (readTimeout): it is being killed, and its end
+  // fails with Model.commandTimeoutText. How long a read may run
+  // (Model.COMMAND_TIMEOUT_MS); the harness shortens it.
+  property bool readTimedOut: false
+  property int readTimeoutMs: Model.COMMAND_TIMEOUT_MS
   // A refresh was asked while a read ran: every read runs again after it.
   property bool readAgain: false
   // A change line (snapshot, config_changed, modules_changed) came in since
@@ -224,6 +237,10 @@ Singleton {
   property bool toolsArmed: false
   property bool toolsAgain: false
   property var toolsLines: []
+  // The lookup's watchdog fired (toolsTimeout): neither tool is offered. How
+  // long it may run (Model.LOOKUP_TIMEOUT_MS); the harness shortens it.
+  property bool toolsTimedOut: false
+  property int toolsTimeoutMs: Model.LOOKUP_TIMEOUT_MS
   // The flow running (Model.mediaStepEnd's `flow`), or null; one at a time.
   property var mediaFlow: null
   readonly property bool mediaBusy: mediaFlow !== null
@@ -401,11 +418,24 @@ Singleton {
     readLines = []
     readStarted = false
     readRejected = false
+    readTimedOut = false
     readStderr = Model.firstLineStart()
     readArmed = true
     setupReadRuns++
     readProc.command = argv
     readProc.running = true
+    // One shot per read, stopped when it ends (readEnded): no polling.
+    readWatchdog.interval = readTimeoutMs
+    readWatchdog.restart()
+  }
+
+  // The watchdog: a read that outlived its bound is killed (SIGKILL, as a
+  // command: a binary that hangs may well ignore SIGTERM); readEnded then
+  // fails that read with the timeout and goes on with the queue.
+  function readTimeout() {
+    if (!readArmed || !readProc.running) return
+    readTimedOut = true
+    readProc.signal(9)
   }
 
   function readLine(line) {
@@ -420,10 +450,16 @@ Singleton {
 
   function readEnded() {
     var kind = readKind
+    var timedOut = readTimedOut
+    readWatchdog.stop()
     readArmed = false
+    readTimedOut = false
     var result
-    if (!readStarted) result = Model.readFailed(Model.commandFailureText(-1, "", cliPath))
-    else if (readRejected) result = Model.readFailed("omarchy-broadcast printed more than this plugin reads")
+    // A rejected read that ignored the stop and was then killed is still
+    // reported as rejected, not as a timeout.
+    if (readRejected) result = Model.readFailed("omarchy-broadcast printed more than this plugin reads")
+    else if (timedOut) result = Model.readFailed(Model.commandTimeoutText(readWatchdog.interval))
+    else if (!readStarted) result = Model.readFailed(Model.commandFailureText(-1, "", cliPath))
     else result = Model.setupRead(kind, readLines, readExitCode, readStderr.text, posterDir)
     readLines = []
     readStarted = false
@@ -477,14 +513,31 @@ Singleton {
     }
     resolverFirst = ""
     resolverLines = 0
+    resolverTimedOut = false
     resolving = true
     resolverRuns++
     resolverProc.command = Model.resolverArgv()
     resolverProc.running = true
+    resolverWatchdog.interval = resolverTimeoutMs
+    resolverWatchdog.restart()
+  }
+
+  // The resolver's watchdog: a lookup that hangs is killed, and counts as
+  // having found nothing (resolverFinished).
+  function resolverTimeout() {
+    if (!resolving || !resolverProc.running) return
+    resolverTimedOut = true
+    resolverProc.signal(9)
   }
 
   function resolverFinished() {
+    resolverWatchdog.stop()
     resolving = false
+    if (resolverTimedOut) {
+      resolverTimedOut = false
+      resolverFirst = ""
+      resolverLines = 0
+    }
     if (resolvePending) {
       resolvePending = false
       Qt.callLater(root.resolve)
@@ -989,10 +1042,21 @@ Singleton {
   function probeTools() {
     if (toolsProc.running || toolsArmed) { toolsAgain = true; return }
     toolsLines = []
+    toolsTimedOut = false
     toolsArmed = true
     toolsRuns++
     toolsProc.command = Model.toolsArgv()
     toolsProc.running = true
+    toolsWatchdog.interval = toolsTimeoutMs
+    toolsWatchdog.restart()
+  }
+
+  // The lookup's watchdog: one that hangs is killed, and counts as having
+  // found neither tool (toolsEnded).
+  function toolsTimeout() {
+    if (!toolsArmed || !toolsProc.running) return
+    toolsTimedOut = true
+    toolsProc.signal(9)
   }
 
   function toolsLine(line) {
@@ -1000,8 +1064,10 @@ Singleton {
   }
 
   function toolsEnded() {
+    toolsWatchdog.stop()
     toolsArmed = false
-    var next = Model.toolsFromLines(toolsLines)
+    var next = Model.toolsFromLines(toolsTimedOut ? [] : toolsLines)
+    toolsTimedOut = false
     toolsLines = []
     if (JSON.stringify(next) !== JSON.stringify(mediaTools)) mediaTools = next
     if (toolsAgain) {
@@ -1137,13 +1203,14 @@ Singleton {
     else mediaFirst = line
   }
 
-  // The watchdog: a step that outlived Model.MEDIA_WATCHDOG_MS is stopped
-  // and the flow ends with Model.MEDIA_TIMEOUT_TEXT (an import's:
+  // The watchdog: a step that outlived Model.MEDIA_WATCHDOG_MS is killed
+  // (SIGKILL, as a command: a picker or an import that hangs may well ignore
+  // SIGTERM) and the flow ends with Model.MEDIA_TIMEOUT_TEXT (an import's:
   // Model.MEDIA_IMPORT_TIMEOUT_TEXT).
   function mediaTimeout() {
     if (!mediaArmed || !mediaProc.running) return
     mediaTimedOut = true
-    mediaProc.running = false
+    mediaProc.signal(9)
   }
 
   function mediaEnded() {
@@ -1265,6 +1332,12 @@ Singleton {
     onRunningChanged: if (!running && root.resolving) root.resolverFinished()
   }
 
+  // Bounds one resolver run (resolverTimeout); started by resolve.
+  property Timer resolverWatchdog: Timer {
+    repeat: false
+    onTriggered: root.resolverTimeout()
+  }
+
   // The setup dialog's reads, one at a time (nextRead): stdout in line mode,
   // as the watch's (a camera or module id must not be garbled); stderr in
   // chunks, as a command's. The parser delivers each stdout line whole, however
@@ -1285,6 +1358,12 @@ Singleton {
     onRunningChanged: if (!running && root.readArmed) root.readEnded()
   }
 
+  // Bounds one setup read (readTimeout); started by nextRead.
+  property Timer readWatchdog: Timer {
+    repeat: false
+    onTriggered: root.readTimeout()
+  }
+
   // Bounds one gallery step (mediaTimeout); started by startMediaStep.
   property Timer mediaWatchdog: Timer {
     repeat: false
@@ -1300,6 +1379,12 @@ Singleton {
       onRead: function(data) { root.toolsLine(data) }
     }
     onRunningChanged: if (!running && root.toolsArmed) root.toolsEnded()
+  }
+
+  // Bounds one tool lookup (toolsTimeout); started by probeTools.
+  property Timer toolsWatchdog: Timer {
+    repeat: false
+    onTriggered: root.toolsTimeout()
   }
 
   // A gallery flow's steps, one at a time (startMediaStep): stdout in line

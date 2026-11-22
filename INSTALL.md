@@ -157,9 +157,12 @@ The plugin starts no service of its own and writes no files. The one exception i
 
 The processes the plugin owns are:
 
-- the `watch` child;
+- the `watch` child, with no time bound: it is meant to run, and it restarts with backoff;
 - the `preview` child, while a panel is open;
-- the gallery's steps, only while you use the Background row or the setup dialog's Away image row: the `media` commands (the import included), `omarchy-menu-images` and `omarchy-file-select`, one at a time.
+- one command child at a time, only while a click or a setting change runs (`on`, `off`, `settings set` and the like), killed with `SIGKILL` after 30 s, or 45 s for `start`;
+- the setup dialog's reads (`modules list`, `order show`, `config show`, `config files` and `media list`), one at a time on one child, only while the dialog is open, and `config show` while a panel is open (the Battery saver row, from revision 22), killed with `SIGKILL` after 30 s (the read then fails, and reopening the dialog or the panel reads again);
+- two constant `sh -c` lookups, the CLI resolver (`command -v omarchy-broadcast`) and the gallery tool lookup (`omarchy-menu-images`, `omarchy-file-select`), killed with `SIGKILL` after 5 s (a lookup that times out counts as not found);
+- the gallery's steps, only while you use the Background row or the setup dialog's Away image row: the `media` commands (the import included), `omarchy-menu-images` and `omarchy-file-select`, one at a time, killed with `SIGKILL` after 610 s.
 
 They end with the shell: they exit when their output pipe closes or on `SIGTERM`.
 

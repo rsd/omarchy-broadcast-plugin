@@ -9,11 +9,18 @@ The plugin is the root of this repository (`manifest.json` and the QML files). I
 - **One watch.** One process, the CLI's `watch --json`, serves every bar (every monitor). There is no polling: the daemon pushes each change, and the plugin is exactly as fresh as the stream.
   - The process starts when the first icon appears and stops when the last one goes away.
   - When it exits, it is started again after 1 s, doubling up to 30 s. The delay returns to 1 s only after a watch has run for 30 s, so a watch that dies right after its first line does not restart every second.
-- **Commands.** These run as argument lists of the `omarchy-broadcast` CLI, never through a shell, and time out after 30 s:
+- **Commands.** These run as argument lists of the `omarchy-broadcast` CLI, never through a shell:
   - `on`, `off`, `camera -- <id>` and `camera next`;
   - `settings set --camera=<id> -- <setting id> <value>`, `settings set -- <setting id> <value>` for a global (effect) setting, and `settings reset --camera=<id>`;
   - `recommended apply`;
   - from the setup dialog, `modules enable|disable <module id>`, `order set <stage>,<stage>,...`, `order reset` and `config set -- <key> <value>`.
+
+  Each short-lived process has a time bound, and one that outlives it is stopped with `SIGKILL`, not `SIGTERM`, because a binary that hangs may ignore `SIGTERM`:
+  - a command above, 30 s (`COMMAND_TIMEOUT_MS`), and `start`, 45 s (`START_TIMEOUT_MS`);
+  - a setup dialog read (`modules list`, `order show`, `config show`, `config files` and `media list`, one at a time on one child), 30 s. The read then fails with "omarchy-broadcast did not answer within 30 s", and reopening the dialog reads again;
+  - a gallery step (a `media` command, `omarchy-menu-images` or `omarchy-file-select`), 610 s (`MEDIA_WATCHDOG_MS`), just past `omarchy-file-select`'s own 600 s;
+  - the two constant `sh -c` lookups, 5 s (`LOOKUP_TIMEOUT_MS`). A lookup that times out counts as not found;
+  - the long-lived `watch --json` child has no bound: it is meant to run, and it restarts with the backoff above when it exits (the `preview --json` child runs while a panel is open and is not bounded either).
 
   A new click is ignored while one runs. Setting writes and Reset to defaults instead wait behind it (see [Camera settings](panel.md#camera-settings)), and the queue never drops a command that is not a setting write.
 - **What is passed back.** Nothing else the daemon reports is passed back on the command line.
@@ -140,17 +147,25 @@ Notes on the tools:
   systemctl --user enable --now omarchy-broadcastd
   ```
 
+- **Every `systemctl` and `journalctl` line is display text.** The plugin executes none of them. They are shown in the docs or in the panel for the user to run in a terminal:
+  - `systemctl --user enable --now omarchy-broadcastd` (the panel's not-running message, [INSTALL.md](../INSTALL.md), above);
+  - `systemctl --user restart omarchy-broadcastd` ([INSTALL.md](../INSTALL.md)) and `systemctl --user kill -s HUP omarchy-broadcastd` ([troubleshooting.md](troubleshooting.md)), in the docs only;
+  - `journalctl --user -u omarchy-broadcastd`, in the panel's "not answering" message and in the setup dialog's Diagnostics, and in [INSTALL.md](../INSTALL.md).
+
+  `tests/check-source.py` pins this: "systemctl and journalctl appear only as displayed command text".
+
 - **External dependency.** The plugin is a client and needs the external daemon, `omarchy-broadcastd` and its `omarchy-broadcast` CLI, which come from the AUR (`omarchy-broadcast-bin`, prebuilt, or `omarchy-broadcast-git`, built from source; see [INSTALL.md](../INSTALL.md#install-the-daemon)). Nothing in this repository installs it.
 - **External commands the plugin runs**, each as an argument list (the only shell is the two constant `sh -c` scripts described below):
   - `omarchy-broadcast`, the CLI: `watch --json` for the state, `preview --json` for the live preview, `start` for the Start button, and the commands that change the daemon's state, such as `on`, `off`, `settings set`, `modules`, `order`, `config` and `media`;
   - `omarchy-menu-images` and `omarchy-file-select`, Omarchy's image picker and file chooser, for the background and away image galleries;
   - `sh -c`, with a constant script, to find the CLI and those two tools on `PATH`.
 
-  The plugin runs no package manager and no `systemctl`, and needs no root.
+  The plugin runs no package manager, no `systemctl` and no `journalctl`, and needs no root.
 - **Scan triggers that are not plugin behaviour.** Some marketplace scan triggers are not plugin behaviour.
   - The `yay` install line (package manager) and the `sudo`/pacman mentions (privilege) in [INSTALL.md](../INSTALL.md) are the daemon's install instructions, for you to run in a terminal. The plugin does not run them.
   - The git clone in `tests/check-all.sh` (a remote build) is test-only: it fetches an Omarchy release for `--omarchy-ref` and is never loaded by the shell.
-  - The plugin itself never runs a package manager, `sudo`, `git` or `systemctl`.
+  - The plugin itself never runs a package manager, `sudo`, `git`, `systemctl` or `journalctl`.
+  - The scripts in `tests/` that have the executable bit (the fake CLI and its helpers) are test fixtures, not bundled executables; the shell never loads them.
 - **`tests/` is test-only.** It contains `pgrep`/`kill` calls (confined to processes the harness started, counted by a marker path inside its own work directory), `sh -c`, and an executable fake CLI. None of it is loaded by the shell.
 - **The two `sh -c`** in the plugin code are the CLI resolver and the lookup of the gallery's two tools (`omarchy-menu-images`, `omarchy-file-select`) on `PATH`. Both scripts are constants. Nothing is interpolated into them (the lookup gets the two tool names as positional arguments). Every other command is an argument list. A path the image picker or the file chooser returns is passed as one argument, and the picker's only when it is exactly a path the daemon's gallery list just named.
 - **Identity and licence.** The plugin id is `br.com.dias.omarchy-broadcast`, which the shell's manifest validator accepts (see [Testing the plugin](#testing-the-plugin)). It stays fixed: renaming it would break existing installs. The licence files are at the root of this repository, `LICENSE-MIT` and `LICENSE-APACHE` (`MIT OR Apache-2.0`, as in `manifest.json`). The plugin directory itself holds none.
