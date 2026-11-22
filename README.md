@@ -6,7 +6,7 @@
 
 This plugin is the control panel for [omarchy-broadcast](https://github.com/rsd/omarchy-broadcast), a daemon that turns your webcam into a virtual camera and your microphone into a virtual microphone, with effects applied on your machine. The daemon does the work. The plugin is the controls: an icon in the bar that shows the camera's state, a panel with the effects, the camera and the microphone, and a setup dialog. It is a client of the daemon and does not include it, so you install the daemon first.
 
-## What you get
+## Features
 
 **Effects.** The Effects tab offers what the daemon's modules can do. The plugin names no effect: it draws what the daemon publishes, so a module you install appears with no plugin update.
 
@@ -41,14 +41,14 @@ With an NVIDIA RTX GPU, the optional NVIDIA Maxine modules add the same effects 
 
 **Details.** The (i) button shows live figures while the camera runs (frame rate, latency, CPU and GPU load), with a **Copy** button for bug reports.
 
-## Why use it
+## How it works
 
 - **Changes apply live.** Switch an effect or move a slider while the camera is in use, and video apps receive the change at once. Effect settings need no restart and no terminal.
 - **One middle click turns the camera off.** The bar icon shows whether the camera is off, ready, starting or in use, and a middle click flips it.
 - **The daemon runs locally, in any app.** Effects run on your machine. Chrome, OBS, Zoom and Discord select the virtual camera like any other camera.
 - **The plugin is only the controls.** It needs no root, runs no package manager and no service manager. It never opens a camera device: it runs the `omarchy-broadcast` CLI as argument lists, never through a shell. It does not poll, and a hidden preview never starts the camera.
 
-## Make it yours
+## Setup dialog
 
 A right click on the bar icon opens the setup dialog. Turn effect modules on or off, change the order their stages run in, choose the backend profile and which module provides each stage, edit the daemon's configuration, manage your backgrounds and away image, and read a diagnosis when something does not run.
 
@@ -87,7 +87,7 @@ omarchy plugin remove br.com.dias.omarchy-broadcast
 
 If a placement is left in the bar layout, remove it with the shell's bar commands and reload the shell; [INSTALL.md](INSTALL.md#uninstall) shows how. Removing the plugin does not touch the daemon. [INSTALL.md](INSTALL.md) has every step: the requirements, a local checkout, the `cliPath` setting, updating, the daemon's uninstall steps (linked) and troubleshooting.
 
-## Learn more
+## Documentation
 
 - [INSTALL.md](INSTALL.md): the requirements, the install steps, updating, uninstalling and the connection messages.
 - [LIMITATIONS.md](LIMITATIONS.md): what the plugin cannot do, and what to do about it.
