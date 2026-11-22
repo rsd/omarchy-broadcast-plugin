@@ -15,7 +15,7 @@ On any machine (the CPU, or an Intel GPU or NPU, with the open ONNX models):
 - Background blur, with its strength, and background replacement with a picture, an animated image or a video. Pick it from a gallery of bundled backgrounds and your own.
 - Noise removal for the microphone.
 
-With an NVIDIA RTX GPU (the optional NVIDIA Maxine modules):
+With an NVIDIA RTX GPU, the optional NVIDIA Maxine modules add the same effects as the NVIDIA Broadcast app on Windows, built on the same NVIDIA Maxine SDKs:
 
 - Background blur and replacement on the GPU.
 - Video noise removal, which clears the grain of a webcam in a dim room.
@@ -104,7 +104,7 @@ The external dependency, the commands it runs, the scan triggers and the test-on
 
 ## Affiliation
 
-The Omarchy Broadcast bar plugin is not affiliated with or endorsed by NVIDIA. NVIDIA and Maxine are trademarks of NVIDIA Corporation.
+The Omarchy Broadcast bar plugin is not affiliated with or endorsed by NVIDIA. NVIDIA, NVIDIA Broadcast and Maxine are trademarks of NVIDIA Corporation.
 
 ## Licence
 
